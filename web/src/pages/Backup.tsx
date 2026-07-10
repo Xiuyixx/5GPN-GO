@@ -60,11 +60,13 @@ export default function Backup() {
 
   return (
     <AppShell>
-      <Heading>Backup</Heading>
-      <Text className="mt-1">Export a tar.gz of the active rule set plus snapshot metadata. Uploads are validated round-trip but restore lands in M2 S4.</Text>
+      <div className="mb-6">
+        <Heading>Backup</Heading>
+        <Text className="mt-1">Export a tar.gz of the active rule set plus snapshot metadata · uploads validate the round-trip.</Text>
+      </div>
 
       {err && (
-        <div className="mt-4">
+        <div className="mb-4">
           <Alert open onClose={() => setErr(null)}>
             <AlertTitle>Something went wrong</AlertTitle>
             <AlertBody>{err}</AlertBody>
@@ -72,41 +74,55 @@ export default function Backup() {
         </div>
       )}
       {importResult && (
-        <div className="mt-4">
+        <div className="mb-4">
           <Alert open onClose={() => setImportResult(null)}>
             <AlertTitle>Import summary</AlertTitle>
             <AlertBody>
-              {importResult.entries} entries, {importResult.total_bytes} bytes
-              {importResult.note ? ` — ${importResult.note}` : ''}
+              {importResult.entries} entries · {importResult.total_bytes} bytes
+              {importResult.note ? ` · ${importResult.note}` : ''}
             </AlertBody>
           </Alert>
         </div>
       )}
 
-      <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <div className="rounded-xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-          <Heading level={3}>Export</Heading>
-          <Text className="mt-1">Contains rules/active.yaml + snapshots/manifest.json + README.txt.</Text>
-          <div className="mt-4">
-            <Button color="indigo" onClick={downloadExport}>Download tar.gz</Button>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div className="glass tile relative overflow-hidden p-6">
+          <div
+            aria-hidden
+            className="absolute inset-x-0 -top-8 h-24 opacity-70 blur-2xl"
+            style={{ background: 'radial-gradient(60% 100% at 30% 0%, rgb(99 102 241 / 0.35), transparent 70%)' }}
+          />
+          <div className="relative">
+            <Heading level={3}>Export</Heading>
+            <Text className="mt-2">Contains rules/active.yaml, snapshots/manifest.json, and a README.</Text>
+            <div className="mt-4">
+              <Button color="indigo" onClick={downloadExport}>Download tar.gz</Button>
+            </div>
           </div>
         </div>
-        <div className="rounded-xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-          <Heading level={3}>Import (dry-run)</Heading>
-          <Text className="mt-1">Uploads to verify structure. Restore is applied automatically in M2 S4.</Text>
-          <div className="mt-4">
-            <input
-              ref={fileRef}
-              type="file"
-              accept=".tar.gz,application/gzip"
-              className="block w-full text-sm text-zinc-600 file:mr-3 file:rounded file:border-0 file:bg-zinc-100 file:px-3 file:py-1.5 file:text-zinc-900 hover:file:bg-zinc-200 dark:text-zinc-300 dark:file:bg-zinc-800 dark:file:text-zinc-100"
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) upload(f);
-              }}
-              disabled={importing}
-            />
-            {importing && <Text className="mt-2">Validating…</Text>}
+        <div className="glass tile relative overflow-hidden p-6">
+          <div
+            aria-hidden
+            className="absolute inset-x-0 -top-8 h-24 opacity-70 blur-2xl"
+            style={{ background: 'radial-gradient(60% 100% at 30% 0%, rgb(20 184 166 / 0.35), transparent 70%)' }}
+          />
+          <div className="relative">
+            <Heading level={3}>Import (dry-run)</Heading>
+            <Text className="mt-2">Uploads to verify structure. Real restore lands in M2 S4.</Text>
+            <div className="mt-4">
+              <input
+                ref={fileRef}
+                type="file"
+                accept=".tar.gz,application/gzip"
+                className="block w-full text-sm text-zinc-600 file:mr-3 file:rounded-lg file:border-0 file:bg-white/50 file:px-3 file:py-1.5 file:text-zinc-900 file:backdrop-blur hover:file:bg-white/70 dark:text-zinc-300 dark:file:bg-white/10 dark:file:text-zinc-100 dark:hover:file:bg-white/20"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) upload(f);
+                }}
+                disabled={importing}
+              />
+              {importing && <Text className="mt-2">Validating…</Text>}
+            </div>
           </div>
         </div>
       </div>

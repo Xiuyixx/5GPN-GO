@@ -52,12 +52,24 @@ export default function Logs() {
 
   return (
     <AppShell>
-      <Heading>Logs</Heading>
-      <Text className="mt-1">Live tail via SSE. M2 S4 will pipe real journalctl output; today the stream is synthetic.</Text>
+      <div className="mb-6">
+        <Heading>Logs</Heading>
+        <Text className="mt-1">Live tail via SSE · M2 S4 pipes real journalctl.</Text>
+      </div>
 
-      <form className="mt-6 rounded-xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900" onSubmit={(e) => e.preventDefault()}>
+      <form className="glass p-6" onSubmit={(e) => e.preventDefault()}>
         <Fieldset>
-          <Legend>Stream {connected ? '(connected)' : '(disconnected)'}</Legend>
+          <Legend>
+            Stream
+            <span className={`ml-2 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ${
+              connected
+                ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                : 'bg-red-500/15 text-red-700 dark:text-red-300'
+            }`}>
+              <span className={`h-1.5 w-1.5 rounded-full ${connected ? 'bg-emerald-500' : 'bg-red-500'} ${connected ? 'animate-pulse' : ''}`} />
+              {connected ? 'connected' : 'disconnected'}
+            </span>
+          </Legend>
           <FieldGroup className="sm:grid sm:grid-cols-2 sm:gap-4">
             <Field>
               <Label>Unit</Label>
@@ -77,22 +89,24 @@ export default function Logs() {
         </div>
       </form>
 
-      <pre className="mt-6 max-h-96 overflow-auto rounded-xl border border-zinc-200 bg-zinc-950 p-4 text-xs text-zinc-100">
-        {filtered.length === 0
-          ? <span className="text-zinc-500">waiting for stream…</span>
-          : filtered.map((l) => (
-              <div key={l.seq}>
-                <span className="text-zinc-500">{new Date(l.ts).toLocaleTimeString()}</span>
-                {' '}
-                <span className="text-cyan-300">[{l.unit}]</span>
-                {' '}
-                <span className="text-emerald-300">{l.level}</span>
-                {' '}
-                {l.msg}
-              </div>
-            ))
-        }
-      </pre>
+      <div className="glass mt-6 overflow-hidden">
+        <pre className="max-h-[28rem] overflow-auto rounded-2xl bg-zinc-950/70 p-4 text-xs text-zinc-100 backdrop-blur">
+          {filtered.length === 0
+            ? <span className="text-zinc-500">waiting for stream…</span>
+            : filtered.map((l) => (
+                <div key={l.seq} className="whitespace-pre-wrap">
+                  <span className="text-zinc-500">{new Date(l.ts).toLocaleTimeString()}</span>
+                  {' '}
+                  <span className="text-cyan-300">[{l.unit}]</span>
+                  {' '}
+                  <span className="text-emerald-300">{l.level}</span>
+                  {' '}
+                  {l.msg}
+                </div>
+              ))
+          }
+        </pre>
+      </div>
     </AppShell>
   );
 }

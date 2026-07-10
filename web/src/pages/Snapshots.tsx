@@ -42,11 +42,13 @@ export default function Snapshots() {
 
   return (
     <AppShell>
-      <Heading>Snapshots</Heading>
-      <Text className="mt-1">Every apply writes an immutable snapshot. Rollback restores the paired rule_version as the active one.</Text>
+      <div className="mb-6">
+        <Heading>Snapshots</Heading>
+        <Text className="mt-1">Every apply writes an immutable snapshot · rollback restores the paired rule_version as active.</Text>
+      </div>
 
       {err && (
-        <div className="mt-4">
+        <div className="mb-4">
           <Alert open onClose={() => setErr(null)}>
             <AlertTitle>Something went wrong</AlertTitle>
             <AlertBody>{err}</AlertBody>
@@ -54,7 +56,7 @@ export default function Snapshots() {
         </div>
       )}
       {ok && (
-        <div className="mt-4">
+        <div className="mb-4">
           <Alert open onClose={() => setOk(null)}>
             <AlertTitle>Rollback complete</AlertTitle>
             <AlertBody>{ok}</AlertBody>
@@ -62,7 +64,7 @@ export default function Snapshots() {
         </div>
       )}
 
-      <div className="mt-6">
+      <div className="glass p-2">
         <Table>
           <TableHead>
             <TableRow>
@@ -83,7 +85,7 @@ export default function Snapshots() {
             )}
             {snaps.map((s, i) => (
               <TableRow key={s.id}>
-                <TableCell>{s.id}</TableCell>
+                <TableCell className="metric">{s.id}</TableCell>
                 <TableCell>{new Date(s.created_at).toLocaleString()}</TableCell>
                 <TableCell><code className="text-xs">{s.config_hash.slice(0, 12)}…</code></TableCell>
                 <TableCell>{s.note || '—'}</TableCell>

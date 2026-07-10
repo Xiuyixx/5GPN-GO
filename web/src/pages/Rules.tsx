@@ -70,10 +70,10 @@ export default function Rules() {
 
   return (
     <AppShell>
-      <div className="flex items-center justify-between">
+      <div className="mb-6 flex items-start justify-between">
         <div>
           <Heading>Rules</Heading>
-          <Text className="mt-1">Sandbox dry-run + auto-rollback pipeline. Editing individual rules lands in a future slice.</Text>
+          <Text className="mt-1">Sandbox dry-run + auto-rollback pipeline · manual CRUD lands in a future slice.</Text>
         </div>
         <div className="flex gap-3">
           <Button color="zinc" onClick={runDryRun} disabled={busy}>Dry-run</Button>
@@ -82,7 +82,7 @@ export default function Rules() {
       </div>
 
       {error && (
-        <div className="mt-4">
+        <div className="mb-4">
           <Alert open onClose={() => setError(null)}>
             <AlertTitle>Something went wrong</AlertTitle>
             <AlertBody>{error}</AlertBody>
@@ -91,7 +91,7 @@ export default function Rules() {
       )}
 
       {apply && (
-        <div className="mt-4">
+        <div className="mb-4">
           <Alert open onClose={() => setApply(null)}>
             <AlertTitle>Apply result</AlertTitle>
             <AlertBody>
@@ -102,7 +102,7 @@ export default function Rules() {
         </div>
       )}
 
-      <div className="mt-6">
+      <div className="glass p-2">
         <Table>
           <TableHead>
             <TableRow>
@@ -117,11 +117,11 @@ export default function Rules() {
           <TableBody>
             {(rules.length ? rules : SAMPLE_RULES).map((r) => (
               <TableRow key={r.id}>
-                <TableCell>{r.id}</TableCell>
+                <TableCell className="font-medium">{r.id}</TableCell>
                 <TableCell>{r.kind}</TableCell>
                 <TableCell>{r.pattern || '—'}</TableCell>
                 <TableCell>{r.action}</TableCell>
-                <TableCell>{r.priority}</TableCell>
+                <TableCell className="metric">{r.priority}</TableCell>
                 <TableCell>
                   <Badge color={r.enabled ? 'lime' : 'zinc'}>{r.enabled ? 'enabled' : 'disabled'}</Badge>
                 </TableCell>
@@ -133,8 +133,8 @@ export default function Rules() {
 
       {dry && (
         <div className="mt-8">
-          <Heading level={2}>Dry-run — passed {dry.passed}, failed {dry.failed}</Heading>
-          <div className="mt-4">
+          <Heading level={2}>Dry-run · passed {dry.passed} · failed {dry.failed}</Heading>
+          <div className="glass mt-4 p-2">
             <Table>
               <TableHead>
                 <TableRow>
@@ -149,7 +149,7 @@ export default function Rules() {
               <TableBody>
                 {dry.results.map((r) => (
                   <TableRow key={r.domain}>
-                    <TableCell>{r.domain}</TableCell>
+                    <TableCell className="font-medium">{r.domain}</TableCell>
                     <TableCell>{r.matched_rule || '—'}</TableCell>
                     <TableCell>{r.matched_kind || '—'}</TableCell>
                     <TableCell>{r.actual_exit || '—'}</TableCell>

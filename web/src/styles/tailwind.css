@@ -1,5 +1,174 @@
 @import "tailwindcss";
 
+/* -------------------------------------------------------------------------
+ * Theme
+ *
+ * A minimal Apple-style palette layered on top of Catalyst's zinc-first
+ * defaults. Colors here are exposed as CSS custom properties so the
+ * glass helpers below can compose them without knowing Tailwind classes.
+ * ------------------------------------------------------------------------- */
 @theme {
-  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-sans:
+    ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Monaco, "Cascadia Mono", monospace;
+
+  /* Ambient tint used for gradients + glow blobs. */
+  --ambient-1: 99 102 241;   /* indigo */
+  --ambient-2: 20 184 166;   /* teal */
+  --ambient-3: 236 72 153;   /* pink */
+}
+
+/* -------------------------------------------------------------------------
+ * Base
+ * ------------------------------------------------------------------------- */
+html, body, #root {
+  min-height: 100%;
+}
+
+body {
+  color: rgb(24 24 27);
+  background: rgb(250 250 251);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+@media (prefers-color-scheme: dark) {
+  body {
+    color: rgb(244 244 245);
+    background: rgb(9 9 11);
+  }
+}
+
+/* -------------------------------------------------------------------------
+ * Ambient background
+ *
+ * A soft moving gradient + three color blobs live behind everything. We
+ * put them on <body> so page-scroll can't lag them, and use a fixed
+ * position so switching routes doesn't restart the animation.
+ * ------------------------------------------------------------------------- */
+.ambient-bg {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.ambient-bg::before {
+  content: "";
+  position: absolute;
+  inset: -20%;
+  background:
+    radial-gradient(60% 50% at 15% 20%, rgb(var(--ambient-1) / 0.30), transparent 60%),
+    radial-gradient(55% 45% at 85% 30%, rgb(var(--ambient-2) / 0.24), transparent 60%),
+    radial-gradient(55% 45% at 50% 90%, rgb(var(--ambient-3) / 0.24), transparent 60%);
+  filter: blur(60px) saturate(120%);
+  animation: ambient-drift 24s ease-in-out infinite alternate;
+}
+
+.ambient-bg::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 0.65), rgb(255 255 255 / 0.25));
+  backdrop-filter: blur(0.5px);
+}
+
+@media (prefers-color-scheme: dark) {
+  .ambient-bg::after {
+    background:
+      linear-gradient(180deg, rgb(9 9 11 / 0.35), rgb(9 9 11 / 0.65));
+  }
+}
+
+@keyframes ambient-drift {
+  0%   { transform: translate3d(0, 0, 0) scale(1); }
+  50%  { transform: translate3d(2%, -3%, 0) scale(1.05); }
+  100% { transform: translate3d(-2%, 2%, 0) scale(1.02); }
+}
+
+/* -------------------------------------------------------------------------
+ * Glass primitives
+ *
+ * These utility classes wrap Catalyst content in a frosted-glass panel.
+ * Apply them on the outer <div> around a component; the component itself
+ * keeps its stock look so we don't fork Catalyst.
+ * ------------------------------------------------------------------------- */
+.glass {
+  background: rgb(255 255 255 / 0.6);
+  border: 1px solid rgb(255 255 255 / 0.35);
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  box-shadow:
+    0 1px 0 rgb(255 255 255 / 0.5) inset,
+    0 10px 40px -12px rgb(0 0 0 / 0.15);
+  border-radius: 1rem;
+  transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1),
+              box-shadow 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.glass:hover {
+  box-shadow:
+    0 1px 0 rgb(255 255 255 / 0.5) inset,
+    0 20px 60px -12px rgb(0 0 0 / 0.22);
+}
+
+.glass-strong {
+  background: rgb(255 255 255 / 0.78);
+  border: 1px solid rgb(255 255 255 / 0.5);
+  backdrop-filter: blur(30px) saturate(180%);
+  -webkit-backdrop-filter: blur(30px) saturate(180%);
+  box-shadow:
+    0 1px 0 rgb(255 255 255 / 0.7) inset,
+    0 12px 48px -12px rgb(0 0 0 / 0.18);
+  border-radius: 1rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  .glass {
+    background: rgb(24 24 27 / 0.55);
+    border-color: rgb(255 255 255 / 0.08);
+    box-shadow:
+      0 1px 0 rgb(255 255 255 / 0.06) inset,
+      0 20px 60px -20px rgb(0 0 0 / 0.6);
+  }
+  .glass-strong {
+    background: rgb(24 24 27 / 0.75);
+    border-color: rgb(255 255 255 / 0.1);
+  }
+}
+
+/* Subtle hover lift used by dashboard tiles. */
+.tile {
+  transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1),
+              box-shadow 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.tile:hover {
+  transform: translateY(-2px);
+}
+
+/* -------------------------------------------------------------------------
+ * Numeric emphasis
+ * ------------------------------------------------------------------------- */
+.metric {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" on, "lnum" on;
+  letter-spacing: -0.01em;
+}
+
+/* -------------------------------------------------------------------------
+ * Fade-in that respects reduced motion.
+ * ------------------------------------------------------------------------- */
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.fade-up {
+  animation: fade-up 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .fade-up, .ambient-bg::before { animation: none; }
 }

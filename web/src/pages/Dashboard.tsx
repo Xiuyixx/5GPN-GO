@@ -14,15 +14,29 @@ function fmtBytes(n: number): string {
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} GiB`;
 }
 
-function Tile({ title, value, hint }: { title: string; value: string; hint?: string }) {
+function Tile({ title, value, hint, accent }: { title: string; value: string; hint?: string; accent?: string }) {
   return (
-    <div className="rounded-xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-      <div className="text-sm text-zinc-500 dark:text-zinc-400">{title}</div>
-      <div className="mt-2 text-2xl font-semibold tabular-nums">{value}</div>
-      {hint && <div className="mt-1 text-xs text-zinc-400 dark:text-zinc-500">{hint}</div>}
+    <div className="glass tile relative overflow-hidden p-5">
+      <div
+        aria-hidden
+        className="absolute inset-x-0 -top-8 h-24 opacity-70 blur-2xl"
+        style={{ background: accent ?? 'radial-gradient(60% 100% at 30% 0%, rgb(99 102 241 / 0.35), transparent 70%)' }}
+      />
+      <div className="relative">
+        <div className="text-xs font-medium uppercase tracking-wider text-zinc-500">{title}</div>
+        <div className="metric mt-3 text-3xl font-semibold text-zinc-900 dark:text-zinc-50">{value}</div>
+        {hint && <div className="mt-1 text-xs text-zinc-400 dark:text-zinc-500">{hint}</div>}
+      </div>
     </div>
   );
 }
+
+const TILE_ACCENTS = [
+  'radial-gradient(60% 100% at 30% 0%, rgb(99 102 241 / 0.35), transparent 70%)',
+  'radial-gradient(60% 100% at 30% 0%, rgb(20 184 166 / 0.35), transparent 70%)',
+  'radial-gradient(60% 100% at 30% 0%, rgb(236 72 153 / 0.30), transparent 70%)',
+  'radial-gradient(60% 100% at 30% 0%, rgb(250 204 21 / 0.30), transparent 70%)',
+];
 
 export default function Dashboard() {
   const [samples, setSamples] = useState<MetricsSample[]>([]);
@@ -52,62 +66,77 @@ export default function Dashboard() {
 
   return (
     <AppShell>
-      <Heading>Dashboard</Heading>
-      <Text className="mt-1">Live metrics update every 5s. Backend samples are stubbed until M2 S4 wires the real collector.</Text>
-      {err && <Text className="mt-2 text-red-600">Error: {err}</Text>}
+      <div className="mb-6">
+        <Heading>Dashboard</Heading>
+        <Text className="mt-1">Live metrics · updates every 5 seconds.</Text>
+        {err && <Text className="mt-2 text-red-600">Error: {err}</Text>}
+      </div>
 
-      <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Tile
           title="Active exit"
           value={exits?.active ?? '—'}
           hint={exits ? `${exits.exits.length} exits configured` : ''}
+          accent={TILE_ACCENTS[0]}
         />
         <Tile
-          title="Live connections"
+          title="Connections"
           value={latest ? String(latest.conns) : '—'}
+          hint="live count"
+          accent={TILE_ACCENTS[1]}
         />
         <Tile
-          title="CPU (5s)"
+          title="CPU"
           value={latest ? `${latest.cpu.toFixed(1)}%` : '—'}
+          hint="5s window"
+          accent={TILE_ACCENTS[2]}
         />
         <Tile
           title="Memory"
           value={latest ? fmtBytes(latest.mem_bytes) : '—'}
+          hint="resident set"
+          accent={TILE_ACCENTS[3]}
         />
       </div>
 
       <div className="mt-8 grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <div className="rounded-xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="glass p-5">
           <Heading level={3}>Recent samples</Heading>
           <Divider className="my-3" />
           <div className="max-h-72 overflow-auto text-sm">
             <table className="w-full text-left">
               <thead>
                 <tr className="text-zinc-500">
-                  <th>Time</th><th>CPU</th><th>Conns</th><th>Tx</th><th>Rx</th>
+                  <th className="py-2 font-medium">Time</th>
+                  <th className="py-2 font-medium">CPU</th>
+                  <th className="py-2 font-medium">Conns</th>
+                  <th className="py-2 font-medium">Tx</th>
+                  <th className="py-2 font-medium">Rx</th>
                 </tr>
               </thead>
-              <tbody>
+              <tbody className="metric">
                 {samples.slice(-12).reverse().map((s) => (
-                  <tr key={s.ts}>
-                    <td>{new Date(s.ts).toLocaleTimeString()}</td>
-                    <td>{s.cpu.toFixed(1)}%</td>
-                    <td>{s.conns}</td>
-                    <td>{fmtBytes(s.tx_bytes)}</td>
-                    <td>{fmtBytes(s.rx_bytes)}</td>
+                  <tr key={s.ts} className="border-t border-zinc-100 dark:border-zinc-800/60">
+                    <td className="py-2 text-zinc-500">{new Date(s.ts).toLocaleTimeString()}</td>
+                    <td className="py-2">{s.cpu.toFixed(1)}%</td>
+                    <td className="py-2">{s.conns}</td>
+                    <td className="py-2">{fmtBytes(s.tx_bytes)}</td>
+                    <td className="py-2">{fmtBytes(s.rx_bytes)}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
         </div>
-        <div className="rounded-xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="glass p-5">
           <Heading level={3}>Exits</Heading>
           <Divider className="my-3" />
           <ul className="space-y-2 text-sm">
             {exits?.exits.map((e) => (
-              <li key={e.id} className="flex items-center justify-between">
-                <span>{e.id} <span className="text-zinc-500">({e.protocol})</span></span>
+              <li key={e.id} className="flex items-center justify-between rounded-lg px-2 py-1.5 transition-colors hover:bg-white/40 dark:hover:bg-white/5">
+                <span className="font-medium">
+                  {e.id} <span className="ml-1 font-normal text-zinc-500">· {e.protocol}</span>
+                </span>
                 {e.active
                   ? <Badge color="lime">active</Badge>
                   : <Badge color="zinc">standby</Badge>}

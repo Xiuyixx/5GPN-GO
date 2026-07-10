@@ -1,12 +1,9 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router';
-import { AuthLayout } from '../components/ui/auth-layout';
 import { Button } from '../components/ui/button';
 import { Field, FieldGroup, Fieldset, Label, Legend } from '../components/ui/fieldset';
 import { Input } from '../components/ui/input';
 import { Alert, AlertBody, AlertTitle } from '../components/ui/alert';
-import { Heading } from '../components/ui/heading';
-import { Text } from '../components/ui/text';
 import { api } from '../api/client';
 import type { Me } from '../api/client';
 
@@ -38,37 +35,50 @@ export default function Bootstrap({ onDone }: BootstrapProps) {
   }
 
   return (
-    <AuthLayout>
-      <form onSubmit={onSubmit} className="grid w-full max-w-sm grid-cols-1 gap-8">
-        <Heading>First-time setup</Heading>
-        <Text>Paste the setup token printed on the daemon's first boot and choose your admin credentials.</Text>
-        {error && (
-          <Alert open onClose={() => setError(null)}>
-            <AlertTitle>Setup failed</AlertTitle>
-            <AlertBody>{error}</AlertBody>
-          </Alert>
-        )}
-        <Fieldset>
-          <Legend className="sr-only">Setup fields</Legend>
-          <FieldGroup>
-            <Field>
-              <Label>Setup token</Label>
-              <Input required value={token} onChange={(e) => setToken(e.target.value)} />
-            </Field>
-            <Field>
-              <Label>Username</Label>
-              <Input required value={username} onChange={(e) => setUsername(e.target.value)} />
-            </Field>
-            <Field>
-              <Label>Password (min. 8 characters)</Label>
-              <Input required type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
-            </Field>
-          </FieldGroup>
-        </Fieldset>
-        <Button type="submit" disabled={busy} className="w-full">
-          {busy ? 'Claiming…' : 'Claim panel'}
-        </Button>
-      </form>
-    </AuthLayout>
+    <>
+      <div className="ambient-bg" aria-hidden />
+      <div className="fade-up flex min-h-screen items-center justify-center p-6">
+        <div className="glass-strong w-full max-w-md p-8">
+          <div className="mb-6 flex items-center gap-3">
+            <div className="grid h-11 w-11 place-items-center rounded-2xl bg-gradient-to-br from-indigo-500 via-violet-500 to-teal-400 text-sm font-bold text-white shadow-lg shadow-indigo-500/30">
+              5G
+            </div>
+            <div>
+              <div className="text-xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">First-time setup</div>
+              <div className="text-xs uppercase tracking-widest text-zinc-500">claim your panel</div>
+            </div>
+          </div>
+
+          <form onSubmit={onSubmit} className="grid grid-cols-1 gap-6">
+            {error && (
+              <Alert open onClose={() => setError(null)}>
+                <AlertTitle>Setup failed</AlertTitle>
+                <AlertBody>{error}</AlertBody>
+              </Alert>
+            )}
+            <Fieldset>
+              <Legend className="sr-only">Setup fields</Legend>
+              <FieldGroup>
+                <Field>
+                  <Label>Setup token</Label>
+                  <Input required value={token} onChange={(e) => setToken(e.target.value)} />
+                </Field>
+                <Field>
+                  <Label>Username</Label>
+                  <Input required value={username} onChange={(e) => setUsername(e.target.value)} />
+                </Field>
+                <Field>
+                  <Label>Password (min. 8 characters)</Label>
+                  <Input required type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+                </Field>
+              </FieldGroup>
+            </Fieldset>
+            <Button type="submit" disabled={busy} className="w-full">
+              {busy ? 'Claiming…' : 'Claim panel'}
+            </Button>
+          </form>
+        </div>
+      </div>
+    </>
   );
 }

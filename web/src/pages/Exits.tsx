@@ -65,11 +65,13 @@ export default function Exits() {
 
   return (
     <AppShell>
-      <Heading>Exits</Heading>
-      <Text className="mt-1">Add a proxy exit by pasting its share URI. Supported: ss / vmess / trojan / vless / hysteria2 / tuic / anytls / socks5 / http(s).</Text>
+      <div className="mb-6">
+        <Heading>Exits</Heading>
+        <Text className="mt-1">Add a proxy by pasting its share URI · ss / vmess / trojan / vless / hysteria2 / tuic / anytls / socks5 / http(s).</Text>
+      </div>
 
       {err && (
-        <div className="mt-4">
+        <div className="mb-4">
           <Alert open onClose={() => setErr(null)}>
             <AlertTitle>Something went wrong</AlertTitle>
             <AlertBody>{err}</AlertBody>
@@ -77,7 +79,7 @@ export default function Exits() {
         </div>
       )}
 
-      <form onSubmit={add} className="mt-6 rounded-xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+      <form onSubmit={add} className="glass p-6">
         <Fieldset>
           <Legend>Add exit</Legend>
           <FieldGroup>
@@ -96,7 +98,7 @@ export default function Exits() {
         </div>
       </form>
 
-      <div className="mt-6">
+      <div className="glass mt-6 p-2">
         <Table>
           <TableHead>
             <TableRow>
@@ -111,10 +113,10 @@ export default function Exits() {
           <TableBody>
             {state?.exits.map((e) => (
               <TableRow key={e.id}>
-                <TableCell>{e.id}</TableCell>
+                <TableCell className="font-medium">{e.id}</TableCell>
                 <TableCell>{e.protocol}</TableCell>
                 <TableCell>{e.server}</TableCell>
-                <TableCell>{e.port || '—'}</TableCell>
+                <TableCell className="metric">{e.port || '—'}</TableCell>
                 <TableCell>
                   {e.active ? <Badge color="lime">active</Badge> : <Badge color="zinc">standby</Badge>}
                 </TableCell>
