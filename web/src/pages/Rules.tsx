@@ -9,26 +9,30 @@ import { Input } from '../components/ui/input';
 import { Select } from '../components/ui/select';
 import { Field, FieldGroup, Fieldset, Label, Legend } from '../components/ui/fieldset';
 import { api } from '../api/client';
-import type { ApplyResponse, DryRunResponse, Rule, RuleKind } from '../api/client';
+import type { ApplyResponse, DryRunResponse, ExitsResponse, Rule, RuleKind } from '../api/client';
 
 const KINDS: RuleKind[] = [
   'DOMAIN', 'DOMAIN-SUFFIX', 'DOMAIN-KEYWORD',
   'GEOSITE', 'GEOIP', 'IP-CIDR', 'RULE-SET', 'MATCH',
 ];
 
-const DEFAULT_FIXTURES = [
-  { domain: 'baidu.cn',    expected_exit: 'direct' },
-  { domain: 'example.com', expected_exit: 'wg1' },
-];
+// Special actions that are always valid regardless of exits.
+const SPECIAL_ACTIONS = ['direct', 'block'];
 
 interface Draft extends Rule {
   _key: string;
 }
 
+interface FixtureDraft {
+  _key: string;
+  domain: string;
+  expected_exit: string;
+}
+
 let keyCounter = 0;
 function makeKey(): string {
   keyCounter += 1;
-  return `r${Date.now().toString(36)}-${keyCounter}`;
+  return `k${Date.now().toString(36)}-${keyCounter}`;
 }
 
 function toDraft(r: Rule): Draft {
@@ -38,6 +42,8 @@ function toDraft(r: Rule): Draft {
 export default function Rules() {
   const [active, setActive] = useState<Rule[]>([]);
   const [draft, setDraft] = useState<Draft[]>([]);
+  const [exits, setExits] = useState<string[]>([]);
+  const [fixtures, setFixtures] = useState<FixtureDraft[]>([]);
   const [editing, setEditing] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dry, setDry] = useState<DryRunResponse | null>(null);
@@ -46,12 +52,19 @@ export default function Rules() {
   const [note, setNote] = useState('');
   const [dryOk, setDryOk] = useState(false);
 
+  // Available action options: direct/block + every configured exit id.
+  const actionOptions = useMemo(() => [...SPECIAL_ACTIONS, ...exits], [exits]);
+
   async function refresh() {
     try {
-      const { rules } = await api.get<{ rules: Rule[] }>('/api/v1/rules');
-      const list = rules ?? [];
+      const [rulesRes, exitsRes] = await Promise.all([
+        api.get<{ rules: Rule[] }>('/api/v1/rules'),
+        api.get<ExitsResponse>('/api/v1/exits'),
+      ]);
+      const list = rulesRes.rules ?? [];
       setActive(list);
       setDraft(list.map(toDraft));
+      setExits((exitsRes.exits ?? []).map((e) => e.id));
       setDry(null);
       setApplyRes(null);
       setDryOk(false);
@@ -88,10 +101,11 @@ export default function Rules() {
     const priority = draft.length
       ? Math.max(...draft.map((r) => r.priority)) + 10
       : 10;
+    const defaultAction = actionOptions[0] || 'direct';
     const _key = makeKey();
     setDraft((d) => [
       ...d,
-      { _key, id: `rule-${d.length + 1}`, kind: 'DOMAIN-SUFFIX', pattern: '', action: 'direct', priority, enabled: true },
+      { _key, id: `rule-${d.length + 1}`, kind: 'DOMAIN-SUFFIX', pattern: '', action: defaultAction, priority, enabled: true },
     ]);
     setEditing(_key);
     invalidate();
@@ -119,12 +133,32 @@ export default function Rules() {
     return list.map(({ _key, ...r }) => r);
   }
 
+  // Fixture editing.
+  function addFixture() {
+    setFixtures((f) => [
+      ...f,
+      { _key: makeKey(), domain: '', expected_exit: actionOptions[0] || 'direct' },
+    ]);
+    invalidate();
+  }
+  function patchFixture(key: string, changes: Partial<FixtureDraft>) {
+    setFixtures((f) => f.map((x) => (x._key === key ? { ...x, ...changes } : x)));
+    invalidate();
+  }
+  function removeFixture(key: string) {
+    setFixtures((f) => f.filter((x) => x._key !== key));
+    invalidate();
+  }
+
   async function runDryRun() {
     setError(null); setBusy('dryrun'); setDry(null);
     try {
+      const cleanFixtures = fixtures
+        .filter((f) => f.domain.trim())
+        .map(({ _key, ...f }) => f);
       const res = await api.post<DryRunResponse>('/api/v1/rules/dry-run', {
         rules: stripDrafts(draft),
-        fixtures: DEFAULT_FIXTURES,
+        fixtures: cleanFixtures,
       });
       setDry(res);
       setDryOk(res.failed === 0);
@@ -152,13 +186,15 @@ export default function Rules() {
     }
   }
 
+  const failedDetails = dry?.results.filter((r) => !r.pass) ?? [];
+
   return (
     <AppShell>
       <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
         <div>
           <Heading>Rules</Heading>
           <Text className="mt-1">
-            Click any row to edit · Dry-run must pass before Apply is enabled.
+            Edit rules · define test fixtures below · Dry-run must pass before Apply.
           </Text>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -225,11 +261,29 @@ export default function Rules() {
           <div className="font-semibold">Unsaved changes</div>
           <div className="mt-0.5">
             {dryOk
-              ? 'Dry-run passed — Apply is enabled.'
+              ? `Dry-run passed (${dry?.passed ?? 0} fixture${(dry?.passed ?? 0) === 1 ? '' : 's'}) — Apply is enabled.`
               : dry
-                ? `Dry-run failed (${dry.failed} fixture${dry.failed === 1 ? '' : 's'}). Fix rules or adjust priorities and re-run.`
-                : 'Run Dry-run before Apply to guard against regressions.'}
+                ? `Dry-run failed: ${failedDetails.length} of ${dry.results.length} fixture${dry.results.length === 1 ? '' : 's'}.`
+                : fixtures.filter((f) => f.domain.trim()).length === 0
+                  ? 'Add at least one fixture below (domain + expected exit), then run Dry-run.'
+                  : 'Run Dry-run before Apply to guard against regressions.'}
           </div>
+          {dry && !dryOk && failedDetails.length > 0 && (
+            <ul className="mt-2 space-y-1 text-xs">
+              {failedDetails.slice(0, 5).map((r) => (
+                <li key={r.domain}>
+                  <code className="rounded bg-red-500/10 px-1 py-0.5">{r.domain}</code>{' '}
+                  expected <strong>{r.expected_exit}</strong>, got <strong>{r.actual_exit || '—'}</strong>
+                  {r.matched_rule ? ` (matched ${r.matched_rule})` : ' (no rule matched)'}
+                </li>
+              ))}
+              {failedDetails.length > 5 && (
+                <li className="text-red-700/70 dark:text-red-300/70">
+                  … and {failedDetails.length - 5} more (see the results table below)
+                </li>
+              )}
+            </ul>
+          )}
         </div>
       )}
 
@@ -264,7 +318,11 @@ export default function Rules() {
                       ? <code className="text-xs">{r.pattern}</code>
                       : <span className="text-zinc-400">—</span>}
                   </TableCell>
-                  <TableCell>{r.action}</TableCell>
+                  <TableCell>
+                    {actionOptions.includes(r.action)
+                      ? <code className="text-xs">{r.action}</code>
+                      : <span className="text-red-600 dark:text-red-400 text-xs">{r.action} (unknown)</span>}
+                  </TableCell>
                   <TableCell>
                     <button
                       type="button"
@@ -325,12 +383,23 @@ export default function Rules() {
                     </Select>
                   </Field>
                   <Field>
-                    <Label>Action</Label>
-                    <Input
-                      value={r.action}
-                      onChange={(e) => patch(r._key, { action: e.target.value })}
-                      placeholder="direct / wg1 / trojan-jp / ..."
-                    />
+                    <Label>
+                      Action{' '}
+                      <span className="text-zinc-500 text-xs">
+                        (direct / block / one of your exits)
+                      </span>
+                    </Label>
+                    <Select value={r.action} onChange={(e) => patch(r._key, { action: e.target.value })}>
+                      {!actionOptions.includes(r.action) && (
+                        <option value={r.action}>{r.action} (unknown — will fail dry-run)</option>
+                      )}
+                      {actionOptions.map((a) => <option key={a} value={a}>{a}</option>)}
+                    </Select>
+                    {exits.length === 0 && (
+                      <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">
+                        No custom exits configured yet. Add one on the <a className="underline" href="/exits">Exits</a> page.
+                      </p>
+                    )}
                   </Field>
                   <Field className="sm:col-span-2">
                     <Label>Pattern {isMatch && <span className="text-zinc-500">(disabled for MATCH)</span>}</Label>
@@ -357,6 +426,65 @@ export default function Rules() {
         );
       })()}
 
+      {/* Fixtures editor: what Dry-run tests against. Empty = no assertions,
+          which means Dry-run only checks that the rules are syntactically
+          valid and can be rendered. */}
+      <div className="glass mt-6 p-6">
+        <div className="mb-3 flex items-center justify-between">
+          <div>
+            <Heading level={2}>Dry-run fixtures</Heading>
+            <Text className="mt-1 text-sm">
+              Each row asserts: given this domain, the ruleset must route it to the expected exit.
+              Empty = only syntax + render check.
+            </Text>
+          </div>
+          <Button plain onClick={addFixture}>+ Add fixture</Button>
+        </div>
+        {fixtures.length === 0 ? (
+          <div className="rounded border border-zinc-200/50 bg-zinc-50/40 px-4 py-3 text-sm text-zinc-600 dark:border-zinc-700/50 dark:bg-zinc-800/40 dark:text-zinc-400">
+            No fixtures. Dry-run will still validate syntax; add fixtures if you want to
+            assert specific routing decisions.
+          </div>
+        ) : (
+          <Table>
+            <TableHead>
+              <TableRow>
+                <TableHeader>Domain</TableHeader>
+                <TableHeader className="w-56">Expected exit</TableHeader>
+                <TableHeader className="w-16 text-right">Remove</TableHeader>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {fixtures.map((f) => (
+                <TableRow key={f._key} className="align-middle">
+                  <TableCell>
+                    <Input
+                      value={f.domain}
+                      onChange={(e) => patchFixture(f._key, { domain: e.target.value })}
+                      placeholder="e.g. www.example.com"
+                    />
+                  </TableCell>
+                  <TableCell>
+                    <Select
+                      value={f.expected_exit}
+                      onChange={(e) => patchFixture(f._key, { expected_exit: e.target.value })}
+                    >
+                      {!actionOptions.includes(f.expected_exit) && (
+                        <option value={f.expected_exit}>{f.expected_exit} (unknown)</option>
+                      )}
+                      {actionOptions.map((a) => <option key={a} value={a}>{a}</option>)}
+                    </Select>
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <Button plain aria-label="remove fixture" onClick={() => removeFixture(f._key)}>✕</Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+      </div>
+
       <form className="glass mt-6 p-6" onSubmit={(e) => e.preventDefault()}>
         <Fieldset>
           <Legend>Apply metadata</Legend>
@@ -371,7 +499,7 @@ export default function Rules() {
 
       {dry && (
         <div className="mt-8">
-          <Heading level={2}>Dry-run · passed {dry.passed} · failed {dry.failed}</Heading>
+          <Heading level={2}>Dry-run results · passed {dry.passed} · failed {dry.failed}</Heading>
           <div className="glass mt-4 p-2">
             <Table>
               <TableHead>
