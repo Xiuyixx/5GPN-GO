@@ -21,12 +21,13 @@ func usage() {
 	fmt.Fprint(os.Stderr, `5gpn-installer <subcommand> [flags]
 
 subcommands:
-  install     Provision user, dirs, config, systemd unit, and start the daemon.
-  upgrade     Blue-green swap the daemon binary (keeps .prev fallback).
-  uninstall   Stop unit, remove binary + unit; --purge also wipes state.
-  status      Print unit health.
-  doctor      Diagnose host prerequisites (read-only).
-  version     Print version and exit.
+  install               Provision user, dirs, config, systemd unit, and start the daemon.
+  upgrade               Blue-green swap the daemon binary (keeps .prev fallback).
+  uninstall             Stop unit, remove binary + unit; --purge also wipes state.
+  status                Print unit health.
+  doctor                Diagnose host prerequisites (read-only).
+  migrate-from-legacy   Extract config from a legacy 5GPN-X install and render new config.yaml.
+  version               Print version and exit.
 
 common flags:
   --dry-run   Print planned operations without executing them.
@@ -60,6 +61,8 @@ func main() {
 		os.Exit(runStatus(ctx, rest))
 	case "doctor":
 		os.Exit(runDoctor(ctx, rest))
+	case "migrate-from-legacy":
+		os.Exit(runMigrate(ctx, rest))
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\n", sub)
 		usage()
@@ -176,6 +179,78 @@ func runStatus(ctx context.Context, args []string) int {
 		return 1
 	}
 	return 0
+}
+
+func runMigrate(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("migrate-from-legacy", flag.ExitOnError)
+	var cf commonFlags
+	cf.bind(fs)
+	legacyRoot := fs.String("legacy-root", "",
+		"re-root legacy paths (/opt/proxy-gateway, /etc/proxy-gateway, /etc/dnsdist) under DIR")
+	force := fs.Bool("force", false, "overwrite existing config.yaml")
+	_ = fs.Parse(args)
+
+	layout := installer.LegacyDefaults()
+	if *legacyRoot != "" {
+		layout = layout.WithRoot(*legacyRoot)
+	}
+
+	plan, err := installer.Plan(layout)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "migrate:", err)
+		return 1
+	}
+
+	fmt.Println("--- extracted from legacy tree ---")
+	fmt.Printf("  domain:          %s\n", or(plan.Extract.Domain, "(none)"))
+	fmt.Printf("  remote dns:      %s\n", or(plan.Extract.RemoteDNS, "(none)"))
+	fmt.Printf("  local dns:       %s\n", or(plan.Extract.LocalDNS, "(none)"))
+	fmt.Printf("  current exit:    %s\n", or(plan.Extract.CurrentExit, "(none)"))
+	fmt.Printf("  exits:           %d\n", len(plan.Extract.Exits))
+	fmt.Printf("  tg token:        %s\n", redact(plan.Extract.TGToken))
+	fmt.Printf("  tg admin ids:    %s\n", or(plan.Extract.TGAdminIDs, "(none)"))
+	fmt.Printf("  ios profile uuid:%s\n", or(plan.Extract.IOSProfileUUID, "(none)"))
+	fmt.Printf("  sources read:    %d\n", len(plan.Extract.SourcePaths))
+
+	if len(plan.Warnings) > 0 {
+		fmt.Println("--- warnings ---")
+		for _, w := range plan.Warnings {
+			fmt.Printf("  ! %s\n", w)
+		}
+	}
+
+	if cf.dryRun {
+		fmt.Println("--- proposed config.yaml ---")
+		fmt.Println(plan.NewConfigYAML)
+		fmt.Println("[dry-run] not writing.")
+		return 0
+	}
+
+	if err := installer.Migrate(ctx, cf.env(), cf.executor(), plan, installer.MigrateOptions{
+		Force: *force,
+	}); err != nil {
+		fmt.Fprintln(os.Stderr, "migrate:", err)
+		return 1
+	}
+	fmt.Println("migrate: ok")
+	return 0
+}
+
+func or(s, alt string) string {
+	if s == "" {
+		return alt
+	}
+	return s
+}
+
+func redact(s string) string {
+	if s == "" {
+		return "(none)"
+	}
+	if len(s) <= 6 {
+		return "***"
+	}
+	return s[:3] + "…" + s[len(s)-3:]
 }
 
 func runDoctor(ctx context.Context, args []string) int {
