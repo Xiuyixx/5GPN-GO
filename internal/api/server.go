@@ -14,8 +14,46 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 
+	"github.com/Xiuyixx/5GPN-Go/internal/config"
+	"github.com/Xiuyixx/5GPN-Go/internal/core"
+	xexit "github.com/Xiuyixx/5GPN-Go/internal/exit"
 	"github.com/Xiuyixx/5GPN-Go/internal/orchestrator"
+	"github.com/Xiuyixx/5GPN-Go/internal/updater"
 )
+
+// serverExitAdapter narrows xexit.Store to the core.ExitStore contract
+// (Active returns exit_id string, not the Exit struct). Same shape as
+// cmd/5gpn/main.go's applierExitAdapter; kept in-package so api.New can
+// construct a self-contained Applier when Config.Applier is unset (test
+// wiring path).
+type serverExitAdapter struct{ inner xexit.Store }
+
+func (a serverExitAdapter) Active(ctx context.Context) (string, error) {
+	e, err := a.inner.Active(ctx)
+	if err != nil {
+		if errors.Is(err, xexit.ErrNoActive) {
+			return "", nil
+		}
+		return "", err
+	}
+	return e.ExitID, nil
+}
+
+func (a serverExitAdapter) Switch(ctx context.Context, exitID string) error {
+	return a.inner.Switch(ctx, exitID)
+}
+
+// UpdaterConfig captures the release source + local install target for
+// the panel-driven updater endpoints. Zero values disable the endpoints
+// (GET /update/check returns "not configured").
+type UpdaterConfig struct {
+	Owner      string
+	Repo       string
+	Unit       string
+	BinaryPath string
+	Version    string
+	Client     *updater.Client
+}
 
 // Server owns the HTTP router + auth + rate limiter for the panel API.
 type Server struct {
@@ -26,6 +64,10 @@ type Server struct {
 	WebFS        fs.FS
 	SetupToken   string
 	Orchestrator orchestrator.Orchestrator
+	BaseConfig   *config.Config
+	Applier      *core.Applier
+	Store        xexit.Store
+	Updater      UpdaterConfig
 }
 
 // Config bundles user-adjustable server knobs.
@@ -38,6 +80,10 @@ type Config struct {
 	SetupToken     string
 	WebFS          fs.FS
 	Orchestrator   orchestrator.Orchestrator
+	BaseConfig     *config.Config
+	Applier        *core.Applier
+	Store          xexit.Store
+	Updater        UpdaterConfig
 }
 
 // New builds a Server from its dependencies.
@@ -57,6 +103,28 @@ func New(db *sql.DB, cfg Config, logger *slog.Logger) *Server {
 	if cfg.Orchestrator == nil {
 		cfg.Orchestrator = &orchestrator.NoOp{Logger: logger}
 	}
+	if cfg.BaseConfig == nil {
+		cfg.BaseConfig = &config.Config{}
+	}
+	if cfg.Store == nil {
+		cfg.Store = xexit.NewStore(db)
+	}
+	if cfg.Applier == nil {
+		cfg.Applier = &core.Applier{
+			DB:         db,
+			BaseConfig: cfg.BaseConfig,
+			Store:      core.NoStore{},
+			ExitStore:  serverExitAdapter{inner: cfg.Store},
+			Orch:       cfg.Orchestrator,
+			Logger:     logger,
+		}
+	}
+	if cfg.Updater.Client == nil && cfg.Updater.Owner != "" && cfg.Updater.Repo != "" {
+		cfg.Updater.Client = updater.New(updater.Config{
+			Owner: cfg.Updater.Owner,
+			Repo:  cfg.Updater.Repo,
+		})
+	}
 	return &Server{
 		DB: db,
 		Auth: &Authenticator{
@@ -68,6 +136,10 @@ func New(db *sql.DB, cfg Config, logger *slog.Logger) *Server {
 		WebFS:        cfg.WebFS,
 		SetupToken:   cfg.SetupToken,
 		Orchestrator: cfg.Orchestrator,
+		BaseConfig:   cfg.BaseConfig,
+		Applier:      cfg.Applier,
+		Store:        cfg.Store,
+		Updater:      cfg.Updater,
 	}
 }
 
@@ -99,10 +171,13 @@ func (s *Server) Router() http.Handler {
 		r.Use(s.authMiddleware)
 		r.Post("/api/v1/logout", s.handleLogout)
 		r.Get("/api/v1/me", s.handleMe)
+		r.Post("/api/v1/password", s.handleChangePassword)
 
 		r.Get("/api/v1/rules", s.handleListRules)
 		r.Post("/api/v1/rules/dry-run", s.handleDryRun)
 		r.Post("/api/v1/rules/apply", s.handleApply)
+		r.Post("/api/v1/rules/chinalist/sync", s.handleChinalistSync)
+		r.Get("/api/v1/apply/status", s.handleApplyStatus)
 
 		r.Get("/api/v1/exits", s.handleListExits)
 		r.Post("/api/v1/exits/add", s.handleAddExit)
@@ -117,6 +192,11 @@ func (s *Server) Router() http.Handler {
 
 		r.Get("/api/v1/metrics", s.handleMetrics)
 		r.Get("/api/v1/events/logs", s.handleLogsSSE)
+
+		r.Get("/api/v1/update/check", s.handleUpdateCheck)
+		r.Post("/api/v1/update/apply", s.handleUpdateApply)
+
+		r.Get("/api/v1/ios/profile-url", s.handleIOSProfileURL)
 	})
 
 	// Static SPA fallback: any GET that isn't /api/* serves the panel bundle,

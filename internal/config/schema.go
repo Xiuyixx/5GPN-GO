@@ -15,7 +15,7 @@ type Config struct {
 	Panel          PanelConfig   `yaml:"panel"           validate:"required"`
 	DNS            DNSConfig     `yaml:"dns"`
 	Proxy          ProxyConfig   `yaml:"proxy"`
-	Exits          []ExitConfig  `yaml:"exits"           validate:"min=1,dive"`
+	Exits          []ExitConfig  `yaml:"exits"           validate:"omitempty,dive"`
 	Rules          RulesConfig   `yaml:"rules"`
 	TGBot          TGBotConfig   `yaml:"tgbot"`
 	IOS            IOSConfig     `yaml:"ios"`

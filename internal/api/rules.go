@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/Xiuyixx/5GPN-Go/internal/db"
@@ -66,8 +67,12 @@ func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "validation_failed", err.Error())
 		return
 	}
-	fallthrough_, _ := rules.ResolveFallthrough(set, "", "")
-	res := rules.DryRun(set, req.Fixtures, fallthrough_)
+	activeExit := ""
+	if s.BaseConfig != nil && len(s.BaseConfig.Exits) > 0 {
+		activeExit = s.BaseConfig.Exits[0].ID
+	}
+	fallthroughTarget, _ := rules.ResolveFallthrough(set, activeExit, "PROXY")
+	res := rules.DryRun(set, req.Fixtures, fallthroughTarget)
 	passed := 0
 	for _, r := range res {
 		if r.Pass {
@@ -120,23 +125,17 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 		prevSnapshot = prev[1].SnapshotID
 	}
 
-	appRes, appErr := s.Orchestrator.Apply(r.Context(), orchestrator.ApplyRequest{
-		SnapshotID:    snapID,
-		RuleVersionID: rvID,
-		PrevSnapshot:  prevSnapshot,
-		// Config is intentionally nil here — this call site is a
-		// transitional stub that will be replaced by core.Applier in
-		// S1-T11. Systemd.Apply currently ignores req.Config anyway
-		// (S1-T9 will make it authoritative).
-	})
+	appRes, appErr := s.Applier.ApplyRules(r.Context(), snapID, rvID, prevSnapshot)
 
 	result := "ok"
 	if appErr != nil {
 		result = "failed"
+		if errors.Is(appErr, orchestrator.ErrApplyInFlight) {
+			result = "in_flight"
+		}
 	}
 	if appRes.RolledBack {
 		result = "rolled_back"
-		// Reactivate the previous rule version so the DB matches disk.
 		if prevSnapshot != 0 {
 			if prev, err := db.ListRuleVersions(s.DB, 5); err == nil {
 				for _, p := range prev {
@@ -165,4 +164,74 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 		Health:        appRes.Health,
 		Reason:        appRes.Reason,
 	})
+}
+
+// chinalistSyncRequest allows the caller to override the URL for one-off
+// refreshes. Empty url falls back to s.BaseConfig.DNS.ChinaListSource.
+type chinalistSyncRequest struct {
+	URL string `json:"url"`
+}
+
+type chinalistSyncResponse struct {
+	URL       string `json:"url"`
+	Path      string `json:"path"`
+	Refreshed bool   `json:"refreshed"`
+	ETag      string `json:"etag,omitempty"`
+}
+
+func (s *Server) handleChinalistSync(w http.ResponseWriter, r *http.Request) {
+	if s.BaseConfig == nil {
+		writeError(w, http.StatusInternalServerError, "config_missing", "base config not wired")
+		return
+	}
+	var req chinalistSyncRequest
+	_ = json.NewDecoder(r.Body).Decode(&req) // body is optional
+	url := req.URL
+	if url == "" {
+		url = s.BaseConfig.DNS.ChinaListSource
+	}
+	path := s.BaseConfig.DNS.ChinaListPath
+	if url == "" || path == "" {
+		writeError(w, http.StatusBadRequest, "chinalist_unconfigured",
+			"dns.chinalist_source and dns.chinalist_path must both be set")
+		return
+	}
+
+	before, _ := db.GetRuleSourceETag(s.DB, url)
+	if err := rules.Sync(r.Context(), s.DB, url, path); err != nil {
+		writeError(w, http.StatusBadGateway, "sync_failed", err.Error())
+		return
+	}
+	after, _ := db.GetRuleSourceETag(s.DB, url)
+
+	actor, _ := r.Context().Value(ctxUsername).(string)
+	_ = db.AppendAudit(s.DB, db.AuditEntry{
+		Actor:  actor,
+		Action: "rules.chinalist.sync",
+		Target: url,
+		Before: before,
+		After:  after,
+		Result: "ok",
+		IP:     clientIP(r),
+	})
+
+	writeJSON(w, http.StatusOK, chinalistSyncResponse{
+		URL:       url,
+		Path:      path,
+		Refreshed: after != before,
+		ETag:      after,
+	})
+}
+
+func (s *Server) handleApplyStatus(w http.ResponseWriter, r *http.Request) {
+	if s.Applier == nil {
+		writeError(w, http.StatusInternalServerError, "applier_missing", "applier not wired")
+		return
+	}
+	snap, err := s.Applier.Status(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "db_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, snap)
 }

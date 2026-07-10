@@ -6,7 +6,6 @@ package db
 import (
 	"database/sql"
 	"embed"
-	"errors"
 	"fmt"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -20,10 +19,6 @@ var migrationsFS embed.FS
 type Config struct {
 	Path string
 }
-
-// ErrNotImplemented is returned by M0 query stubs; removed in M1 as real
-// implementations land.
-var ErrNotImplemented = errors.New("db query not implemented")
 
 // Open dials sqlite3 with WAL + foreign_keys + secure_delete enabled and
 // returns a *sql.DB ready for Migrate.

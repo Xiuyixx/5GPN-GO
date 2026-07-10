@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -149,13 +148,27 @@ func (s *Server) handleExportBackup(w http.ResponseWriter, r *http.Request) {
 	)))
 }
 
-// handleImportBackup accepts a tar.gz backup and applies the pieces it
-// recognizes: rules/active.yaml becomes the new active rule_version,
-// db/5gpn.db is exposed via the response so the operator can inspect
-// before deciding to restore. The import intentionally does not
-// overwrite the live SQLite file — that path lives in 5gpn-installer
-// where systemd is available to stop the daemon first.
+// applyResultPayload is the machine-readable outcome of the Applier.ImportRules
+// call embedded in the import response. Callers use it to distinguish
+// confirmed / observing / rolled_back without polling apply_status.
+type applyResultPayload struct {
+	Health     string `json:"health"`
+	RolledBack bool   `json:"rolled_back"`
+	Reason     string `json:"reason,omitempty"`
+}
+
+// handleImportBackup accepts a tar.gz backup and applies its rules/active.yaml
+// member through core.Applier.ImportRules — the same pipeline used by the
+// panel's rules apply endpoint. On any failure the active rule_version
+// pointer is restored to whatever was active before the import, a
+// backup.restore.rolled_back audit entry is written, and the caller gets
+// a non-2xx response so "applied" can never mean "DB advanced but data
+// plane unchanged".
 func (s *Server) handleImportBackup(w http.ResponseWriter, r *http.Request) {
+	if s.Applier == nil {
+		writeError(w, http.StatusInternalServerError, "applier_missing", "applier not wired")
+		return
+	}
 	gz, err := gzip.NewReader(r.Body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad_gzip", err.Error())
@@ -166,6 +179,11 @@ func (s *Server) handleImportBackup(w http.ResponseWriter, r *http.Request) {
 	entries := 0
 	var totalSize int64
 	var applied bool
+	var appliedSnapshotID int64
+	var applyPayload *applyResultPayload
+
+	actor, _ := r.Context().Value(ctxUsername).(string)
+	ip := clientIP(r)
 
 	for {
 		hdr, err := tr.Next()
@@ -189,26 +207,50 @@ func (s *Server) handleImportBackup(w http.ResponseWriter, r *http.Request) {
 			if len(body) == 0 {
 				continue
 			}
-			// Insert a new snapshot + rule_version so the change is
-			// traceable in the audit log, then activate it.
-			snapID, err := db.InsertSnapshot(s.DB, db.Snapshot{
-				ConfigHash:  fmt.Sprintf("import-%d", time.Now().Unix()),
-				TarballPath: "",
-				Note:        "imported from backup",
-			})
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "db_error", err.Error())
+
+			// Capture the prior active rule_version so we can restore
+			// the pointer if the import's apply pipeline fails.
+			var priorRVID int64
+			if prior, perr := db.GetActiveRuleVersion(s.DB); perr == nil {
+				priorRVID = prior.ID
+			}
+
+			res, appErr := s.Applier.ImportRules(r.Context(), string(body), actor, ip)
+			if appErr != nil || res.RolledBack {
+				reason := ""
+				if appErr != nil {
+					reason = appErr.Error()
+				} else {
+					reason = res.Reason
+				}
+				// Best-effort: reactivate the prior active version so the
+				// DB matches the pre-import state. If there was no prior
+				// active version, leave whatever the applier ended up in
+				// place — SetActiveRuleVersion(0) is a no-op.
+				if priorRVID != 0 {
+					_ = db.SetActiveRuleVersion(s.DB, priorRVID)
+				}
+				_ = db.AppendAudit(s.DB, db.AuditEntry{
+					Actor:  actor,
+					Action: "backup.restore.rolled_back",
+					Target: "rules/active.yaml",
+					Result: reason,
+					IP:     ip,
+				})
+				writeError(w, http.StatusInternalServerError, "import_failed", reason)
 				return
 			}
-			if _, err := db.InsertRuleVersion(s.DB, snapID, string(body), true); err != nil {
-				writeError(w, http.StatusInternalServerError, "db_error", err.Error())
-				return
-			}
+
 			applied = true
-			actor, _ := r.Context().Value(ctxUsername).(string)
+			appliedSnapshotID = res.SnapshotID
+			applyPayload = &applyResultPayload{
+				Health:     res.Health,
+				RolledBack: res.RolledBack,
+				Reason:     res.Reason,
+			}
 			_ = db.AppendAudit(s.DB, db.AuditEntry{
 				Actor: actor, Action: "backup.restore",
-				Target: "rules/active.yaml", Result: "ok", IP: clientIP(r),
+				Target: "rules/active.yaml", Result: "ok", IP: ip,
 			})
 		default:
 			// Drain unknown members; we accept them structurally but
@@ -219,11 +261,18 @@ func (s *Server) handleImportBackup(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"entries":     entries,
 		"total_bytes": totalSize,
 		"applied":     applied,
-	})
+	}
+	if appliedSnapshotID != 0 {
+		resp["applied_snapshot_id"] = appliedSnapshotID
+	}
+	if applyPayload != nil {
+		resp["apply_result"] = applyPayload
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // hotCopyDB creates a WAL-safe snapshot of the panel SQLite file via

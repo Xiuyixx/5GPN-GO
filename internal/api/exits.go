@@ -2,12 +2,17 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strings"
 
+	"github.com/Xiuyixx/5GPN-Go/internal/db"
 	xexit "github.com/Xiuyixx/5GPN-Go/internal/exit"
+	"github.com/Xiuyixx/5GPN-Go/internal/orchestrator"
 )
 
-// ExitSummary is what the panel renders in the Exit table.
+// ExitSummary is what the panel renders in the Exit table. Fields
+// mirror the JSON shape Dashboard AC7 depends on — do not rename.
 type ExitSummary struct {
 	ID       string `json:"id"`
 	Protocol string `json:"protocol"`
@@ -17,22 +22,39 @@ type ExitSummary struct {
 	Notes    string `json:"notes,omitempty"`
 }
 
-// exitsState is an in-memory registry seeded from parsed URIs. M2 S4
-// replaces this with SQLite persistence + orchestrator wiring.
-var exitsState = struct {
-	items  []ExitSummary
-	active string
-}{
-	items: []ExitSummary{
-		{ID: "direct", Protocol: "direct", Server: "-", Port: 0, Active: true, Notes: "built-in"},
-	},
-	active: "direct",
+func exitToSummary(e xexit.Exit) ExitSummary {
+	if e.Protocol == "direct" {
+		return ExitSummary{
+			ID: e.ExitID, Protocol: "direct", Server: "-", Port: 0,
+			Active: e.Active, Notes: "built-in",
+		}
+	}
+	host, _ := e.ProxyConfig["server"].(string)
+	port, _ := e.ProxyConfig["port"].(int)
+	return ExitSummary{
+		ID: e.ExitID, Protocol: e.Protocol, Server: host, Port: port,
+		Active: e.Active,
+	}
 }
 
 func (s *Server) handleListExits(w http.ResponseWriter, r *http.Request) {
+	items, err := s.Store.List(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "list_error", err.Error())
+		return
+	}
+	out := make([]ExitSummary, 0, len(items))
+	active := ""
+	for _, e := range items {
+		sum := exitToSummary(e)
+		if e.Active {
+			active = e.ExitID
+		}
+		out = append(out, sum)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"exits":  exitsState.items,
-		"active": exitsState.active,
+		"exits":  out,
+		"active": active,
 	})
 }
 
@@ -51,25 +73,32 @@ func (s *Server) handleAddExit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "id and uri required")
 		return
 	}
-	p, err := xexit.Parse(req.URI)
+
+	e, err := s.Store.Add(r.Context(), req.ID, req.URI)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "parse_error", err.Error())
+		switch {
+		case errors.Is(err, xexit.ErrInvalidExitID):
+			writeError(w, http.StatusBadRequest, "invalid_id", err.Error())
+		case strings.Contains(err.Error(), "parse uri"):
+			writeError(w, http.StatusBadRequest, "parse_error", err.Error())
+		case strings.Contains(err.Error(), "UNIQUE constraint"):
+			writeError(w, http.StatusConflict, "exit_exists", "exit id already in use")
+		default:
+			writeError(w, http.StatusInternalServerError, "add_error", err.Error())
+		}
 		return
 	}
-	host, _ := p["server"].(string)
-	port, _ := p["port"].(int)
-	proto, _ := p["type"].(string)
-	item := ExitSummary{ID: req.ID, Protocol: proto, Server: host, Port: port}
-	// dedupe by id
-	for i, e := range exitsState.items {
-		if e.ID == req.ID {
-			exitsState.items[i] = item
-			writeJSON(w, http.StatusOK, item)
-			return
-		}
-	}
-	exitsState.items = append(exitsState.items, item)
-	writeJSON(w, http.StatusCreated, item)
+
+	actor, _ := r.Context().Value(ctxUsername).(string)
+	_ = db.AppendAudit(s.DB, db.AuditEntry{
+		Actor:  actor,
+		Action: "exits.add",
+		Target: req.ID,
+		After:  req.URI,
+		Result: "ok",
+	})
+
+	writeJSON(w, http.StatusCreated, exitToSummary(e))
 }
 
 type deleteExitRequest struct {
@@ -82,17 +111,31 @@ func (s *Server) handleDeleteExit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	if req.ID == exitsState.active {
-		writeError(w, http.StatusConflict, "exit_active", "cannot delete the active exit")
+	if req.ID == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "id required")
 		return
 	}
-	out := exitsState.items[:0]
-	for _, e := range exitsState.items {
-		if e.ID != req.ID {
-			out = append(out, e)
+
+	if err := s.Store.Delete(r.Context(), req.ID); err != nil {
+		switch {
+		case errors.Is(err, xexit.ErrExitActive):
+			writeError(w, http.StatusConflict, "exit_active", err.Error())
+		case errors.Is(err, xexit.ErrExitNotFound):
+			writeError(w, http.StatusNotFound, "not_found", err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, "delete_error", err.Error())
 		}
+		return
 	}
-	exitsState.items = out
+
+	actor, _ := r.Context().Value(ctxUsername).(string)
+	_ = db.AppendAudit(s.DB, db.AuditEntry{
+		Actor:  actor,
+		Action: "exits.delete",
+		Target: req.ID,
+		Result: "ok",
+	})
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -106,19 +149,45 @@ func (s *Server) handleSwitchExit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	found := false
-	for i, e := range exitsState.items {
-		if e.ID == req.ID {
-			exitsState.items[i].Active = true
-			found = true
-		} else {
-			exitsState.items[i].Active = false
-		}
-	}
-	if !found {
-		writeError(w, http.StatusNotFound, "not_found", "no exit with id "+req.ID)
+	if req.ID == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "id required")
 		return
 	}
-	exitsState.active = req.ID
-	writeJSON(w, http.StatusOK, map[string]any{"active": req.ID})
+
+	res, err := s.Applier.SwitchExit(r.Context(), req.ID)
+	if err != nil {
+		actor, _ := r.Context().Value(ctxUsername).(string)
+		_ = db.AppendAudit(s.DB, db.AuditEntry{
+			Actor:  actor,
+			Action: "exits.switch",
+			Target: req.ID,
+			Result: "failed",
+		})
+		switch {
+		case errors.Is(err, xexit.ErrExitNotFound):
+			writeError(w, http.StatusNotFound, "not_found", err.Error())
+		case errors.Is(err, orchestrator.ErrApplyInFlight):
+			writeError(w, http.StatusConflict, "apply_in_flight", err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, "switch_error", err.Error())
+		}
+		return
+	}
+
+	actor, _ := r.Context().Value(ctxUsername).(string)
+	result := "ok"
+	if res.RolledBack {
+		result = "rolled_back"
+	}
+	_ = db.AppendAudit(s.DB, db.AuditEntry{
+		Actor:  actor,
+		Action: "exits.switch",
+		Target: req.ID,
+		Result: result,
+	})
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"active": req.ID,
+		"health": res.Health,
+	})
 }
