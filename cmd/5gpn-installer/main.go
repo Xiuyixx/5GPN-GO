@@ -1,29 +1,36 @@
-// Command 5gpn-installer is the Go replacement for the legacy 130KB install.sh.
-//
-// M0 skeleton: dispatches subcommands and prints TODO; M3 lands real logic.
+// Command 5gpn-installer is the Go replacement for the legacy 3.3k-line
+// install.sh. All heavy lifting lives in internal/installer; this file
+// dispatches subcommands and translates flags. Every mutating verb accepts
+// --dry-run to preview the ops without touching the host.
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/Xiuyixx/5GPN-Go/internal/installer"
 )
 
-var version = "0.0.0-m0"
+var version = "0.0.0-m3"
 
 func usage() {
 	fmt.Fprint(os.Stderr, `5gpn-installer <subcommand> [flags]
 
 subcommands:
-  install               Provision the daemon, three-party components, and initial config.
-  upgrade               Fetch a newer 5gpn binary and swap it in blue-green.
-  rollback              Restore a prior snapshot or a checkpointed install step.
-  rollback-to-legacy    Stop the new daemon and restore the legacy 5GPN-X install.
-  uninstall             Remove the daemon, systemd units, and (optionally) data.
-  status                Show unit health and health-check output.
-  doctor                Diagnose common misconfigurations.
-  migrate-from-legacy   Import DOMAIN, TG token, rules, iOS profile UUID from /opt/5gpn.
-  version               Print version and exit.
+  install     Provision user, dirs, config, systemd unit, and start the daemon.
+  upgrade     Blue-green swap the daemon binary (keeps .prev fallback).
+  uninstall   Stop unit, remove binary + unit; --purge also wipes state.
+  status      Print unit health.
+  doctor      Diagnose host prerequisites (read-only).
+  version     Print version and exit.
+
+common flags:
+  --dry-run   Print planned operations without executing them.
+  --root DIR  Re-root every path under DIR (test / container use).
 `)
 }
 
@@ -33,22 +40,161 @@ func main() {
 		os.Exit(2)
 	}
 	sub := os.Args[1]
-	os.Args = append([]string{os.Args[0]}, os.Args[2:]...)
-	fs := flag.NewFlagSet(sub, flag.ExitOnError)
-	dryRun := fs.Bool("dry-run", false, "print actions without executing")
-	_ = fs.Parse(os.Args[1:])
+	rest := os.Args[2:]
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
 
 	switch sub {
 	case "version":
 		fmt.Println(version)
-	case "install", "upgrade", "rollback", "rollback-to-legacy",
-		"uninstall", "status", "doctor", "migrate-from-legacy":
-		fmt.Printf("TODO: %s (dry-run=%v) — M3 will implement\n", sub, *dryRun)
 	case "help", "-h", "--help":
 		usage()
+	case "install":
+		os.Exit(runInstall(ctx, rest))
+	case "upgrade":
+		os.Exit(runUpgrade(ctx, rest))
+	case "uninstall":
+		os.Exit(runUninstall(ctx, rest))
+	case "status":
+		os.Exit(runStatus(ctx, rest))
+	case "doctor":
+		os.Exit(runDoctor(ctx, rest))
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\n", sub)
 		usage()
 		os.Exit(2)
 	}
+}
+
+type commonFlags struct {
+	dryRun bool
+	root   string
+}
+
+func (c *commonFlags) bind(fs *flag.FlagSet) {
+	fs.BoolVar(&c.dryRun, "dry-run", false, "print actions without executing")
+	fs.StringVar(&c.root, "root", "", "re-root every path under DIR (test / container use)")
+}
+
+func (c *commonFlags) executor() installer.Executor {
+	if c.dryRun {
+		rec := installer.NewRecorder()
+		rec.Out = os.Stdout
+		return rec
+	}
+	return &installer.RealExecutor{Out: os.Stdout, Err: os.Stderr}
+}
+
+func (c *commonFlags) env() installer.Env {
+	env := installer.Defaults()
+	if c.root != "" {
+		env = env.WithRoot(c.root)
+	}
+	return env
+}
+
+func runInstall(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("install", flag.ExitOnError)
+	var cf commonFlags
+	cf.bind(fs)
+	source := fs.String("source-binary", "", "path to the compiled 5gpn binary (empty = binary is already in place)")
+	force := fs.Bool("force", false, "rewrite existing config.yaml")
+	skipUnit := fs.Bool("skip-unit", false, "do not write the systemd unit")
+	skipEnable := fs.Bool("skip-enable", false, "do not enable+start the unit")
+	_ = fs.Parse(args)
+
+	if cf.dryRun {
+		fmt.Println("[dry-run] install")
+	}
+	err := installer.Install(ctx, cf.env(), cf.executor(), installer.InstallOptions{
+		Force:        *force,
+		SkipUnit:     *skipUnit,
+		SkipEnable:   *skipEnable,
+		SourceBinary: *source,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "install:", err)
+		return 1
+	}
+	fmt.Println("install: ok")
+	return 0
+}
+
+func runUpgrade(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("upgrade", flag.ExitOnError)
+	var cf commonFlags
+	cf.bind(fs)
+	newBin := fs.String("new", "", "path to the new binary artefact (required)")
+	skipRestart := fs.Bool("skip-restart", false, "do not restart the unit after swap")
+	_ = fs.Parse(args)
+
+	if *newBin == "" {
+		fmt.Fprintln(os.Stderr, "upgrade: --new required")
+		return 2
+	}
+	if cf.dryRun {
+		fmt.Println("[dry-run] upgrade")
+	}
+	err := installer.Upgrade(ctx, cf.env(), cf.executor(), installer.UpgradeOptions{
+		NewBinary:   *newBin,
+		SkipRestart: *skipRestart,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "upgrade:", err)
+		return 1
+	}
+	fmt.Println("upgrade: ok")
+	return 0
+}
+
+func runUninstall(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("uninstall", flag.ExitOnError)
+	var cf commonFlags
+	cf.bind(fs)
+	purge := fs.Bool("purge", false, "also delete config + state dirs")
+	_ = fs.Parse(args)
+
+	if cf.dryRun {
+		fmt.Println("[dry-run] uninstall")
+	}
+	if err := installer.Uninstall(ctx, cf.env(), cf.executor(), *purge); err != nil {
+		fmt.Fprintln(os.Stderr, "uninstall:", err)
+		return 1
+	}
+	fmt.Println("uninstall: ok")
+	return 0
+}
+
+func runStatus(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	var cf commonFlags
+	cf.bind(fs)
+	_ = fs.Parse(args)
+	if err := installer.Status(ctx, cf.env(), cf.executor(), os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, "status:", err)
+		return 1
+	}
+	return 0
+}
+
+func runDoctor(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
+	var cf commonFlags
+	cf.bind(fs)
+	_ = fs.Parse(args)
+	report := installer.Doctor(ctx, cf.env(), cf.executor())
+	fails := 0
+	for _, c := range report.Checks {
+		mark := "ok"
+		if !c.OK {
+			mark = "FAIL"
+			fails++
+		}
+		fmt.Printf("  [%s] %s — %s\n", mark, c.Name, c.Detail)
+	}
+	if fails > 0 {
+		return 1
+	}
+	return 0
 }

@@ -7,7 +7,6 @@ import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Select } from '../components/ui/select';
-import { Alert, AlertBody, AlertTitle } from '../components/ui/alert';
 import { Field, FieldGroup, Fieldset, Label, Legend } from '../components/ui/fieldset';
 import { api } from '../api/client';
 import type { ApplyResponse, DryRunResponse, Rule, RuleKind } from '../api/client';
@@ -23,7 +22,7 @@ const DEFAULT_FIXTURES = [
 ];
 
 interface Draft extends Rule {
-  _key: string; // stable key for React lists across edits
+  _key: string;
 }
 
 let keyCounter = 0;
@@ -39,12 +38,13 @@ function toDraft(r: Rule): Draft {
 export default function Rules() {
   const [active, setActive] = useState<Rule[]>([]);
   const [draft, setDraft] = useState<Draft[]>([]);
+  const [editing, setEditing] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dry, setDry] = useState<DryRunResponse | null>(null);
   const [applyRes, setApplyRes] = useState<ApplyResponse | null>(null);
   const [busy, setBusy] = useState<'idle' | 'dryrun' | 'apply'>('idle');
   const [note, setNote] = useState('');
-  const [dryOk, setDryOk] = useState(false); // gate Apply behind at least one dry-run pass
+  const [dryOk, setDryOk] = useState(false);
 
   async function refresh() {
     try {
@@ -55,6 +55,7 @@ export default function Rules() {
       setDry(null);
       setApplyRes(null);
       setDryOk(false);
+      setEditing(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -72,25 +73,34 @@ export default function Rules() {
     });
   }, [draft, active]);
 
+  function invalidate() {
+    setDry(null);
+    setDryOk(false);
+    setApplyRes(null);
+  }
+
   function patch(key: string, changes: Partial<Rule>) {
     setDraft((d) => d.map((r) => (r._key === key ? { ...r, ...changes } : r)));
-    setDry(null); setDryOk(false); setApplyRes(null);
+    invalidate();
   }
 
   function addRow() {
     const priority = draft.length
       ? Math.max(...draft.map((r) => r.priority)) + 10
       : 10;
+    const _key = makeKey();
     setDraft((d) => [
       ...d,
-      { _key: makeKey(), id: `rule-${d.length + 1}`, kind: 'DOMAIN-SUFFIX', pattern: '', action: 'direct', priority, enabled: true },
+      { _key, id: `rule-${d.length + 1}`, kind: 'DOMAIN-SUFFIX', pattern: '', action: 'direct', priority, enabled: true },
     ]);
-    setDry(null); setDryOk(false);
+    setEditing(_key);
+    invalidate();
   }
 
   function removeRow(key: string) {
     setDraft((d) => d.filter((r) => r._key !== key));
-    setDry(null); setDryOk(false);
+    if (editing === key) setEditing(null);
+    invalidate();
   }
 
   function move(key: string, dir: -1 | 1) {
@@ -100,10 +110,9 @@ export default function Rules() {
       if (idx < 0 || target < 0 || target >= d.length) return d;
       const clone = d.slice();
       [clone[idx], clone[target]] = [clone[target], clone[idx]];
-      // Renumber priorities in steps of 10 for a clean gradient.
       return clone.map((r, i) => ({ ...r, priority: (i + 1) * 10 }));
     });
-    setDry(null); setDryOk(false);
+    invalidate();
   }
 
   function stripDrafts(list: Draft[]): Rule[] {
@@ -145,11 +154,11 @@ export default function Rules() {
 
   return (
     <AppShell>
-      <div className="mb-6 flex items-start justify-between">
+      <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
         <div>
           <Heading>Rules</Heading>
           <Text className="mt-1">
-            Draft edits stay local until you Apply — Dry-run must pass before Apply is enabled.
+            Click any row to edit · Dry-run must pass before Apply is enabled.
           </Text>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -165,40 +174,190 @@ export default function Rules() {
       </div>
 
       {error && (
-        <div className="mb-4">
-          <Alert open onClose={() => setError(null)}>
-            <AlertTitle>Something went wrong</AlertTitle>
-            <AlertBody>{error}</AlertBody>
-          </Alert>
+        <div className="mb-4 flex items-start justify-between gap-3 rounded-xl border border-red-400/40 bg-red-500/10 px-4 py-3 text-sm text-red-800 dark:text-red-200">
+          <div>
+            <div className="font-semibold">Something went wrong</div>
+            <div className="mt-0.5">{error}</div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setError(null)}
+            aria-label="dismiss error"
+            className="shrink-0 rounded px-2 py-0.5 text-red-700/70 hover:text-red-900 dark:text-red-300/70 dark:hover:text-red-100"
+          >
+            ✕
+          </button>
         </div>
       )}
       {applyRes && (
-        <div className="mb-4">
-          <Alert open onClose={() => setApplyRes(null)}>
-            <AlertTitle>Apply result</AlertTitle>
-            <AlertBody>
+        <div className={`mb-4 flex items-start justify-between gap-3 rounded-xl border px-4 py-3 text-sm ${
+          applyRes.rolled_back
+            ? 'border-red-400/40 bg-red-500/10 text-red-800 dark:text-red-200'
+            : 'border-emerald-400/40 bg-emerald-500/10 text-emerald-800 dark:text-emerald-200'
+        }`}>
+          <div>
+            <div className="font-semibold">
+              {applyRes.rolled_back ? 'Apply rolled back' : 'Apply succeeded'}
+            </div>
+            <div className="mt-0.5">
               snapshot #{applyRes.snapshot_id} · health {applyRes.health}
-              {applyRes.rolled_back ? ' · rolled back' : ''}
-            </AlertBody>
-          </Alert>
+              {applyRes.rolled_back ? ' · previous config restored' : ''}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setApplyRes(null)}
+            aria-label="dismiss apply result"
+            className="shrink-0 rounded px-2 py-0.5 opacity-70 hover:opacity-100"
+          >
+            ✕
+          </button>
         </div>
       )}
       {isDirty && !applyRes && (
-        <div className="mb-4">
-          <Alert open onClose={() => { /* stays open until Applied/Reset */ }}>
-            <AlertTitle>Unsaved changes</AlertTitle>
-            <AlertBody>
-              {dryOk
-                ? 'Dry-run passed — Apply is enabled.'
-                : dry
+        <div className={`mb-4 rounded-xl border px-4 py-3 text-sm ${
+          dryOk
+            ? 'border-emerald-400/40 bg-emerald-500/10 text-emerald-800 dark:text-emerald-200'
+            : dry
+              ? 'border-red-400/40 bg-red-500/10 text-red-800 dark:text-red-200'
+              : 'border-amber-400/40 bg-amber-500/10 text-amber-800 dark:text-amber-200'
+        }`}>
+          <div className="font-semibold">Unsaved changes</div>
+          <div className="mt-0.5">
+            {dryOk
+              ? 'Dry-run passed — Apply is enabled.'
+              : dry
                 ? `Dry-run failed (${dry.failed} fixture${dry.failed === 1 ? '' : 's'}). Fix rules or adjust priorities and re-run.`
                 : 'Run Dry-run before Apply to guard against regressions.'}
-            </AlertBody>
-          </Alert>
+          </div>
         </div>
       )}
 
-      <form className="glass p-6 mb-6" onSubmit={(e) => e.preventDefault()}>
+      <div className="glass p-2">
+        {draft.length === 0 ? (
+          <div className="p-6 text-center">
+            <Text>No rules yet. Click <strong>+ Add rule</strong> above.</Text>
+          </div>
+        ) : (
+          <Table>
+            <TableHead>
+              <TableRow>
+                <TableHeader className="w-16">Priority</TableHeader>
+                <TableHeader>ID</TableHeader>
+                <TableHeader>Kind</TableHeader>
+                <TableHeader>Pattern</TableHeader>
+                <TableHeader>Action</TableHeader>
+                <TableHeader className="w-24">Status</TableHeader>
+                <TableHeader className="w-40 text-right">Actions</TableHeader>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {draft.map((r, i) => (
+                <TableRow key={r._key} className="align-middle">
+                  <TableCell className="metric text-zinc-500">{r.priority}</TableCell>
+                  <TableCell className="font-medium">{r.id}</TableCell>
+                  <TableCell>
+                    <Badge color="zinc">{r.kind}</Badge>
+                  </TableCell>
+                  <TableCell className="text-zinc-600 dark:text-zinc-300">
+                    {r.pattern
+                      ? <code className="text-xs">{r.pattern}</code>
+                      : <span className="text-zinc-400">—</span>}
+                  </TableCell>
+                  <TableCell>{r.action}</TableCell>
+                  <TableCell>
+                    <button
+                      type="button"
+                      onClick={() => patch(r._key, { enabled: !r.enabled })}
+                      className="cursor-pointer"
+                      aria-label={r.enabled ? 'disable rule' : 'enable rule'}
+                    >
+                      <Badge color={r.enabled ? 'lime' : 'zinc'}>{r.enabled ? 'on' : 'off'}</Badge>
+                    </button>
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <div className="flex justify-end gap-1">
+                      <Button plain aria-label="move up" onClick={() => move(r._key, -1)} disabled={i === 0}>↑</Button>
+                      <Button plain aria-label="move down" onClick={() => move(r._key, 1)} disabled={i === draft.length - 1}>↓</Button>
+                      <Button plain onClick={() => setEditing(editing === r._key ? null : r._key)}>
+                        {editing === r._key ? 'Close' : 'Edit'}
+                      </Button>
+                      <Button plain aria-label="delete" onClick={() => removeRow(r._key)}>✕</Button>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+      </div>
+
+      {editing && (() => {
+        const r = draft.find((x) => x._key === editing);
+        if (!r) return null;
+        const isMatch = r.kind === 'MATCH';
+        return (
+          <div className="glass fade-up mt-4 p-6">
+            <div className="mb-4 flex items-center justify-between">
+              <Heading level={2}>Edit rule</Heading>
+              <Button plain onClick={() => setEditing(null)}>Close</Button>
+            </div>
+            <Fieldset>
+              <Legend className="sr-only">Fields</Legend>
+              <FieldGroup>
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <Field>
+                    <Label>ID</Label>
+                    <Input value={r.id} onChange={(e) => patch(r._key, { id: e.target.value })} />
+                  </Field>
+                  <Field>
+                    <Label>Priority</Label>
+                    <Input
+                      type="number"
+                      value={r.priority}
+                      onChange={(e) => patch(r._key, { priority: Number(e.target.value) })}
+                    />
+                  </Field>
+                  <Field>
+                    <Label>Kind</Label>
+                    <Select value={r.kind} onChange={(e) => patch(r._key, { kind: e.target.value as RuleKind })}>
+                      {KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
+                    </Select>
+                  </Field>
+                  <Field>
+                    <Label>Action</Label>
+                    <Input
+                      value={r.action}
+                      onChange={(e) => patch(r._key, { action: e.target.value })}
+                      placeholder="direct / wg1 / trojan-jp / ..."
+                    />
+                  </Field>
+                  <Field className="sm:col-span-2">
+                    <Label>Pattern {isMatch && <span className="text-zinc-500">(disabled for MATCH)</span>}</Label>
+                    <Input
+                      value={r.pattern}
+                      onChange={(e) => patch(r._key, { pattern: e.target.value })}
+                      disabled={isMatch}
+                      placeholder={
+                        r.kind === 'DOMAIN-SUFFIX' ? 'example.com'
+                        : r.kind === 'IP-CIDR' ? '10.0.0.0/8'
+                        : r.kind === 'GEOSITE' ? 'cn'
+                        : 'pattern'
+                      }
+                    />
+                  </Field>
+                </div>
+              </FieldGroup>
+            </Fieldset>
+            <div className="mt-4 flex justify-between">
+              <Button plain onClick={() => { removeRow(r._key); }}>Delete rule</Button>
+              <Button color="zinc" onClick={() => setEditing(null)}>Done</Button>
+            </div>
+          </div>
+        );
+      })()}
+
+      <form className="glass mt-6 p-6" onSubmit={(e) => e.preventDefault()}>
         <Fieldset>
           <Legend>Apply metadata</Legend>
           <FieldGroup>
@@ -209,81 +368,6 @@ export default function Rules() {
           </FieldGroup>
         </Fieldset>
       </form>
-
-      <div className="glass p-2">
-        <Table>
-          <TableHead>
-            <TableRow>
-              <TableHeader>ID</TableHeader>
-              <TableHeader>Kind</TableHeader>
-              <TableHeader>Pattern</TableHeader>
-              <TableHeader>Action</TableHeader>
-              <TableHeader>Priority</TableHeader>
-              <TableHeader>Status</TableHeader>
-              <TableHeader className="text-right">Actions</TableHeader>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {draft.length === 0 && (
-              <TableRow>
-                <TableCell colSpan={7}>
-                  <Text>No rules yet — click <strong>+ Add rule</strong> to create one.</Text>
-                </TableCell>
-              </TableRow>
-            )}
-            {draft.map((r, i) => {
-              const isMatch = r.kind === 'MATCH';
-              return (
-                <TableRow key={r._key}>
-                  <TableCell>
-                    <Input value={r.id} onChange={(e) => patch(r._key, { id: e.target.value })} className="!p-1 !text-xs" />
-                  </TableCell>
-                  <TableCell>
-                    <Select value={r.kind} onChange={(e) => patch(r._key, { kind: e.target.value as RuleKind })} className="!p-1 !text-xs">
-                      {KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
-                    </Select>
-                  </TableCell>
-                  <TableCell>
-                    <Input
-                      value={r.pattern}
-                      onChange={(e) => patch(r._key, { pattern: e.target.value })}
-                      placeholder={isMatch ? '(unused)' : 'pattern'}
-                      disabled={isMatch}
-                      className="!p-1 !text-xs"
-                    />
-                  </TableCell>
-                  <TableCell>
-                    <Input value={r.action} onChange={(e) => patch(r._key, { action: e.target.value })} className="!p-1 !text-xs" />
-                  </TableCell>
-                  <TableCell className="metric">
-                    <Input
-                      type="number"
-                      value={r.priority}
-                      onChange={(e) => patch(r._key, { priority: Number(e.target.value) })}
-                      className="!p-1 !text-xs w-20"
-                    />
-                  </TableCell>
-                  <TableCell>
-                    <button
-                      type="button"
-                      onClick={() => patch(r._key, { enabled: !r.enabled })}
-                      className="cursor-pointer"
-                      aria-label={r.enabled ? 'disable rule' : 'enable rule'}
-                    >
-                      <Badge color={r.enabled ? 'lime' : 'zinc'}>{r.enabled ? 'enabled' : 'disabled'}</Badge>
-                    </button>
-                  </TableCell>
-                  <TableCell className="flex justify-end gap-1">
-                    <Button plain aria-label="move up"   onClick={() => move(r._key, -1)} disabled={i === 0}>↑</Button>
-                    <Button plain aria-label="move down" onClick={() => move(r._key, 1)}  disabled={i === draft.length - 1}>↓</Button>
-                    <Button plain aria-label="delete"    onClick={() => removeRow(r._key)}>✕</Button>
-                  </TableCell>
-                </TableRow>
-              );
-            })}
-          </TableBody>
-        </Table>
-      </div>
 
       {dry && (
         <div className="mt-8">
