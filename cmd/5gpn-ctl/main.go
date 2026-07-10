@@ -27,7 +27,7 @@ import (
 
 // clientVersion is stamped at build time. It has no coupling to the
 // daemon version — the daemon reports its own via the "version" cmd.
-var clientVersion = "0.0.0-s4"
+var clientVersion = "0.2.0"
 
 func main() {
 	if len(os.Args) < 2 {
