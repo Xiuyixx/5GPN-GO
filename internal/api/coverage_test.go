@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,9 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	"github.com/Xiuyixx/5GPN-Go/internal/db"
+	"github.com/Xiuyixx/5GPN-Go/internal/orchestrator"
 )
 
 var errAny = errors.New("synthetic")
@@ -266,13 +270,16 @@ func TestHandleApply_MalformedBodyReturns400(t *testing.T) {
 }
 
 // handleImportBackup happy path: build a real tar.gz containing
-// rules/active.yaml, import it, confirm entries+applied come back.
+// rules/active.yaml, import it, confirm entries+applied+apply_result come back.
+// Uses the NoOp orchestrator that testServer wires by default — applier
+// returns health="" which the applier maps to confirmed.
 func TestHandleImportBackup_HappyPath(t *testing.T) {
 	srv, tok := s2Setup(t)
 
-	// Build a minimal tar.gz in memory.
+	// Build a minimal tar.gz in memory. Real backup exports emit a
+	// rules-keyed document via rules.MarshalYAML, so the fixture matches.
 	buf, err := buildBackupTar(map[string]string{
-		"rules/active.yaml": "- id: r1\n  kind: MATCH\n  action: direct\n  priority: 10\n  enabled: true\n",
+		"rules/active.yaml": "rules:\n- id: r1\n  kind: MATCH\n  pattern: \"\"\n  action: direct\n  priority: 10\n  enabled: true\n",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -295,7 +302,118 @@ func TestHandleImportBackup_HappyPath(t *testing.T) {
 	if applied, _ := res["applied"].(bool); !applied {
 		t.Errorf("expected applied=true, got %v (%s)", res["applied"], rr.Body.String())
 	}
+	if _, ok := res["applied_snapshot_id"]; !ok {
+		t.Errorf("expected applied_snapshot_id in response: %s", rr.Body.String())
+	}
+	apply, ok := res["apply_result"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected apply_result object, got %v", res["apply_result"])
+	}
+	if apply["rolled_back"] != false {
+		t.Errorf("apply_result.rolled_back = %v, want false", apply["rolled_back"])
+	}
+
+	// Post-condition: the just-imported YAML is now the active rule version.
+	active, err := db.GetActiveRuleVersion(srv.DB)
+	if err != nil {
+		t.Fatalf("no active rule version after import: %v", err)
+	}
+	if !strings.Contains(active.RulesYAML, "id: r1") {
+		t.Errorf("active rule_version does not carry imported content: %q", active.RulesYAML)
+	}
 }
+
+// TestHandleImportBackup_OrchestratorFailure covers the negative path
+// mandated by AC8: when the apply pipeline reports an error, the DB
+// active-rule pointer must roll back to the prior version, the audit
+// log must carry a `backup.restore.rolled_back` entry, and the response
+// must be non-2xx. This guarantees "applied" never means "DB advanced
+// but data plane unchanged" (Critic F3, plan v3.2 AC8 negative path).
+func TestHandleImportBackup_OrchestratorFailure(t *testing.T) {
+	srv, tok := s2Setup(t)
+
+	// Seed a pre-existing active rule version so the rollback has a
+	// target to restore. Uses the standard apply path with the NoOp
+	// orchestrator so no faults are triggered.
+	seedBody := map[string]any{
+		"rules": []map[string]any{{
+			"id": "seed", "kind": "MATCH", "pattern": "",
+			"action": "direct", "priority": 100, "enabled": true,
+		}},
+		"note": "seed prior active",
+	}
+	rr := do(t, srv, authed(t, "POST", "/api/v1/rules/apply", seedBody, tok))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("seed apply: %d (%s)", rr.Code, rr.Body.String())
+	}
+	priorActive, err := db.GetActiveRuleVersion(srv.DB)
+	if err != nil {
+		t.Fatalf("no active version after seed: %v", err)
+	}
+
+	// Swap in a failing orchestrator on both the server AND the applier
+	// it shares — the API layer talks through Applier.Orch, so mutating
+	// only server.Orchestrator would leave the applier on the NoOp.
+	failing := &failingOrchestrator{err: errAny}
+	srv.Orchestrator = failing
+	srv.Applier.Orch = failing
+
+	buf, err := buildBackupTar(map[string]string{
+		"rules/active.yaml": "rules:\n- id: imported\n  kind: MATCH\n  pattern: \"\"\n  action: direct\n  priority: 10\n  enabled: true\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest("POST", "/api/v1/backup/import", strings.NewReader(buf))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Content-Type", "application/gzip")
+	rr = do(t, srv, req)
+	if rr.Code < 400 {
+		t.Fatalf("import should have failed, got %d (%s)", rr.Code, rr.Body.String())
+	}
+
+	// Active rule version must have rolled back to what was seeded.
+	after, err := db.GetActiveRuleVersion(srv.DB)
+	if err != nil {
+		t.Fatalf("no active rule version after rollback: %v", err)
+	}
+	if after.ID != priorActive.ID {
+		t.Errorf("active rule_version id = %d, want %d (rollback did not restore prior)",
+			after.ID, priorActive.ID)
+	}
+
+	// Audit log must show a rolled_back entry for backup.restore.
+	rows, err := srv.DB.Query(
+		`SELECT action FROM audit_log WHERE action LIKE 'backup.restore%' ORDER BY id DESC LIMIT 3`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	found := false
+	for rows.Next() {
+		var action string
+		if err := rows.Scan(&action); err != nil {
+			t.Fatal(err)
+		}
+		if action == "backup.restore.rolled_back" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("audit_log missing backup.restore.rolled_back entry")
+	}
+}
+
+// failingOrchestrator returns err from Apply, letting Applier.ImportRules
+// bubble the error out and drive the handler's rollback branch.
+type failingOrchestrator struct{ err error }
+
+func (f *failingOrchestrator) Apply(_ context.Context, _ orchestrator.ApplyRequest) (orchestrator.ApplyResult, error) {
+	return orchestrator.ApplyResult{}, f.err
+}
+
+func (f *failingOrchestrator) Rollback(_ context.Context, _ int64) error { return nil }
 
 func TestJournalHelpers(t *testing.T) {
 	// isUnitChar allows only safe characters for the journalctl arg.

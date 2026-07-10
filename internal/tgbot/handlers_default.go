@@ -26,6 +26,7 @@ type DefaultHandlers struct {
 	Logger    *slog.Logger
 	Startup   int64 // unix seconds, for /uptime
 	ExitState *ExitState
+	IOSPort   int
 }
 
 // ExitState is a minimal registry so the bot can serve /exits and
@@ -282,9 +283,13 @@ func (d *DefaultHandlers) Dev(_ context.Context) (string, error) {
 }
 
 func (d *DefaultHandlers) WWW(_ context.Context) (string, error) {
-	// Return a hint at where the iOS profile is served, matching the
-	// legacy /www command's behavior.
-	return "iOS DoT profile: `/opt/proxy-gateway/www/ios-dot.mobileconfig` served on :8111", nil
+	port := d.IOSPort
+	suffix := ""
+	if port <= 0 {
+		port = 8111
+		suffix = " (using default 8111)"
+	}
+	return fmt.Sprintf("iOS DoT profile: `/opt/proxy-gateway/www/ios-dot.mobileconfig` served on :%d%s", port, suffix), nil
 }
 
 func (d *DefaultHandlers) JSON(_ context.Context) (string, error) {

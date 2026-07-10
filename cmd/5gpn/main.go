@@ -210,6 +210,7 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 				DB:        dbHandle,
 				Logger:    logger,
 				ExitState: exitState,
+				IOSPort:   cfg.IOS.HTTPPort,
 			},
 			Logger: logger,
 		})

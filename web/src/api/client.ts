@@ -110,9 +110,17 @@ export interface Snapshot {
 export interface SnapshotsResponse { snapshots: Snapshot[] }
 export interface RollbackResponse { snapshot_id: number; rule_version_id: number }
 
+export interface ApplyResult {
+  health: string;
+  rolled_back: boolean;
+  reason?: string;
+}
+
 export interface BackupImportResult {
   entries: number;
   total_bytes: number;
   applied: boolean;
   note?: string;
+  applied_snapshot_id?: number;
+  apply_result?: ApplyResult;
 }
