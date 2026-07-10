@@ -132,7 +132,7 @@ func TestUnitRender_HasHardening(t *testing.T) {
 func TestDoctor_ReportsChecks(t *testing.T) {
 	env := Defaults().WithRoot(t.TempDir())
 	rec := NewRecorder()
-	report := Doctor(context.Background(), env, rec)
+	report := Doctor(context.Background(), env, rec, Distro{})
 	if len(report.Checks) == 0 {
 		t.Fatal("doctor produced no checks")
 	}
@@ -142,5 +142,26 @@ func TestDoctor_ReportsChecks(t *testing.T) {
 	}
 	if !names["bin dir writable"] {
 		t.Errorf("missing bin dir check")
+	}
+}
+
+func TestDoctor_WithDistroAddsRecognizedCheck(t *testing.T) {
+	env := Defaults().WithRoot(t.TempDir())
+	d, err := LoadOSFixture("testdata/os-release/ubuntu-24.04")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep := Doctor(context.Background(), env, NewRecorder(), d)
+	var found bool
+	for _, c := range rep.Checks {
+		if c.Name == "distro recognized" {
+			found = true
+			if !c.OK {
+				t.Errorf("ubuntu-24.04 should be OK, detail=%q", c.Detail)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("distro-recognized check missing when Doctor is given a distro")
 	}
 }

@@ -133,7 +133,8 @@ type DoctorCheck struct {
 }
 
 // Doctor inspects the host for the pieces install would need. Read-only.
-func Doctor(_ context.Context, env Env, ex Executor) DoctorReport {
+// When distro is a zero value, Doctor skips distro-family assertions.
+func Doctor(_ context.Context, env Env, ex Executor, distro Distro) DoctorReport {
 	rep := DoctorReport{}
 	add := func(name string, ok bool, detail string) {
 		rep.Checks = append(rep.Checks, DoctorCheck{Name: name, OK: ok, Detail: detail})
@@ -144,6 +145,10 @@ func Doctor(_ context.Context, env Env, ex Executor) DoctorReport {
 	if runtime.GOOS == "linux" {
 		add("systemctl on PATH", onPath("systemctl"), "")
 		add("useradd on PATH", onPath("useradd"), "")
+	}
+	if distro.ID != "" {
+		fam := distro.Family()
+		add("distro recognized", fam != FamilyUnknown, distro.String())
 	}
 	return rep
 }

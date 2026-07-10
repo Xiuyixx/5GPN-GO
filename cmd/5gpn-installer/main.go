@@ -71,13 +71,28 @@ func main() {
 }
 
 type commonFlags struct {
-	dryRun bool
-	root   string
+	dryRun    bool
+	root      string
+	osFixture string
 }
 
 func (c *commonFlags) bind(fs *flag.FlagSet) {
 	fs.BoolVar(&c.dryRun, "dry-run", false, "print actions without executing")
 	fs.StringVar(&c.root, "root", "", "re-root every path under DIR (test / container use)")
+	fs.StringVar(&c.osFixture, "os-fixture", "",
+		"path to an os-release fixture file (bypass live detection; used in CI + preview)")
+}
+
+func (c *commonFlags) distro() (installer.Distro, error) {
+	if c.osFixture != "" {
+		return installer.LoadOSFixture(c.osFixture)
+	}
+	d, err := installer.DetectDistro()
+	if err != nil {
+		// Non-linux dev machines: return zero value; callers decide whether to abort.
+		return installer.Distro{}, nil
+	}
+	return d, nil
 }
 
 func (c *commonFlags) executor() installer.Executor {
@@ -107,10 +122,18 @@ func runInstall(ctx context.Context, args []string) int {
 	skipEnable := fs.Bool("skip-enable", false, "do not enable+start the unit")
 	_ = fs.Parse(args)
 
+	d, err := cf.distro()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "install:", err)
+		return 1
+	}
+	if d.ID != "" {
+		fmt.Printf("distro: %s\n", d)
+	}
 	if cf.dryRun {
 		fmt.Println("[dry-run] install")
 	}
-	err := installer.Install(ctx, cf.env(), cf.executor(), installer.InstallOptions{
+	err = installer.Install(ctx, cf.env(), cf.executor(), installer.InstallOptions{
 		Force:        *force,
 		SkipUnit:     *skipUnit,
 		SkipEnable:   *skipEnable,
@@ -258,7 +281,12 @@ func runDoctor(ctx context.Context, args []string) int {
 	var cf commonFlags
 	cf.bind(fs)
 	_ = fs.Parse(args)
-	report := installer.Doctor(ctx, cf.env(), cf.executor())
+	d, err := cf.distro()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "doctor:", err)
+		return 1
+	}
+	report := installer.Doctor(ctx, cf.env(), cf.executor(), d)
 	fails := 0
 	for _, c := range report.Checks {
 		mark := "ok"
