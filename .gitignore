@@ -42,3 +42,6 @@ catalyst-ui-kit/
 
 # TypeScript incremental cache
 *.tsbuildinfo
+
+# Local dev binary build target — release goes to dist/
+/5gpn

@@ -84,6 +84,9 @@ func startDaemon(t *testing.T) *daemon {
 		"--data", stateDir,
 		"--listen", addr,
 		"--insecure",
+		// e2e drives the API surface only; forcing the noop orchestrator
+		// keeps Apply() from touching /etc/dnsdist etc. on GH runners.
+		"--orchestrator=noop",
 	)
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}

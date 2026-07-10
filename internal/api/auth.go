@@ -101,9 +101,14 @@ func CheckPassword(hash, plaintext string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(plaintext)) == nil
 }
 
-// HashPassword computes a bcrypt hash at cost=12.
+// bcryptCost is the work factor used when hashing new panel passwords.
+// Kept as a package variable so tests can lower it to bcrypt.MinCost;
+// production callers must not touch it.
+var bcryptCost = 12
+
+// HashPassword computes a bcrypt hash at the current cost.
 func HashPassword(plaintext string) (string, error) {
-	h, err := bcrypt.GenerateFromPassword([]byte(plaintext), 12)
+	h, err := bcrypt.GenerateFromPassword([]byte(plaintext), bcryptCost)
 	if err != nil {
 		return "", err
 	}

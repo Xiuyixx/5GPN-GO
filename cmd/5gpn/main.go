@@ -63,6 +63,8 @@ func main() {
 	dataDir := flag.String("data", "/var/lib/5gpn", "state directory (SQLite, snapshots, keys)")
 	listenAddr := flag.String("listen", "", "override server address (empty = use config)")
 	insecure := flag.Bool("insecure", false, "serve HTTP instead of HTTPS (dev only)")
+	orchestratorMode := flag.String("orchestrator", "auto",
+		"orchestrator: auto | systemd | noop. auto picks systemd on linux hosts with systemctl, noop otherwise. Use noop in e2e / container hosts that do not own /etc/dnsdist etc.")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -73,13 +75,13 @@ func main() {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	if err := run(logger, *configPath, *dataDir, *listenAddr, *insecure); err != nil {
+	if err := run(logger, *configPath, *dataDir, *listenAddr, *insecure, *orchestratorMode); err != nil {
 		logger.Error("fatal", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecure bool) error {
+func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecure bool, orchestratorMode string) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
@@ -135,17 +137,34 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 		return fmt.Errorf("assemble: %w", err)
 	}
 
-	// Orchestrator: Systemd on Linux hosts (real render + reload + probe +
-	// rollback), NoOp everywhere else so dev on macOS keeps working.
+	// Orchestrator selection.
+	// - `--orchestrator=systemd` forces systemd (fails at first Apply if
+	//   systemctl is missing).
+	// - `--orchestrator=noop` forces the noop driver — every render+reload
+	//   becomes a log line, no filesystem writes to /etc/dnsdist etc. Use
+	//   in e2e and container hosts that do not own the data-plane files.
+	// - `--orchestrator=auto` (default) picks systemd on Linux hosts with
+	//   systemctl on PATH, noop otherwise. Matches pre-flag behavior.
 	var orch orchestrator.Orchestrator
 	var systemd *orchestrator.Systemd
-	if orchestrator.AvailableOnHost() {
+	useSystemd := false
+	switch orchestratorMode {
+	case "systemd":
+		useSystemd = true
+	case "noop":
+		useSystemd = false
+	case "auto", "":
+		useSystemd = orchestrator.AvailableOnHost()
+	default:
+		return fmt.Errorf("--orchestrator: unknown value %q (want auto | systemd | noop)", orchestratorMode)
+	}
+	if useSystemd {
 		systemd = orchestrator.DefaultSystemd(effectiveCfg, logger)
 		orch = systemd
-		logger.Info("orchestrator: systemd")
+		logger.Info("orchestrator: systemd", "mode", orchestratorMode)
 	} else {
 		orch = &orchestrator.NoOp{Logger: logger}
-		logger.Info("orchestrator: no-op (non-linux host)")
+		logger.Info("orchestrator: no-op", "mode", orchestratorMode)
 	}
 
 	applier := &core.Applier{
