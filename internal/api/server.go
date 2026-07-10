@@ -16,8 +16,31 @@ import (
 
 	"github.com/Xiuyixx/5GPN-Go/internal/config"
 	"github.com/Xiuyixx/5GPN-Go/internal/core"
+	xexit "github.com/Xiuyixx/5GPN-Go/internal/exit"
 	"github.com/Xiuyixx/5GPN-Go/internal/orchestrator"
 )
+
+// serverExitAdapter narrows xexit.Store to the core.ExitStore contract
+// (Active returns exit_id string, not the Exit struct). Same shape as
+// cmd/5gpn/main.go's applierExitAdapter; kept in-package so api.New can
+// construct a self-contained Applier when Config.Applier is unset (test
+// wiring path).
+type serverExitAdapter struct{ inner xexit.Store }
+
+func (a serverExitAdapter) Active(ctx context.Context) (string, error) {
+	e, err := a.inner.Active(ctx)
+	if err != nil {
+		if errors.Is(err, xexit.ErrNoActive) {
+			return "", nil
+		}
+		return "", err
+	}
+	return e.ExitID, nil
+}
+
+func (a serverExitAdapter) Switch(ctx context.Context, exitID string) error {
+	return a.inner.Switch(ctx, exitID)
+}
 
 // Server owns the HTTP router + auth + rate limiter for the panel API.
 type Server struct {
@@ -30,6 +53,7 @@ type Server struct {
 	Orchestrator orchestrator.Orchestrator
 	BaseConfig   *config.Config
 	Applier      *core.Applier
+	Store        xexit.Store
 }
 
 // Config bundles user-adjustable server knobs.
@@ -44,6 +68,7 @@ type Config struct {
 	Orchestrator   orchestrator.Orchestrator
 	BaseConfig     *config.Config
 	Applier        *core.Applier
+	Store          xexit.Store
 }
 
 // New builds a Server from its dependencies.
@@ -66,11 +91,15 @@ func New(db *sql.DB, cfg Config, logger *slog.Logger) *Server {
 	if cfg.BaseConfig == nil {
 		cfg.BaseConfig = &config.Config{}
 	}
+	if cfg.Store == nil {
+		cfg.Store = xexit.NewStore(db)
+	}
 	if cfg.Applier == nil {
 		cfg.Applier = &core.Applier{
 			DB:         db,
 			BaseConfig: cfg.BaseConfig,
 			Store:      core.NoStore{},
+			ExitStore:  serverExitAdapter{inner: cfg.Store},
 			Orch:       cfg.Orchestrator,
 			Logger:     logger,
 		}
@@ -88,6 +117,7 @@ func New(db *sql.DB, cfg Config, logger *slog.Logger) *Server {
 		Orchestrator: cfg.Orchestrator,
 		BaseConfig:   cfg.BaseConfig,
 		Applier:      cfg.Applier,
+		Store:        cfg.Store,
 	}
 }
 

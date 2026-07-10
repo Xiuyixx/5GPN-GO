@@ -56,8 +56,8 @@ func (MihomoRenderer) Render(cfg *config.Config, w io.Writer) error {
 		names = append(names, "direct")
 	}
 
-	// Active exit = first in list (S2 will replace with DB-backed active exit).
-	// TODO(S2): replace with DB-backed active exit lookup.
+	// Active exit = names[0]. Contract: cfg.Exits is sorted active-first by
+	// core.Assemble via exit.Store.Records(); do not reorder downstream.
 	activeExitName := names[0]
 
 	// Build PROXY select group with active exit first.

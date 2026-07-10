@@ -25,6 +25,7 @@ import (
 	"github.com/Xiuyixx/5GPN-Go/internal/config"
 	"github.com/Xiuyixx/5GPN-Go/internal/core"
 	"github.com/Xiuyixx/5GPN-Go/internal/db"
+	xexit "github.com/Xiuyixx/5GPN-Go/internal/exit"
 	"github.com/Xiuyixx/5GPN-Go/internal/metrics"
 	"github.com/Xiuyixx/5GPN-Go/internal/orchestrator"
 	"github.com/Xiuyixx/5GPN-Go/internal/tgbot"
@@ -32,12 +33,12 @@ import (
 )
 
 // bootStore is the boot-time projection of DB state that core.Assemble
-// consumes. It reads the currently-active rule_versions row and returns
-// the yaml-declared exits unchanged (S2 will replace exits with a
-// DB-backed table).
+// consumes. It reads the currently-active rule_versions row and delegates
+// exit lookups to the DB-backed exit.Store (single source of truth for
+// exits since S2).
 type bootStore struct {
 	db    *sql.DB
-	exits []config.ExitConfig
+	exits xexit.Store
 }
 
 func (b *bootStore) ActiveRulesYAML() (string, bool, error) {
@@ -52,15 +53,7 @@ func (b *bootStore) ActiveRulesYAML() (string, bool, error) {
 }
 
 func (b *bootStore) ListExits() ([]core.ExitRecord, error) {
-	out := make([]core.ExitRecord, 0, len(b.exits))
-	for _, ex := range b.exits {
-		cfg := map[string]any{}
-		for k, v := range ex.Config {
-			cfg[k] = v
-		}
-		out = append(out, core.ExitRecord{ID: ex.ID, Protocol: ex.Protocol, Config: cfg})
-	}
-	return out, nil
+	return b.exits.Records(context.Background())
 }
 
 var version = "0.0.0-m1"
@@ -123,11 +116,20 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	// Exit store is the DB-backed truth for exits since S2. Migration
+	// seeds a single 'direct' row; if the operator's YAML lists additional
+	// exits AND this is truly first boot (only the seed row present),
+	// import them once. Idempotent on subsequent boots.
+	exitStore := xexit.NewStore(dbHandle)
+	if err := seedExitsFromYAML(ctx, exitStore, cfg.Exits, logger); err != nil {
+		logger.Warn("exit seed skipped", "err", err)
+	}
+
 	// Assemble the effective config once at boot so orchestrator + Applier
 	// both agree on what "active" looks like across restarts. Assemble is
 	// tolerant of missing DB rows (fresh install) so this is safe on
 	// first-boot.
-	store := &bootStore{db: dbHandle, exits: cfg.Exits}
+	store := &bootStore{db: dbHandle, exits: exitStore}
 	effectiveCfg, err := core.Assemble(cfg, store)
 	if err != nil {
 		return fmt.Errorf("assemble: %w", err)
@@ -150,6 +152,7 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 		DB:         dbHandle,
 		BaseConfig: cfg,
 		Store:      store,
+		ExitStore:  applierExitAdapter{inner: exitStore},
 		Orch:       orch,
 		Logger:     logger,
 	}
@@ -185,6 +188,7 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 		Orchestrator:   orch,
 		BaseConfig:     cfg,
 		Applier:        applier,
+		Store:          exitStore,
 	}, logger)
 
 	addr := listenOverride
@@ -198,12 +202,14 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 	}
 	// TG bot (optional — starts only when config.tgbot.token is set).
 	if cfg.TGBot.Token != "" {
+		exitState := buildTGBotExitState(exitStore, applier, logger)
 		bot, err := tgbot.New(tgbot.Config{
 			Token:        cfg.TGBot.Token,
 			AdminChatIDs: cfg.TGBot.AdminChatIDs,
 			Handlers: &tgbot.DefaultHandlers{
-				DB:     dbHandle,
-				Logger: logger,
+				DB:        dbHandle,
+				Logger:    logger,
+				ExitState: exitState,
 			},
 			Logger: logger,
 		})
@@ -249,4 +255,104 @@ func randomHex(n int) string {
 	buf := make([]byte, n)
 	_, _ = rand.Read(buf)
 	return hex.EncodeToString(buf)
+}
+
+// seedExitsFromYAML runs once at boot: if the DB currently holds only the
+// migration seed row ('direct') AND the operator's YAML lists additional
+// exits, import them. On subsequent boots the DB will have more rows so
+// this is a no-op — the DB is now the single source of truth for exits.
+func seedExitsFromYAML(ctx context.Context, store xexit.Store, yamlExits []config.ExitConfig, logger *slog.Logger) error {
+	if len(yamlExits) == 0 {
+		return nil
+	}
+	existing, err := store.List(ctx)
+	if err != nil {
+		return fmt.Errorf("list: %w", err)
+	}
+	if !(len(existing) == 1 && existing[0].ExitID == "direct") {
+		return nil
+	}
+	for _, ex := range yamlExits {
+		if ex.ID == "direct" {
+			continue
+		}
+		uri, _ := ex.Config["uri"].(string)
+		if uri == "" {
+			logger.Warn("exit YAML seed: no config.uri present — skipping", "id", ex.ID)
+			continue
+		}
+		if _, err := store.Add(ctx, ex.ID, uri); err != nil {
+			logger.Warn("exit YAML seed: add failed", "id", ex.ID, "err", err)
+			continue
+		}
+		logger.Info("exit YAML seeded into DB", "id", ex.ID)
+	}
+	return nil
+}
+
+// applierExitAdapter narrows xexit.Store down to the core.ExitStore
+// contract (Active returns exit_id string, not the full Exit struct).
+// Keeps internal/core free of an internal/exit import cycle.
+type applierExitAdapter struct{ inner xexit.Store }
+
+func (a applierExitAdapter) Active(ctx context.Context) (string, error) {
+	e, err := a.inner.Active(ctx)
+	if err != nil {
+		if errors.Is(err, xexit.ErrNoActive) {
+			return "", nil
+		}
+		return "", err
+	}
+	return e.ExitID, nil
+}
+
+func (a applierExitAdapter) Switch(ctx context.Context, exitID string) error {
+	return a.inner.Switch(ctx, exitID)
+}
+
+// buildTGBotExitState wires the tgbot function-pointer seam onto the
+// DB-backed exit.Store + core.Applier. Add/Delete hit the store directly
+// (no data-plane render). Switch goes through Applier.SwitchExit so the
+// bot and panel share the same apply_status / rollback machinery.
+func buildTGBotExitState(store xexit.Store, applier *core.Applier, logger *slog.Logger) *tgbot.ExitState {
+	return &tgbot.ExitState{
+		Items: func() []tgbot.Exit {
+			items, err := store.List(context.Background())
+			if err != nil {
+				logger.Warn("tgbot ExitState.Items", "err", err)
+				return nil
+			}
+			out := make([]tgbot.Exit, 0, len(items))
+			for _, e := range items {
+				host, _ := e.ProxyConfig["server"].(string)
+				port, _ := e.ProxyConfig["port"].(int)
+				out = append(out, tgbot.Exit{
+					ID:       e.ExitID,
+					Protocol: e.Protocol,
+					Server:   host,
+					Port:     port,
+					Active:   e.Active,
+				})
+			}
+			return out
+		},
+		Switch: func(id string) error {
+			_, err := applier.SwitchExit(context.Background(), id)
+			return err
+		},
+		Add: func(id, uri string) error {
+			_, err := store.Add(context.Background(), id, uri)
+			return err
+		},
+		Delete: func(id string) error {
+			return store.Delete(context.Background(), id)
+		},
+		Active: func() string {
+			e, err := store.Active(context.Background())
+			if err != nil {
+				return ""
+			}
+			return e.ExitID
+		},
+	}
 }
