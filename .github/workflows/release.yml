@@ -86,7 +86,7 @@ jobs:
       - name: report sizes
         run: ls -lh out/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: daemon-linux
           path: out/*
@@ -121,7 +121,7 @@ jobs:
           done
           ls -lh out/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: installer-portable
           path: out/*
