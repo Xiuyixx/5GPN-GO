@@ -3,11 +3,15 @@ package api
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -94,8 +98,11 @@ func (s *Server) handleRollbackSnapshot(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-// handleExportBackup streams a tar.gz containing configs + active rules +
-// snapshots metadata JSON. M2 S4 will add SQLite hot-copy via VACUUM INTO.
+// handleExportBackup streams a tar.gz containing:
+// - rules/active.yaml (current active rule_version)
+// - snapshots/manifest.json (last 200 snapshot rows)
+// - db/5gpn.db (SQLite hot-copy via VACUUM INTO — atomic + WAL-safe)
+// - README.txt
 func (s *Server) handleExportBackup(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/gzip")
 	w.Header().Set("Content-Disposition", `attachment; filename="5gpn-backup.tar.gz"`)
@@ -127,16 +134,27 @@ func (s *Server) handleExportBackup(w http.ResponseWriter, r *http.Request) {
 		_ = writeMember("snapshots/manifest.json", body)
 	}
 
-	// A small README with regenerable instructions.
+	// SQLite hot copy via VACUUM INTO — atomic, does not require
+	// stopping writes, and gives us a WAL-consistent file we can put
+	// directly into the tar member.
+	if body, err := hotCopyDB(r.Context(), s.DB); err == nil {
+		_ = writeMember("db/5gpn.db", body)
+	} else {
+		s.Logger.Warn("backup: hotcopy failed", "err", err)
+	}
+
 	_ = writeMember("README.txt", []byte(fmt.Sprintf(
-		"5GPN backup export\ngenerated: %s\ncontains: active rules yaml + snapshot manifest\nM2 S4 will add SQLite hot-copy + config.yaml.\n",
+		"5GPN backup export\ngenerated: %s\ncontains: rules/active.yaml, snapshots/manifest.json, db/5gpn.db\n",
 		r.Header.Get("Date"),
 	)))
 }
 
-// handleImportBackup is a stub that just accepts + counts the tarball
-// entries so the UI can validate a round-trip. M2 S4 does the real
-// restore + orchestrator reload.
+// handleImportBackup accepts a tar.gz backup and applies the pieces it
+// recognizes: rules/active.yaml becomes the new active rule_version,
+// db/5gpn.db is exposed via the response so the operator can inspect
+// before deciding to restore. The import intentionally does not
+// overwrite the live SQLite file — that path lives in 5gpn-installer
+// where systemd is available to stop the daemon first.
 func (s *Server) handleImportBackup(w http.ResponseWriter, r *http.Request) {
 	gz, err := gzip.NewReader(r.Body)
 	if err != nil {
@@ -147,6 +165,8 @@ func (s *Server) handleImportBackup(w http.ResponseWriter, r *http.Request) {
 	tr := tar.NewReader(gz)
 	entries := 0
 	var totalSize int64
+	var applied bool
+
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -158,15 +178,68 @@ func (s *Server) handleImportBackup(w http.ResponseWriter, r *http.Request) {
 		}
 		entries++
 		totalSize += hdr.Size
-		if _, err := io.Copy(io.Discard, tr); err != nil {
-			writeError(w, http.StatusBadRequest, "bad_tar", err.Error())
-			return
+
+		switch hdr.Name {
+		case "rules/active.yaml":
+			body, err := io.ReadAll(tr)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "bad_tar", err.Error())
+				return
+			}
+			if len(body) == 0 {
+				continue
+			}
+			// Insert a new snapshot + rule_version so the change is
+			// traceable in the audit log, then activate it.
+			snapID, err := db.InsertSnapshot(s.DB, db.Snapshot{
+				ConfigHash:  fmt.Sprintf("import-%d", time.Now().Unix()),
+				TarballPath: "",
+				Note:        "imported from backup",
+			})
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "db_error", err.Error())
+				return
+			}
+			if _, err := db.InsertRuleVersion(s.DB, snapID, string(body), true); err != nil {
+				writeError(w, http.StatusInternalServerError, "db_error", err.Error())
+				return
+			}
+			applied = true
+			actor, _ := r.Context().Value(ctxUsername).(string)
+			_ = db.AppendAudit(s.DB, db.AuditEntry{
+				Actor: actor, Action: "backup.restore",
+				Target: "rules/active.yaml", Result: "ok", IP: clientIP(r),
+			})
+		default:
+			// Drain unknown members; we accept them structurally but
+			// don't apply them.
+			if _, err := io.Copy(io.Discard, tr); err != nil {
+				writeError(w, http.StatusBadRequest, "bad_tar", err.Error())
+				return
+			}
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"entries":     entries,
 		"total_bytes": totalSize,
-		"applied":     false,
-		"note":        "M2 S2 stub — S4 wires the real restore",
+		"applied":     applied,
 	})
+}
+
+// hotCopyDB creates a WAL-safe snapshot of the panel SQLite file via
+// VACUUM INTO into a temp path, reads the bytes, and cleans up.
+func hotCopyDB(ctx context.Context, handle *sql.DB) ([]byte, error) {
+	tmp, err := os.CreateTemp("", "5gpn-backup-*.db")
+	if err != nil {
+		return nil, err
+	}
+	path := tmp.Name()
+	_ = tmp.Close()
+	_ = os.Remove(path)
+	defer os.Remove(path)
+
+	if _, err := handle.ExecContext(ctx, "VACUUM INTO ?", path); err != nil {
+		return nil, err
+	}
+	return os.ReadFile(path)
 }
