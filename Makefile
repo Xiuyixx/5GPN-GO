@@ -3,7 +3,7 @@ GO := go
 NPM := npm
 VERSION ?= 0.0.0-dev
 
-.PHONY: build build-embed dev test lint tidy release clean web-install web-build stage-web size-check install-hooks coverage
+.PHONY: build build-embed dev test lint tidy release clean web-install web-build stage-web size-check install-hooks coverage release-matrix
 
 build:
 	$(GO) build ./cmd/5gpn ./cmd/5gpn-installer ./cmd/5gpn-ctl
@@ -63,3 +63,23 @@ install-hooks:
 coverage:
 	$(GO) test -race -coverprofile=cover.out ./internal/... 2>&1 | tee coverage.log
 	@$(GO) tool cover -func=cover.out | tail -1
+
+# Local mirror of .github/workflows/release.yml's cross-compile matrix
+# for cmd/5gpn-installer + cmd/5gpn-ctl — pure Go, no CGO toolchain
+# needed. The daemon (CGO+embed) is not cross-compiled here; that step
+# runs in Linux CI where the C toolchain is available.
+release-matrix:
+	@rm -rf dist/matrix && mkdir -p dist/matrix
+	@for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do \
+	  os="$${target%/*}"; arch="$${target#*/}"; \
+	  echo "== $${target} =="; \
+	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build \
+	    -ldflags="-s -w -X main.version=$(VERSION)" \
+	    -o dist/matrix/5gpn-installer-$$os-$$arch ./cmd/5gpn-installer; \
+	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build \
+	    -ldflags="-s -w -X main.version=$(VERSION)" \
+	    -o dist/matrix/5gpn-ctl-$$os-$$arch ./cmd/5gpn-ctl; \
+	done
+	@cd dist/matrix && shasum -a 256 ./* | sed 's|\./||' > SHA256SUMS
+	@ls -lh dist/matrix/
+	@echo && echo "SHA256SUMS:" && cat dist/matrix/SHA256SUMS

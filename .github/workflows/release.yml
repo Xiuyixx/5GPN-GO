@@ -1,0 +1,184 @@
+# Release pipeline.
+#
+# Trigger: push a tag matching `v*` (e.g. `v0.1.0`). The workflow builds
+# every distributable artifact, generates a single SHA256SUMS file, and
+# publishes them to a GitHub Release attached to the tag. The
+# deploy/install.sh bootstrap depends on the file names produced here —
+# do not rename artefacts without updating the shell script too.
+#
+# Layout:
+#   daemon-linux            Cross-compiles 5gpn (CGO on) for linux amd64 + arm64
+#                           with the web dist embedded. This is the heavy step;
+#                           it does the npm build once and reuses the dist across
+#                           architectures.
+#   installer-portable      Pure-Go cross-compile of 5gpn-installer + 5gpn-ctl for
+#                           linux/darwin × amd64/arm64. Fast, no CGO toolchain.
+#   publish                 Collects artefacts, writes SHA256SUMS, and creates
+#                           the release with generated release notes.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  daemon-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: build web dist
+        working-directory: web
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+
+      - name: stage web dist for embed
+        run: |
+          rm -rf internal/web/dist
+          cp -R web/dist internal/web/dist
+
+      - name: install cross toolchain for arm64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: build linux/amd64
+        env:
+          CGO_ENABLED: 1
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          mkdir -p out
+          go build -tags 'embed osusergo netgo' \
+            -ldflags="-s -w -X main.version=${GITHUB_REF_NAME}" \
+            -o out/5gpn-linux-amd64 \
+            ./cmd/5gpn
+
+      - name: build linux/arm64
+        env:
+          CGO_ENABLED: 1
+          GOOS: linux
+          GOARCH: arm64
+          CC: aarch64-linux-gnu-gcc
+        run: |
+          go build -tags 'embed osusergo netgo' \
+            -ldflags="-s -w -X main.version=${GITHUB_REF_NAME}" \
+            -o out/5gpn-linux-arm64 \
+            ./cmd/5gpn
+
+      - name: report sizes
+        run: ls -lh out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: daemon-linux
+          path: out/*
+          if-no-files-found: error
+
+  installer-portable:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+
+      - name: cross-compile installer + ctl for linux/darwin × amd64/arm64
+        env:
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p out
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os="${target%/*}"
+            arch="${target#*/}"
+            echo "== ${target} =="
+            GOOS="${os}" GOARCH="${arch}" go build \
+              -ldflags="-s -w -X main.version=${GITHUB_REF_NAME}" \
+              -o "out/5gpn-installer-${os}-${arch}" \
+              ./cmd/5gpn-installer
+            GOOS="${os}" GOARCH="${arch}" go build \
+              -ldflags="-s -w -X main.version=${GITHUB_REF_NAME}" \
+              -o "out/5gpn-ctl-${os}-${arch}" \
+              ./cmd/5gpn-ctl
+          done
+          ls -lh out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-portable
+          path: out/*
+          if-no-files-found: error
+
+  publish:
+    needs: [daemon-linux, installer-portable]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: staging
+
+      - name: assemble release dir
+        run: |
+          mkdir -p release
+          find staging -type f -exec cp -v {} release/ \;
+          ls -lh release/
+
+      - name: generate SHA256SUMS
+        working-directory: release
+        run: |
+          sha256sum ./* | sed 's|\./||' > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          notes=$(cat <<EOF
+          ## Highlights
+
+          Automated release for tag \`${GITHUB_REF_NAME}\`. See
+          [README.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/README.md)
+          for the feature list and
+          [docs/milestones.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/docs/milestones.md)
+          for the milestone log.
+
+          ## Install
+
+          \`\`\`sh
+          curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}/deploy/install.sh | sudo bash
+          \`\`\`
+
+          ## Verify
+
+          Every artefact is listed in \`SHA256SUMS\` (attached below). Verify with
+          \`\`\`sh
+          sha256sum -c SHA256SUMS
+          \`\`\`
+          EOF
+          )
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "${notes}" \
+            --generate-notes \
+            release/*
