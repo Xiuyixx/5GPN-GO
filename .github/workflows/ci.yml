@@ -96,6 +96,19 @@ jobs:
           E2E_BINARY: ${{ github.workspace }}/dist/5gpn
         run: go test -tags e2e -count=1 -timeout=2m ./tests/e2e/...
 
+  # S1 guard: internal/rules must never import internal/config.
+  # Prevents accidental import cycles on the config→rules unidirectional boundary.
+  dep-cycle-check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+      - name: config→rules dep-cycle guard
+        run: make dep-cycle-check
+
   # Preview installer behavior against every supported distro fixture
   # without provisioning real VMs. Every fixture must yield `install: ok`
   # in dry-run mode. If you add a fixture, extend the matrix + the

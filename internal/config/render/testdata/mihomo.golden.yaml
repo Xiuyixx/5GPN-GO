@@ -1,0 +1,26 @@
+bind-address: 127.0.0.1
+external-controller: 127.0.0.1:9090
+ipv6: false
+log-level: warning
+mixed-port: 7890
+mode: rule
+profile:
+  store-selected: false
+proxies:
+  - endpoint: vpn.example.com:51820
+    name: wg1
+    private_key: testkey
+    type: wireguard
+  - endpoint: vpn2.example.com:51820
+    name: wg2
+    type: wireguard
+proxy-groups:
+  - name: PROXY
+    proxies:
+      - wg1
+      - wg2
+    type: select
+rules:
+  - DOMAIN,direct.example.com,DIRECT
+  - DOMAIN-SUFFIX,google.com,wg1
+  - MATCH,wg1

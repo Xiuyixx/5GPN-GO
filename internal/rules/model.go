@@ -41,6 +41,25 @@ type Rule struct {
 	Notes    string `yaml:"notes"    json:"notes,omitempty"`
 }
 
+// ToMihomoLine serializes the rule to a single mihomo rules-list entry.
+// KindMatch omits the pattern field: "MATCH,<action>".
+// All other kinds: "<KIND>,<pattern>,<action>".
+func (r Rule) ToMihomoLine() (string, error) {
+	if r.Kind == KindMatch {
+		if strings.TrimSpace(r.Action) == "" {
+			return "", fmt.Errorf("rule %s: MATCH rule requires an action", r.ID)
+		}
+		return fmt.Sprintf("MATCH,%s", r.Action), nil
+	}
+	if strings.TrimSpace(r.Pattern) == "" {
+		return "", fmt.Errorf("rule %s: pattern required for kind %s", r.ID, r.Kind)
+	}
+	if strings.TrimSpace(r.Action) == "" {
+		return "", fmt.Errorf("rule %s: action required", r.ID)
+	}
+	return fmt.Sprintf("%s,%s,%s", r.Kind, r.Pattern, r.Action), nil
+}
+
 // Validate checks a single rule for well-formedness.
 func (r Rule) Validate() error {
 	if strings.TrimSpace(r.ID) == "" {

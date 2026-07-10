@@ -3,7 +3,7 @@ GO := go
 NPM := npm
 VERSION ?= 0.0.0-dev
 
-.PHONY: build build-embed dev test lint tidy release clean web-install web-build stage-web size-check install-hooks coverage release-matrix
+.PHONY: build build-embed dev test lint tidy release clean web-install web-build stage-web size-check install-hooks coverage release-matrix dep-cycle-check
 
 build:
 	$(GO) build ./cmd/5gpn ./cmd/5gpn-installer ./cmd/5gpn-ctl
@@ -83,3 +83,13 @@ release-matrix:
 	@cd dist/matrix && shasum -a 256 ./* | sed 's|\./||' > SHA256SUMS
 	@ls -lh dist/matrix/
 	@echo && echo "SHA256SUMS:" && cat dist/matrix/SHA256SUMS
+
+# S1 dep-cycle guard: assert internal/rules never imports internal/config.
+# Enforces the unidirectional config→rules dependency declared in the plan.
+dep-cycle-check:
+	@echo "Checking config→rules import direction..."
+	@if go list -deps github.com/Xiuyixx/5GPN-Go/internal/rules 2>/dev/null \
+	    | grep -q 'github.com/Xiuyixx/5GPN-Go/internal/config'; then \
+	  echo "FAIL: internal/rules imports internal/config (cycle detected)"; exit 1; \
+	fi
+	@echo "OK: internal/rules does not import internal/config"

@@ -16,13 +16,13 @@ type TestFixture struct {
 
 // DryRunResult reports one probe outcome.
 type DryRunResult struct {
-	Domain          string `json:"domain"`
-	MatchedRule     string `json:"matched_rule"`
-	MatchedKind     Kind   `json:"matched_kind"`
-	ActualExit      string `json:"actual_exit"`
-	ExpectedExit    string `json:"expected_exit"`
-	Pass            bool   `json:"pass"`
-	FailureReason   string `json:"failure_reason,omitempty"`
+	Domain        string `json:"domain"`
+	MatchedRule   string `json:"matched_rule"`
+	MatchedKind   Kind   `json:"matched_kind"`
+	ActualExit    string `json:"actual_exit"`
+	ExpectedExit  string `json:"expected_exit"`
+	Pass          bool   `json:"pass"`
+	FailureReason string `json:"failure_reason,omitempty"`
 }
 
 // DryRun applies the candidate ruleset against a list of fixtures using a
@@ -30,7 +30,11 @@ type DryRunResult struct {
 // rules are treated as matching only if the fixture explicitly names them
 // in Notes (M1 keeps the fixture surface deliberately small; M2 loads real
 // geosite dat files).
-func DryRun(set *RuleSet, fixtures []TestFixture) []DryRunResult {
+//
+// fallthroughTarget is the exit name applied to fixtures that match no rule
+// (equivalent to the renderer's synthetic MATCH fallback). Pass the result of
+// ResolveFallthrough to keep dry-run and production behaviour identical.
+func DryRun(set *RuleSet, fixtures []TestFixture, fallthroughTarget string) []DryRunResult {
 	sorted := make([]Rule, 0, len(set.Rules))
 	for _, r := range set.Rules {
 		if !r.Enabled {
@@ -45,7 +49,18 @@ func DryRun(set *RuleSet, fixtures []TestFixture) []DryRunResult {
 		res := DryRunResult{Domain: f.Domain, ExpectedExit: f.ExpectedExit}
 		match := findMatch(sorted, f)
 		if match == nil {
-			res.FailureReason = "no rule matched"
+			// No rule matched — apply fallthrough target (mirrors renderer MATCH fallback).
+			if fallthroughTarget != "" {
+				res.MatchedRule = "fallthrough"
+				res.MatchedKind = KindMatch
+				res.ActualExit = fallthroughTarget
+				res.Pass = f.ExpectedExit == "" || f.ExpectedExit == fallthroughTarget
+				if !res.Pass {
+					res.FailureReason = "actual exit differs from expected"
+				}
+			} else {
+				res.FailureReason = "no rule matched"
+			}
 		} else {
 			res.MatchedRule = match.ID
 			res.MatchedKind = match.Kind
@@ -108,3 +123,4 @@ func domainHasSuffix(domain, suffix string) bool {
 	}
 	return strings.HasSuffix(d, "."+s)
 }
+

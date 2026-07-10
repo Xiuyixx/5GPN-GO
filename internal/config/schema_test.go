@@ -1,11 +1,15 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Xiuyixx/5GPN-Go/internal/rules"
+	"gopkg.in/yaml.v3"
 )
 
 const minimalYAML = `
@@ -105,4 +109,45 @@ func TestEnvExpansion(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	// Sanity: the ${...} on a comment line should not break parsing.
+}
+
+// TestEffectiveRulesNotSerialized asserts EffectiveRules is stripped from any
+// exported form (yaml or json). Backup export purity — Risk R4 in the plan.
+func TestEffectiveRulesRoundTripPurity(t *testing.T) {
+	cfg := Config{
+		Server: ServerConfig{Domain: "x.example", PanelPort: 8443, PanelBind: "0.0.0.0"},
+		EffectiveRules: []rules.Rule{
+			{ID: "cn", Kind: rules.KindDomainSuffix, Pattern: "cn", Action: "direct", Priority: 10, Enabled: true},
+			{ID: "m", Kind: rules.KindMatch, Action: "wg1", Priority: 100, Enabled: true},
+		},
+	}
+
+	yamlBytes, err := yaml.Marshal(&cfg)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	if strings.Contains(string(yamlBytes), "cn-direct") ||
+		strings.Contains(string(yamlBytes), "effectiverules") ||
+		strings.Contains(string(yamlBytes), "EffectiveRules") ||
+		strings.Contains(string(yamlBytes), "DOMAIN-SUFFIX") {
+		t.Fatalf("EffectiveRules leaked into yaml output:\n%s", string(yamlBytes))
+	}
+
+	var round Config
+	if err := yaml.Unmarshal(yamlBytes, &round); err != nil {
+		t.Fatalf("yaml.Unmarshal: %v", err)
+	}
+	if round.EffectiveRules != nil {
+		t.Fatalf("round-trip: EffectiveRules must be nil after marshal→unmarshal, got %+v", round.EffectiveRules)
+	}
+
+	jsonBytes, err := json.Marshal(&cfg)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if strings.Contains(string(jsonBytes), "EffectiveRules") ||
+		strings.Contains(string(jsonBytes), "effective_rules") ||
+		strings.Contains(string(jsonBytes), "DOMAIN-SUFFIX") {
+		t.Fatalf("EffectiveRules leaked into json output: %s", string(jsonBytes))
+	}
 }

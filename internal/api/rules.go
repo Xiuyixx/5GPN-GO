@@ -66,7 +66,8 @@ func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "validation_failed", err.Error())
 		return
 	}
-	res := rules.DryRun(set, req.Fixtures)
+	fallthrough_, _ := rules.ResolveFallthrough(set, "", "")
+	res := rules.DryRun(set, req.Fixtures, fallthrough_)
 	passed := 0
 	for _, r := range res {
 		if r.Pass {
@@ -122,8 +123,11 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 	appRes, appErr := s.Orchestrator.Apply(r.Context(), orchestrator.ApplyRequest{
 		SnapshotID:    snapID,
 		RuleVersionID: rvID,
-		RulesYAML:     string(yamlBytes),
 		PrevSnapshot:  prevSnapshot,
+		// Config is intentionally nil here — this call site is a
+		// transitional stub that will be replaced by core.Applier in
+		// S1-T11. Systemd.Apply currently ignores req.Config anyway
+		// (S1-T9 will make it authoritative).
 	})
 
 	result := "ok"

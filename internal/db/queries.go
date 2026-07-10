@@ -271,3 +271,27 @@ func boolToInt(b bool) int {
 	}
 	return 0
 }
+
+// GetRuleSourceETag returns the stored ETag for a given URL, or ("", nil) if not found.
+func GetRuleSourceETag(db *sql.DB, url string) (string, error) {
+	var etag sql.NullString
+	err := db.QueryRow(`SELECT etag FROM rule_sources WHERE url = ?`, url).Scan(&etag)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return etag.String, nil
+}
+
+// UpsertRuleSourceETag inserts or updates the etag + last_synced for a URL.
+func UpsertRuleSourceETag(db *sql.DB, url, kind, etag string) error {
+	_, err := db.Exec(
+		`INSERT INTO rule_sources(url, kind, last_synced, etag)
+		 VALUES(?, ?, CURRENT_TIMESTAMP, ?)
+		 ON CONFLICT(url) DO UPDATE SET last_synced = CURRENT_TIMESTAMP, etag = excluded.etag`,
+		url, kind, etag,
+	)
+	return err
+}

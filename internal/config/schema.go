@@ -3,19 +3,25 @@
 // which dnsdist.conf, mihomo.yaml, and sniproxy.conf are rendered.
 package config
 
-import "time"
+import (
+	"time"
+
+	"github.com/Xiuyixx/5GPN-Go/internal/rules"
+)
 
 // Config is the root document.
 type Config struct {
-	Server ServerConfig `yaml:"server" validate:"required"`
-	Panel  PanelConfig  `yaml:"panel"  validate:"required"`
-	DNS    DNSConfig    `yaml:"dns"`
-	Proxy  ProxyConfig  `yaml:"proxy"`
-	Exits  []ExitConfig `yaml:"exits"  validate:"min=1,dive"`
-	Rules  RulesConfig  `yaml:"rules"`
-	TGBot  TGBotConfig  `yaml:"tgbot"`
-	IOS    IOSConfig    `yaml:"ios"`
-	LowMem LowMemConfig `yaml:"lowmem"`
+	Server         ServerConfig  `yaml:"server"          validate:"required"`
+	Panel          PanelConfig   `yaml:"panel"           validate:"required"`
+	DNS            DNSConfig     `yaml:"dns"`
+	Proxy          ProxyConfig   `yaml:"proxy"`
+	Exits          []ExitConfig  `yaml:"exits"           validate:"min=1,dive"`
+	Rules          RulesConfig   `yaml:"rules"`
+	TGBot          TGBotConfig   `yaml:"tgbot"`
+	IOS            IOSConfig     `yaml:"ios"`
+	LowMem         LowMemConfig  `yaml:"lowmem"`
+	// EffectiveRules is populated at runtime by core.Assemble; never serialized.
+	EffectiveRules []rules.Rule  `yaml:"-" json:"-"`
 }
 
 type ServerConfig struct {
@@ -41,15 +47,17 @@ type RateLimitConfig struct {
 }
 
 type DNSConfig struct {
-	DoTPort         int      `yaml:"dot_port" validate:"omitempty,min=1,max=65535"`
+	DoTPort         int      `yaml:"dot_port"        validate:"omitempty,min=1,max=65535"`
 	Upstreams       []string `yaml:"upstreams"`
 	ChinaListSource string   `yaml:"chinalist_source"`
+	ChinaListPath   string   `yaml:"chinalist_path"`
 }
 
 type ProxyConfig struct {
-	SniProxy SniProxyConfig `yaml:"sniproxy"`
-	WAShim   WAShimConfig   `yaml:"wa_shim"`
-	QUIC     QUICConfig     `yaml:"quic"`
+	SniProxy       SniProxyConfig `yaml:"sniproxy"`
+	WAShim         WAShimConfig   `yaml:"wa_shim"`
+	QUIC           QUICConfig     `yaml:"quic"`
+	MihomoMixedPort int           `yaml:"mihomo_mixed_port"`
 }
 
 type SniProxyConfig struct {

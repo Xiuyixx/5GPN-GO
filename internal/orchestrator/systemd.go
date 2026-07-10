@@ -11,23 +11,43 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/Xiuyixx/5GPN-Go/internal/config"
 	"github.com/Xiuyixx/5GPN-Go/internal/config/render"
 )
 
+// ErrApplyInFlight is returned by Apply when another Apply is still
+// inside its full lifecycle (render → reload → background health).
+// The API layer maps this to HTTP 409.
+var ErrApplyInFlight = errors.New("orchestrator: apply in flight")
+
 // Systemd is the real Linux driver: render three-party configs, reload
 // their units, run a health probe, roll back on failure.
 type Systemd struct {
 	Logger        *slog.Logger
-	Config        *config.Config      // current YAML source of truth
-	DnsdistPath   string              // default /etc/dnsdist/dnsdist.conf
-	MihomoPath    string              // default /etc/mihomo/config.yaml
-	SniproxyPath  string              // default /etc/sniproxy.conf
+	DnsdistPath   string        // default /etc/dnsdist/dnsdist.conf
+	MihomoPath    string        // default /etc/mihomo/config.yaml
+	SniproxyPath  string        // default /etc/sniproxy.conf
 	HealthCheck   func(ctx context.Context) error
-	HealthDelay   time.Duration       // wait before probe, default 3s
-	HealthTimeout time.Duration       // probe budget, default 5s
+	HealthDelay   time.Duration // wait before probe, default 3s
+	HealthTimeout time.Duration // probe budget, default 5s
+
+	// HealthObserver, if set, is invoked from the background health
+	// goroutine with the final ApplyResult (health-confirmed or
+	// rolled-back). Applier uses this to persist apply status.
+	HealthObserver func(ctx context.Context, req ApplyRequest, res ApplyResult)
+
+	// Config is the last successfully-applied effective config; used
+	// only as a fallback baseline for Rollback. Guarded by configMu.
+	Config   *config.Config
+	configMu sync.RWMutex
+
+	// applyMu is held for the entire apply lifecycle — render, reload,
+	// and the background health-observation goroutine. A concurrent
+	// Apply attempt uses TryLock and returns ErrApplyInFlight.
+	applyMu sync.Mutex
 
 	// reloadOverride is used only by tests to skip real systemctl calls.
 	reloadOverride func(context.Context) error
@@ -59,50 +79,99 @@ func AvailableOnHost() bool {
 }
 
 // Apply performs the full pipeline: render → snapshot on-disk configs →
-// write new files → reload units → wait → probe → roll back on failure.
+// write new files → reload units → return; a background goroutine then
+// waits HealthDelay, probes health, and either commits the new config
+// or restores the previous on-disk snapshot + reloads.
+//
+// Concurrency: Apply is serialized by applyMu. If another Apply is
+// still inside its lifecycle (including the background health phase),
+// the call returns ErrApplyInFlight.
+//
+// req.Config is authoritative — s.Config is untouched by this call
+// until the background health check confirms.
 func (s *Systemd) Apply(ctx context.Context, req ApplyRequest) (ApplyResult, error) {
-	res := ApplyResult{}
-	if s.Config == nil {
-		return res, errors.New("systemd: nil config")
+	if req.Config == nil {
+		return ApplyResult{Reason: "nil config"}, errors.New("systemd: apply request missing config")
 	}
+	if !s.applyMu.TryLock() {
+		return ApplyResult{Reason: "apply-in-flight"}, ErrApplyInFlight
+	}
+	// applyMu is released either inline on synchronous failure or
+	// success-without-health, or from observeHealth on success-with-health.
 	s.log().Info("apply: rendering configs", "snapshot", req.SnapshotID)
 
 	prev, err := s.snapshotCurrent()
 	if err != nil {
-		res.Reason = err.Error()
-		return res, err
+		s.applyMu.Unlock()
+		return ApplyResult{Reason: err.Error()}, err
 	}
 
-	if err := s.render(); err != nil {
-		res.Reason = err.Error()
-		return res, err
+	if err := s.render(req.Config); err != nil {
+		s.applyMu.Unlock()
+		return ApplyResult{Reason: err.Error()}, err
 	}
 
 	if err := s.reloadUnits(ctx); err != nil {
-		res.Reason = err.Error()
 		s.log().Warn("apply: reload failed — restoring previous configs", "err", err)
 		_ = s.restore(prev)
-		res.RolledBack = true
-		res.Health = "failed"
-		return res, err
+		s.applyMu.Unlock()
+		return ApplyResult{RolledBack: true, Health: "failed", Reason: err.Error()}, err
 	}
 
-	if s.HealthCheck != nil {
-		time.Sleep(s.HealthDelay)
-		probeCtx, cancel := context.WithTimeout(ctx, s.HealthTimeout)
-		defer cancel()
-		if err := s.HealthCheck(probeCtx); err != nil {
-			s.log().Warn("apply: post-reload health probe failed", "err", err)
-			_ = s.restore(prev)
-			_ = s.reloadUnits(ctx)
-			res.RolledBack = true
-			res.Health = "failed"
-			res.Reason = err.Error()
-			return res, err
+	if s.HealthCheck == nil {
+		s.setConfig(req.Config)
+		s.applyMu.Unlock()
+		return ApplyResult{Health: "ok"}, nil
+	}
+
+	go s.observeHealth(req, prev)
+	return ApplyResult{Health: "observing"}, nil
+}
+
+// observeHealth runs the post-reload health probe on an independent
+// context (not the request context — the HTTP handler has already
+// returned by now, cancelling req ctx would kill this goroutine).
+// It unlocks applyMu on exit.
+func (s *Systemd) observeHealth(req ApplyRequest, prev snapshotBundle) {
+	defer s.applyMu.Unlock()
+	// Budget: HealthDelay + HealthTimeout + small slack for rollback reload.
+	budget := s.HealthDelay + s.HealthTimeout + 30*time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	if s.HealthDelay > 0 {
+		select {
+		case <-time.After(s.HealthDelay):
+		case <-ctx.Done():
+			s.log().Warn("apply: health observation aborted before probe", "err", ctx.Err())
+			return
 		}
 	}
-	res.Health = "ok"
-	return res, nil
+
+	probeCtx, pcancel := context.WithTimeout(ctx, s.HealthTimeout)
+	err := s.HealthCheck(probeCtx)
+	pcancel()
+
+	res := ApplyResult{}
+	if err != nil {
+		s.log().Warn("apply: post-reload health probe failed", "err", err)
+		if rerr := s.restore(prev); rerr != nil {
+			s.log().Error("apply: restore failed during rollback", "err", rerr)
+		}
+		if rerr := s.reloadUnits(ctx); rerr != nil {
+			s.log().Error("apply: reload failed during rollback", "err", rerr)
+		}
+		res.RolledBack = true
+		res.Health = "failed"
+		res.Reason = err.Error()
+	} else {
+		s.setConfig(req.Config)
+		res.Health = "ok"
+	}
+
+	if s.HealthObserver != nil {
+		s.HealthObserver(ctx, req, res)
+	}
 }
 
 // Rollback restores the last-known-good on-disk config from the
@@ -111,8 +180,18 @@ func (s *Systemd) Apply(ctx context.Context, req ApplyRequest) (ApplyResult, err
 // UI's "roll back to snapshot #N" and health-check failure paths share
 // the same code.
 func (s *Systemd) Rollback(ctx context.Context, snapshotID int64) error {
+	if !s.applyMu.TryLock() {
+		return ErrApplyInFlight
+	}
+	defer s.applyMu.Unlock()
 	s.log().Info("rollback: rerendering + reloading", "snapshot", snapshotID)
-	if err := s.render(); err != nil {
+	s.configMu.RLock()
+	cfg := s.Config
+	s.configMu.RUnlock()
+	if cfg == nil {
+		return errors.New("systemd: no base config to rollback to")
+	}
+	if err := s.render(cfg); err != nil {
 		return err
 	}
 	return s.reloadUnits(ctx)
@@ -120,21 +199,27 @@ func (s *Systemd) Rollback(ctx context.Context, snapshotID int64) error {
 
 // SetConfig lets the daemon swap in an updated cfg (e.g. after a
 // panel edit) before the next Apply.
-func (s *Systemd) SetConfig(cfg *config.Config) { s.Config = cfg }
+func (s *Systemd) SetConfig(cfg *config.Config) { s.setConfig(cfg) }
+
+func (s *Systemd) setConfig(cfg *config.Config) {
+	s.configMu.Lock()
+	s.Config = cfg
+	s.configMu.Unlock()
+}
 
 // Renderer is the small seam every third-party config generator satisfies.
 type Renderer interface {
 	Render(*config.Config, io.Writer) error
 }
 
-func (s *Systemd) render() error {
-	if err := writeRendered(s.DnsdistPath, render.DnsdistRenderer{}, s.Config); err != nil {
+func (s *Systemd) render(cfg *config.Config) error {
+	if err := writeRendered(s.DnsdistPath, render.DnsdistRenderer{}, cfg); err != nil {
 		return fmt.Errorf("render dnsdist: %w", err)
 	}
-	if err := writeRendered(s.MihomoPath, render.MihomoRenderer{}, s.Config); err != nil {
+	if err := writeRendered(s.MihomoPath, render.MihomoRenderer{}, cfg); err != nil {
 		return fmt.Errorf("render mihomo: %w", err)
 	}
-	if err := writeRendered(s.SniproxyPath, render.SniproxyRenderer{}, s.Config); err != nil {
+	if err := writeRendered(s.SniproxyPath, render.SniproxyRenderer{}, cfg); err != nil {
 		return fmt.Errorf("render sniproxy: %w", err)
 	}
 	return nil
@@ -239,4 +324,3 @@ func (s *Systemd) log() *slog.Logger {
 	}
 	return s.Logger
 }
-

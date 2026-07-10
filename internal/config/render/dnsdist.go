@@ -18,6 +18,8 @@ import (
 // __GFWLIST_RULES__, __CHINALIST_RULES__) as first-class fields.
 type DnsdistRenderer struct{}
 
+const defaultChinaListPath = "/var/lib/5gpn/chinalist.txt"
+
 // Render writes the dnsdist.conf equivalent of cfg to w.
 func (DnsdistRenderer) Render(cfg *config.Config, w io.Writer) error {
 	if cfg == nil {
@@ -34,18 +36,26 @@ func (DnsdistRenderer) Render(cfg *config.Config, w io.Writer) error {
 			"newServer({address=%q, pool=%q, name=%q, order=%d})\n",
 			host+":"+port, "remote", fmt.Sprintf("remote_%d", i+1), i+2)
 	}
+	chinaListPath := cfg.DNS.ChinaListPath
+	if chinaListPath == "" {
+		chinaListPath = defaultChinaListPath
+	}
 	data := struct {
-		Domain    string
-		Cert      string
-		Key       string
-		DoTPort   int
-		Upstreams string
+		Domain            string
+		Cert              string
+		Key               string
+		DoTPort           int
+		Upstreams         string
+		ChinaListPath     string
+		ChinaListPathQuot string // Lua-quoted path for io.lines calls
 	}{
-		Domain:    cfg.Server.Domain,
-		Cert:      firstNonEmpty(cfg.Server.TLS.Cert, "/etc/dnsdist/certs/fullchain.pem"),
-		Key:       firstNonEmpty(cfg.Server.TLS.Key, "/etc/dnsdist/certs/privkey.pem"),
-		DoTPort:   firstNonZero(cfg.DNS.DoTPort, 853),
-		Upstreams: remoteBlock.String(),
+		Domain:            cfg.Server.Domain,
+		Cert:              firstNonEmpty(cfg.Server.TLS.Cert, "/etc/dnsdist/certs/fullchain.pem"),
+		Key:               firstNonEmpty(cfg.Server.TLS.Key, "/etc/dnsdist/certs/privkey.pem"),
+		DoTPort:           firstNonZero(cfg.DNS.DoTPort, 853),
+		Upstreams:         remoteBlock.String(),
+		ChinaListPath:     chinaListPath,
+		ChinaListPathQuot: fmt.Sprintf("%q", chinaListPath),
 	}
 	return dnsdistTemplate.Execute(w, data)
 }
@@ -80,8 +90,19 @@ addAction(MaxQPSIPRule(10000), DropAction())
 -- IPv4-only: return NODATA for AAAA queries.
 addAction(QTypeRule(DNSQType.AAAA), RCodeAction(DNSRCode.NOERROR))
 
--- ChinaList domains -> china pool
+-- ChinaList domains -> china pool (source: {{ .ChinaListPath }})
 local chinaList = newSuffixMatchNode()
+pcall(function()
+    for line in io.lines({{ .ChinaListPathQuot }}) do
+        local trimmed = line:match("^%s*(.-)%s*$")
+        if trimmed ~= "" and trimmed:sub(1,1) ~= "#" then
+            chinaList:add(newDNSName(trimmed))
+        end
+    end
+end)
+if not pcall(io.lines, {{ .ChinaListPathQuot }}) then
+    warnlog("5gpn: chinalist file not found or unreadable: {{ .ChinaListPath }}")
+end
 
 -- Everything else -> remote pool
 addAction(SuffixMatchNodeRule(chinaList), PoolAction("china"))

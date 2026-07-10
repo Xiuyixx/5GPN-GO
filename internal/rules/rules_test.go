@@ -11,6 +11,11 @@ func mustParse(t *testing.T, body string) *RuleSet {
 	return set
 }
 
+func dryRunWithFallthrough(set *RuleSet, fixtures []TestFixture) []DryRunResult {
+	ft, _ := ResolveFallthrough(set, "", "")
+	return DryRun(set, fixtures, ft)
+}
+
 func TestParseYAMLGood(t *testing.T) {
 	body := `
 rules:
@@ -84,7 +89,7 @@ func TestDryRunDomainSuffix(t *testing.T) {
 		{Domain: "example.com", ExpectedExit: "wg1"},
 		{Domain: "wrong.cn", ExpectedExit: "wg1"}, // deliberate mismatch
 	}
-	results := DryRun(set, fixtures)
+	results := dryRunWithFallthrough(set, fixtures)
 	if len(results) != 3 {
 		t.Fatalf("want 3 results, got %d", len(results))
 	}
@@ -113,7 +118,7 @@ func TestDryRunSkipsDisabled(t *testing.T) {
     action: wg1
     priority: 100
     enabled: true`)
-	results := DryRun(set, []TestFixture{{Domain: "baidu.cn", ExpectedExit: "wg1"}})
+	results := dryRunWithFallthrough(set, []TestFixture{{Domain: "baidu.cn", ExpectedExit: "wg1"}})
 	if !results[0].Pass || results[0].MatchedRule != "fallback" {
 		t.Errorf("disabled rule should be skipped: %+v", results[0])
 	}
@@ -133,7 +138,7 @@ func TestDryRunIPCIDR(t *testing.T) {
     action: wg1
     priority: 100
     enabled: true`)
-	results := DryRun(set, []TestFixture{
+	results := dryRunWithFallthrough(set, []TestFixture{
 		{Domain: "internal.example", IP: "10.1.2.3", ExpectedExit: "direct"},
 		{Domain: "pub.example", IP: "8.8.8.8", ExpectedExit: "wg1"},
 	})
@@ -144,3 +149,94 @@ func TestDryRunIPCIDR(t *testing.T) {
 		t.Errorf("8.8.8.8: %+v", results[1])
 	}
 }
+
+func TestDryRunFallthroughNoMatchRule(t *testing.T) {
+	// Ruleset with no MATCH rule — fallthrough should route unmatched fixtures to activeExit.
+	set := mustParse(t, `rules:
+  - id: cn-direct
+    kind: DOMAIN-SUFFIX
+    pattern: cn
+    action: direct
+    priority: 10
+    enabled: true`)
+	ft, hasUserMatch := ResolveFallthrough(set, "wg1", "")
+	if hasUserMatch {
+		t.Fatal("expected no user MATCH")
+	}
+	if ft != "wg1" {
+		t.Fatalf("want fallthrough=wg1, got %q", ft)
+	}
+	results := DryRun(set, []TestFixture{
+		{Domain: "baidu.cn", ExpectedExit: "direct"},
+		{Domain: "example.com", ExpectedExit: "wg1"},
+	}, ft)
+	if !results[0].Pass {
+		t.Errorf("baidu.cn should match cn-direct: %+v", results[0])
+	}
+	if !results[1].Pass {
+		t.Errorf("example.com should route via fallthrough wg1: %+v", results[1])
+	}
+	if results[1].MatchedRule != "fallthrough" {
+		t.Errorf("unmatched fixture should show MatchedRule=fallthrough: %+v", results[1])
+	}
+}
+
+func TestResolveFallthroughPriority(t *testing.T) {
+	setWithMatch := mustParse(t, `rules:
+  - id: m
+    kind: MATCH
+    pattern: ""
+    action: proxy
+    priority: 100
+    enabled: true`)
+	target, hasUserMatch := ResolveFallthrough(setWithMatch, "wg1", "direct")
+	if !hasUserMatch {
+		t.Fatal("expected hasUserMatch=true")
+	}
+	if target != "proxy" {
+		t.Fatalf("want proxy (user MATCH action), got %q", target)
+	}
+
+	emptySet := &RuleSet{}
+	target, hasUserMatch = ResolveFallthrough(emptySet, "wg1", "direct")
+	if hasUserMatch {
+		t.Fatal("expected hasUserMatch=false")
+	}
+	if target != "wg1" {
+		t.Fatalf("want activeExit=wg1, got %q", target)
+	}
+
+	target, _ = ResolveFallthrough(emptySet, "", "direct")
+	if target != "direct" {
+		t.Fatalf("want defaultAction=direct, got %q", target)
+	}
+
+	target, _ = ResolveFallthrough(emptySet, "", "")
+	if target != "PROXY" {
+		t.Fatalf("want hardcoded PROXY, got %q", target)
+	}
+}
+
+func TestToMihomoLine(t *testing.T) {
+	cases := []struct {
+		rule Rule
+		want string
+	}{
+		{Rule{ID: "a", Kind: KindDomain, Pattern: "example.com", Action: "direct"}, "DOMAIN,example.com,direct"},
+		{Rule{ID: "b", Kind: KindDomainSuffix, Pattern: "cn", Action: "direct"}, "DOMAIN-SUFFIX,cn,direct"},
+		{Rule{ID: "c", Kind: KindIPCIDR, Pattern: "10.0.0.0/8", Action: "direct"}, "IP-CIDR,10.0.0.0/8,direct"},
+		{Rule{ID: "d", Kind: KindMatch, Pattern: "", Action: "wg1"}, "MATCH,wg1"},
+		{Rule{ID: "e", Kind: KindGeoSite, Pattern: "cn", Action: "direct"}, "GEOSITE,cn,direct"},
+	}
+	for _, c := range cases {
+		got, err := c.rule.ToMihomoLine()
+		if err != nil {
+			t.Errorf("ToMihomoLine(%v): unexpected error: %v", c.rule.ID, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("ToMihomoLine(%v): want %q, got %q", c.rule.ID, c.want, got)
+		}
+	}
+}
+

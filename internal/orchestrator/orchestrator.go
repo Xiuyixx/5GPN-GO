@@ -6,7 +6,11 @@
 // sniproxy actually installed.
 package orchestrator
 
-import "context"
+import (
+	"context"
+
+	"github.com/Xiuyixx/5GPN-Go/internal/config"
+)
 
 // Orchestrator abstracts the data-plane apply loop.
 type Orchestrator interface {
@@ -20,10 +24,14 @@ type Orchestrator interface {
 }
 
 // ApplyRequest carries what the API layer knows about the change.
+// Config is the fully-assembled effective config (with EffectiveRules
+// pre-populated by core.Assemble) that the orchestrator must render
+// during this Apply. It is the sole source of truth for this call —
+// s.Config is only used as a fallback baseline for Rollback.
 type ApplyRequest struct {
 	SnapshotID    int64
 	RuleVersionID int64
-	RulesYAML     string
+	Config        *config.Config
 	PrevSnapshot  int64 // used for rollback target if health fails
 }
 

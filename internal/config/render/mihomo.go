@@ -3,10 +3,12 @@ package render
 import (
 	"fmt"
 	"io"
+	"sort"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/Xiuyixx/5GPN-Go/internal/config"
+	"github.com/Xiuyixx/5GPN-Go/internal/rules"
 )
 
 // MihomoRenderer materializes mihomo config.yaml.
@@ -14,21 +16,34 @@ import (
 // The output is a minimal-but-valid mihomo document: rule mode + TUN off
 // (5gpn's mihomo runs behind the sniproxy/wa-shim data path, not as a
 // TUN gateway on the daemon's box), a proxies list built from
-// cfg.Exits, and a MATCH → active-exit rule. Real 10-protocol config
-// synthesis for each Exit is delegated to internal/exit.Parse when the
-// panel adds them; here we only re-emit the stored map.
+// cfg.Exits, and rules from cfg.EffectiveRules (sorted by Priority,
+// MATCH always last). The mixed-port provides a hermetic measurement
+// channel for AC3/AC6 traffic tests.
 type MihomoRenderer struct{}
+
+const defaultMihomoMixedPort = 7890
 
 // Render writes the mihomo YAML equivalent of cfg to w.
 func (MihomoRenderer) Render(cfg *config.Config, w io.Writer) error {
 	if cfg == nil {
 		return fmt.Errorf("mihomo: nil config")
 	}
+
+	mixedPort := cfg.Proxy.MihomoMixedPort
+	if mixedPort == 0 {
+		mixedPort = defaultMihomoMixedPort
+	}
+
 	proxies := make([]map[string]any, 0, len(cfg.Exits))
 	names := make([]string, 0, len(cfg.Exits))
 	for _, ex := range cfg.Exits {
 		p := map[string]any{"name": ex.ID, "type": ex.Protocol}
 		for k, v := range ex.Config {
+			// Strip name/type from the stored config map to prevent clobbering
+			// the fields we set explicitly above (xexit.Parse includes these).
+			if k == "name" || k == "type" {
+				continue
+			}
 			p[k] = v
 		}
 		proxies = append(proxies, p)
@@ -41,18 +56,34 @@ func (MihomoRenderer) Render(cfg *config.Config, w io.Writer) error {
 		names = append(names, "direct")
 	}
 
+	// Active exit = first in list (S2 will replace with DB-backed active exit).
+	// TODO(S2): replace with DB-backed active exit lookup.
+	activeExitName := names[0]
+
+	// Build PROXY select group with active exit first.
+	proxyGroupNames := buildProxyGroupNames(names, activeExitName)
+
+	// Build rules list from EffectiveRules.
+	ruleLines, err := buildRuleLines(cfg.EffectiveRules, activeExitName)
+	if err != nil {
+		return fmt.Errorf("mihomo: build rules: %w", err)
+	}
+
 	doc := map[string]any{
-		"mode":         "rule",
-		"log-level":    "warning",
-		"ipv6":         false,
+		"mode":                "rule",
+		"log-level":           "warning",
+		"ipv6":                false,
+		"mixed-port":          mixedPort,
+		"bind-address":        "127.0.0.1",
 		"external-controller": "127.0.0.1:9090",
-		"proxies":      proxies,
+		"profile": map[string]any{
+			"store-selected": false,
+		},
+		"proxies": proxies,
 		"proxy-groups": []map[string]any{
-			{"name": "PROXY", "type": "select", "proxies": names},
+			{"name": "PROXY", "type": "select", "proxies": proxyGroupNames},
 		},
-		"rules": []string{
-			"MATCH,PROXY",
-		},
+		"rules": ruleLines,
 	}
 	enc := yaml.NewEncoder(w)
 	enc.SetIndent(2)
@@ -60,4 +91,71 @@ func (MihomoRenderer) Render(cfg *config.Config, w io.Writer) error {
 		return err
 	}
 	return enc.Close()
+}
+
+// buildProxyGroupNames returns the proxy name list for the PROXY select group
+// with activeExitName moved to the front so mihomo resolves to it by default.
+func buildProxyGroupNames(names []string, activeExitName string) []string {
+	out := make([]string, 0, len(names))
+	out = append(out, activeExitName)
+	for _, n := range names {
+		if n != activeExitName {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// buildRuleLines converts EffectiveRules into mihomo rule strings.
+// Rules are sorted by Priority (ascending). MATCH, if present in the set,
+// is always emitted last regardless of its Priority value. If no MATCH rule
+// exists in the set a synthetic "MATCH,<activeExitName>" is appended.
+func buildRuleLines(effectiveRules []rules.Rule, activeExitName string) ([]string, error) {
+	if len(effectiveRules) == 0 {
+		// No rules at all — emit a bare MATCH fallback.
+		return []string{fmt.Sprintf("MATCH,%s", activeExitName)}, nil
+	}
+
+	// Separate MATCH from non-MATCH rules.
+	var nonMatch []rules.Rule
+	var matchRule *rules.Rule
+	for i := range effectiveRules {
+		r := effectiveRules[i]
+		if !r.Enabled {
+			continue
+		}
+		if r.Kind == rules.KindMatch {
+			cp := r
+			matchRule = &cp
+		} else {
+			nonMatch = append(nonMatch, r)
+		}
+	}
+
+	// Sort non-MATCH rules by Priority ascending.
+	sort.SliceStable(nonMatch, func(i, j int) bool {
+		return nonMatch[i].Priority < nonMatch[j].Priority
+	})
+
+	out := make([]string, 0, len(nonMatch)+1)
+	for _, r := range nonMatch {
+		line, err := r.ToMihomoLine()
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, line)
+	}
+
+	// MATCH is always last.
+	if matchRule != nil {
+		line, err := matchRule.ToMihomoLine()
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, line)
+	} else {
+		out = append(out, fmt.Sprintf("MATCH,%s", activeExitName))
+	}
+
+	return out, nil
 }
