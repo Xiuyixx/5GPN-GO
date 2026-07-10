@@ -135,3 +135,66 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	username, _ := r.Context().Value(ctxUsername).(string)
 	writeJSON(w, http.StatusOK, map[string]any{"user_id": uid, "username": username})
 }
+
+type changePasswordRequest struct {
+	Current string `json:"current"`
+	Next    string `json:"next"`
+}
+
+// handleChangePassword rehashes the caller's password and revokes every
+// other session belonging to them. The caller's active JWT (identified by
+// its jti claim) is preserved so the user does not self-kick.
+func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	uid, _ := r.Context().Value(ctxUserID).(int64)
+	username, _ := r.Context().Value(ctxUsername).(string)
+	jti, _ := r.Context().Value(ctxJWTID).(string)
+	if uid == 0 || jti == "" {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "")
+		return
+	}
+
+	var req changePasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	if len(req.Next) < 8 {
+		writeError(w, http.StatusBadRequest, "weak_password", "password must be at least 8 characters")
+		return
+	}
+
+	u, err := db.GetPanelUserByUsername(s.DB, username)
+	if errors.Is(err, db.ErrNoRows) {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "db_error", err.Error())
+		return
+	}
+	if !CheckPassword(u.BcryptHash, req.Current) {
+		_ = db.AppendAudit(s.DB, db.AuditEntry{
+			Actor: username, Action: "panel.password.change", Result: "wrong_current", IP: clientIP(r),
+		})
+		writeError(w, http.StatusUnauthorized, "invalid_credentials", "current password is wrong")
+		return
+	}
+
+	hash, err := HashPassword(req.Next)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "hash_error", err.Error())
+		return
+	}
+	if err := db.UpdatePanelUserPassword(s.DB, uid, hash); err != nil {
+		writeError(w, http.StatusInternalServerError, "update_error", err.Error())
+		return
+	}
+	if err := db.RevokeSessionsExcept(s.DB, uid, jti); err != nil {
+		writeError(w, http.StatusInternalServerError, "revoke_error", err.Error())
+		return
+	}
+	_ = db.AppendAudit(s.DB, db.AuditEntry{
+		Actor: username, Action: "panel.password.change", Result: "ok", IP: clientIP(r),
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}

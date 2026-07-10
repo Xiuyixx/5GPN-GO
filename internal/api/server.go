@@ -18,6 +18,7 @@ import (
 	"github.com/Xiuyixx/5GPN-Go/internal/core"
 	xexit "github.com/Xiuyixx/5GPN-Go/internal/exit"
 	"github.com/Xiuyixx/5GPN-Go/internal/orchestrator"
+	"github.com/Xiuyixx/5GPN-Go/internal/updater"
 )
 
 // serverExitAdapter narrows xexit.Store to the core.ExitStore contract
@@ -42,6 +43,18 @@ func (a serverExitAdapter) Switch(ctx context.Context, exitID string) error {
 	return a.inner.Switch(ctx, exitID)
 }
 
+// UpdaterConfig captures the release source + local install target for
+// the panel-driven updater endpoints. Zero values disable the endpoints
+// (GET /update/check returns "not configured").
+type UpdaterConfig struct {
+	Owner      string
+	Repo       string
+	Unit       string
+	BinaryPath string
+	Version    string
+	Client     *updater.Client
+}
+
 // Server owns the HTTP router + auth + rate limiter for the panel API.
 type Server struct {
 	DB           *sql.DB
@@ -54,6 +67,7 @@ type Server struct {
 	BaseConfig   *config.Config
 	Applier      *core.Applier
 	Store        xexit.Store
+	Updater      UpdaterConfig
 }
 
 // Config bundles user-adjustable server knobs.
@@ -69,6 +83,7 @@ type Config struct {
 	BaseConfig     *config.Config
 	Applier        *core.Applier
 	Store          xexit.Store
+	Updater        UpdaterConfig
 }
 
 // New builds a Server from its dependencies.
@@ -104,6 +119,12 @@ func New(db *sql.DB, cfg Config, logger *slog.Logger) *Server {
 			Logger:     logger,
 		}
 	}
+	if cfg.Updater.Client == nil && cfg.Updater.Owner != "" && cfg.Updater.Repo != "" {
+		cfg.Updater.Client = updater.New(updater.Config{
+			Owner: cfg.Updater.Owner,
+			Repo:  cfg.Updater.Repo,
+		})
+	}
 	return &Server{
 		DB: db,
 		Auth: &Authenticator{
@@ -118,6 +139,7 @@ func New(db *sql.DB, cfg Config, logger *slog.Logger) *Server {
 		BaseConfig:   cfg.BaseConfig,
 		Applier:      cfg.Applier,
 		Store:        cfg.Store,
+		Updater:      cfg.Updater,
 	}
 }
 
@@ -149,6 +171,7 @@ func (s *Server) Router() http.Handler {
 		r.Use(s.authMiddleware)
 		r.Post("/api/v1/logout", s.handleLogout)
 		r.Get("/api/v1/me", s.handleMe)
+		r.Post("/api/v1/password", s.handleChangePassword)
 
 		r.Get("/api/v1/rules", s.handleListRules)
 		r.Post("/api/v1/rules/dry-run", s.handleDryRun)
@@ -169,6 +192,11 @@ func (s *Server) Router() http.Handler {
 
 		r.Get("/api/v1/metrics", s.handleMetrics)
 		r.Get("/api/v1/events/logs", s.handleLogsSSE)
+
+		r.Get("/api/v1/update/check", s.handleUpdateCheck)
+		r.Post("/api/v1/update/apply", s.handleUpdateApply)
+
+		r.Get("/api/v1/ios/profile-url", s.handleIOSProfileURL)
 	})
 
 	// Static SPA fallback: any GET that isn't /api/* serves the panel bundle,

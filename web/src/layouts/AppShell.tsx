@@ -29,6 +29,7 @@ const NAV: Item[] = [
   { label: 'Snapshots', to: '/snapshots', icon: '⌸' },
   { label: 'Backup',    to: '/backup',    icon: '⤓' },
   { label: 'Logs',      to: '/logs',      icon: '≡' },
+  { label: 'Settings',  to: '/settings',  icon: '⚙' },
 ];
 
 interface Props {

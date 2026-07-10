@@ -8,6 +8,7 @@ import Exits from './pages/Exits';
 import Snapshots from './pages/Snapshots';
 import Backup from './pages/Backup';
 import Logs from './pages/Logs';
+import Settings from './pages/Settings';
 import { api } from './api/client';
 import type { BootstrapStatus } from './api/client';
 import { useAuthStore } from './stores/auth';
@@ -51,6 +52,7 @@ export default function App() {
       <Route path="/snapshots" element={authed(<Snapshots />)} />
       <Route path="/backup" element={authed(<Backup />)} />
       <Route path="/logs" element={authed(<Logs />)} />
+      <Route path="/settings" element={authed(<Settings />)} />
       <Route path="*" element={
         <Navigate to={needsSetup ? '/setup' : (token ? '/' : '/login')} replace />
       } />

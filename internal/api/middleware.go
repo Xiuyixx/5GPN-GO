@@ -17,6 +17,7 @@ const (
 	ctxUserID ctxKey = iota
 	ctxUsername
 	ctxSessionID
+	ctxJWTID
 )
 
 // authMiddleware validates the JWT + backing session.
@@ -35,6 +36,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), ctxUserID, claims.UserID)
 		ctx = context.WithValue(ctx, ctxUsername, claims.Username)
 		ctx = context.WithValue(ctx, ctxSessionID, claims.SessionID)
+		ctx = context.WithValue(ctx, ctxJWTID, claims.RegisteredClaims.ID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

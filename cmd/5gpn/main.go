@@ -177,6 +177,7 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 		Logger:   logger,
 	}).Run(ctx)
 
+	binPath, _ := os.Executable()
 	srv := api.New(dbHandle, api.Config{
 		SessionTTL:     cfg.Panel.SessionTTL,
 		LoginPerMinute: cfg.Panel.RateLimit.LoginPerMinute,
@@ -189,6 +190,13 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 		BaseConfig:     cfg,
 		Applier:        applier,
 		Store:          exitStore,
+		Updater: api.UpdaterConfig{
+			Owner:      "Xiuyixx",
+			Repo:       "5GPN-Go",
+			Unit:       "5gpn",
+			BinaryPath: binPath,
+			Version:    version,
+		},
 	}, logger)
 
 	addr := listenOverride
@@ -228,6 +236,20 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 			}()
 		}
 	}
+
+	// ctl socket: Linux-only privileged CLI channel (SO_PEERCRED gated).
+	// On non-Linux the stub is a no-op so main.go compiles cross-platform.
+	go startCtlSocket(ctx, applier, exitStore, dbHandle, logger)
+
+	// iOS profile server: honors systemd socket activation (LISTEN_FDS) if
+	// present, otherwise binds cfg.IOS.HTTPPort directly. Skipped when the
+	// port is zero and no activated sockets exist.
+	go func() {
+		wwwDir := filepath.Join(dataDir, "ios")
+		if err := runIOSListener(ctx, cfg.IOS.HTTPPort, wwwDir, logger); err != nil {
+			logger.Warn("ios listener stopped", "err", err)
+		}
+	}()
 
 	logger.Info("5gpn daemon starting",
 		"version", version, "addr", addr, "data", dataDir, "insecure", insecure)

@@ -130,6 +130,30 @@ func RevokeSession(db *sql.DB, sessionID string) error {
 	return err
 }
 
+// RevokeSessionsExcept revokes every non-revoked session owned by userID
+// except the one whose jwt_id matches keepJWTID. Used by password change so
+// the caller does not self-kick from their active browser session.
+func RevokeSessionsExcept(db *sql.DB, userID int64, keepJWTID string) error {
+	_, err := db.Exec(
+		`UPDATE panel_sessions
+		    SET revoked_at = CURRENT_TIMESTAMP
+		  WHERE user_id = ?
+		    AND revoked_at IS NULL
+		    AND jwt_id <> ?`,
+		userID, keepJWTID,
+	)
+	return err
+}
+
+// UpdatePanelUserPassword rewrites the stored bcrypt hash for a user.
+func UpdatePanelUserPassword(db *sql.DB, userID int64, bcryptHash string) error {
+	_, err := db.Exec(
+		`UPDATE panel_users SET bcrypt_hash = ? WHERE id = ?`,
+		bcryptHash, userID,
+	)
+	return err
+}
+
 // InsertSnapshot writes a new snapshot row and returns its id.
 func InsertSnapshot(db *sql.DB, s Snapshot) (int64, error) {
 	res, err := db.Exec(
