@@ -17,10 +17,12 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/Xiuyixx/5GPN-Go/internal/api"
 	"github.com/Xiuyixx/5GPN-Go/internal/config"
 	"github.com/Xiuyixx/5GPN-Go/internal/db"
+	"github.com/Xiuyixx/5GPN-Go/internal/metrics"
 	"github.com/Xiuyixx/5GPN-Go/internal/orchestrator"
 	"github.com/Xiuyixx/5GPN-Go/internal/tgbot"
 	"github.com/Xiuyixx/5GPN-Go/internal/web"
@@ -83,8 +85,27 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 		fmt.Printf("===============================================================\n\n")
 	}
 
-	orch := orchestrator.Orchestrator(&orchestrator.NoOp{Logger: logger})
-	// M2 will select Systemd on Linux hosts once the render layer lands.
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	// Orchestrator: Systemd on Linux hosts (real render + reload + probe +
+	// rollback), NoOp everywhere else so dev on macOS keeps working.
+	var orch orchestrator.Orchestrator
+	if orchestrator.AvailableOnHost() {
+		orch = orchestrator.DefaultSystemd(cfg, logger)
+		logger.Info("orchestrator: systemd")
+	} else {
+		orch = &orchestrator.NoOp{Logger: logger}
+		logger.Info("orchestrator: no-op (non-linux host)")
+	}
+
+	// Metrics collector: samples every 10s into SQLite metrics_snapshot,
+	// trimmed to 24h. Runs for the lifetime of the daemon.
+	go metrics.New(metrics.Config{
+		DB:       dbHandle,
+		Interval: 10 * time.Second,
+		Logger:   logger,
+	}).Run(ctx)
 
 	srv := api.New(dbHandle, api.Config{
 		SessionTTL:     cfg.Panel.SessionTTL,
@@ -101,9 +122,6 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 	if addr == "" {
 		addr = fmt.Sprintf("%s:%d", cfg.Server.PanelBind, cfg.Server.PanelPort)
 	}
-
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
 
 	cert, key := cfg.Server.TLS.Cert, cfg.Server.TLS.Key
 	if insecure {
