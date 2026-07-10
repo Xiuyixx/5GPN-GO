@@ -189,8 +189,8 @@ func TestApplierApplyInFlight(t *testing.T) {
 		t.Fatalf("expected ErrApplyInFlight, got %v", err)
 	}
 	status, _ := db.LatestApplyStatus(handle)
-	if status.State != "submitted" || status.Reason != "apply-in-flight" {
-		t.Fatalf("expected submitted/apply-in-flight, got %+v", status)
+	if status.State != "rolled_back" || status.Reason != "apply-in-flight" {
+		t.Fatalf("expected rolled_back/apply-in-flight, got %+v", status)
 	}
 }
 

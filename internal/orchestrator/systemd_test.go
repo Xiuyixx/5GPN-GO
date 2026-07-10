@@ -224,7 +224,7 @@ func TestSystemdSetConfigConcurrent(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 1000; i++ {
-			s.SetConfig(testConfig())
+			s.setConfig(testConfig())
 		}
 	}()
 	go func() {

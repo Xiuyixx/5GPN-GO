@@ -302,3 +302,42 @@ func TestAssembleBootRestartPreservesRules(t *testing.T) {
 		t.Fatalf("rule ordering not preserved: %+v", boot1.EffectiveRules)
 	}
 }
+
+// TestAssembleDeepCopyNestedMap proves cloneStringAnyMap recursively
+// deep-copies containers inside ExitConfig.Config values. Mutating the
+// returned cfg's nested map/slice must never leak into base or into a
+// subsequent Assemble call fed by the same store (F19 audit fix).
+func TestAssembleDeepCopyNestedMap(t *testing.T) {
+	base := baseCfg()
+	store := &fakeStore{
+		exits: []ExitRecord{{
+			ID:       "wg1",
+			Protocol: "wireguard",
+			Config: map[string]any{
+				"peers": []any{
+					map[string]any{"pubkey": "A", "allowed_ips": []string{"0.0.0.0/0"}},
+				},
+			},
+		}},
+	}
+
+	first, err := Assemble(base, store)
+	if err != nil {
+		t.Fatalf("first Assemble: %v", err)
+	}
+	peers := first.Exits[0].Config["peers"].([]any)
+	peers[0].(map[string]any)["pubkey"] = "MUTATED"
+	peers[0].(map[string]any)["allowed_ips"].([]string)[0] = "10.0.0.0/8"
+
+	second, err := Assemble(base, store)
+	if err != nil {
+		t.Fatalf("second Assemble: %v", err)
+	}
+	got := second.Exits[0].Config["peers"].([]any)[0].(map[string]any)
+	if got["pubkey"] != "A" {
+		t.Fatalf("nested map value leaked between Assemble calls: pubkey=%v", got["pubkey"])
+	}
+	if got["allowed_ips"].([]string)[0] != "0.0.0.0/0" {
+		t.Fatalf("nested slice value leaked between Assemble calls: allowed_ips=%v", got["allowed_ips"])
+	}
+}

@@ -197,10 +197,6 @@ func (s *Systemd) Rollback(ctx context.Context, snapshotID int64) error {
 	return s.reloadUnits(ctx)
 }
 
-// SetConfig lets the daemon swap in an updated cfg (e.g. after a
-// panel edit) before the next Apply.
-func (s *Systemd) SetConfig(cfg *config.Config) { s.setConfig(cfg) }
-
 func (s *Systemd) setConfig(cfg *config.Config) {
 	s.configMu.Lock()
 	s.Config = cfg

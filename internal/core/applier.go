@@ -88,9 +88,10 @@ func (a *Applier) ApplyRules(ctx context.Context, snapshotID, ruleVersionID, pre
 	}
 
 	if errors.Is(appErr, orchestrator.ErrApplyInFlight) {
-		// keep apply_status as 'submitted' with a diagnostic reason so
-		// the panel can distinguish "queued lost" from "still applying".
-		_ = db.UpdateApplyStatus(a.DB, statusID, "submitted", "apply-in-flight")
+		// Rejected because another Apply is still landing. Mark this row
+		// terminal so LatestApplyStatus() surfaces the real in-flight row
+		// instead of masking it with a stuck 'submitted' entry.
+		_ = db.UpdateApplyStatus(a.DB, statusID, "rolled_back", "apply-in-flight")
 		a.clearInflight(snapshotID)
 		return result, appErr
 	}

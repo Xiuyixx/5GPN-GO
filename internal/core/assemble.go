@@ -133,9 +133,33 @@ func cloneStringAnyMap(m map[string]any) map[string]any {
 	}
 	out := make(map[string]any, len(m))
 	for k, v := range m {
-		out[k] = v
+		out[k] = cloneAnyValue(v)
 	}
 	return out
+}
+
+// cloneAnyValue recursively deep-copies containers that YAML/JSON decoding
+// commonly produces inside ExitConfig.Config (nested maps, slices).
+// Scalars pass through unchanged.
+func cloneAnyValue(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		return cloneStringAnyMap(t)
+	case []any:
+		out := make([]any, len(t))
+		for i, elem := range t {
+			out[i] = cloneAnyValue(elem)
+		}
+		return out
+	case []string:
+		return append([]string(nil), t...)
+	case []int:
+		return append([]int(nil), t...)
+	case []int64:
+		return append([]int64(nil), t...)
+	default:
+		return v
+	}
 }
 
 // stripNameType removes the "name" and "type" keys that xexit.Parse injects
@@ -150,7 +174,7 @@ func stripNameType(m map[string]any) map[string]any {
 		if k == "name" || k == "type" {
 			continue
 		}
-		out[k] = v
+		out[k] = cloneAnyValue(v)
 	}
 	return out
 }
