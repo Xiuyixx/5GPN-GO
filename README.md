@@ -1,5 +1,7 @@
 # 5GPN-Go
 
+[English](README.md) · [中文](README.zh-CN.md)
+
 Personal transparent-proxy gateway. Single Go binary with an embedded
 React + Tailwind + Catalyst UI Kit panel. Refactor of the legacy
 [5GPN-X](https://github.com/Xiuyixx/5GPN-X) stack (Go + Python + a
