@@ -99,9 +99,24 @@ func (s *Server) Router() http.Handler {
 		r.Use(s.authMiddleware)
 		r.Post("/api/v1/logout", s.handleLogout)
 		r.Get("/api/v1/me", s.handleMe)
+
 		r.Get("/api/v1/rules", s.handleListRules)
 		r.Post("/api/v1/rules/dry-run", s.handleDryRun)
 		r.Post("/api/v1/rules/apply", s.handleApply)
+
+		r.Get("/api/v1/exits", s.handleListExits)
+		r.Post("/api/v1/exits/add", s.handleAddExit)
+		r.Post("/api/v1/exits/delete", s.handleDeleteExit)
+		r.Post("/api/v1/exits/switch", s.handleSwitchExit)
+
+		r.Get("/api/v1/snapshots", s.handleListSnapshots)
+		r.Post("/api/v1/snapshots/{id}/rollback", s.handleRollbackSnapshot)
+
+		r.Get("/api/v1/backup/export", s.handleExportBackup)
+		r.Post("/api/v1/backup/import", s.handleImportBackup)
+
+		r.Get("/api/v1/metrics", s.handleMetrics)
+		r.Get("/api/v1/events/logs", s.handleLogsSSE)
 	})
 
 	// Static SPA fallback: any GET that isn't /api/* serves the panel bundle,
