@@ -8,13 +8,12 @@ import { Alert, AlertBody, AlertTitle } from '../components/ui/alert';
 import { Heading } from '../components/ui/heading';
 import { Text } from '../components/ui/text';
 import { api } from '../api/client';
-import type { LoginResponse } from '../api/client';
-import { useAuthStore } from '../stores/auth';
+import type { Me } from '../api/client';
 
-export default function Login() {
+export default function Bootstrap() {
   const nav = useNavigate();
-  const setToken = useAuthStore((s) => s.setToken);
-  const [username, setUsername] = useState('');
+  const [token, setToken] = useState('');
+  const [username, setUsername] = useState('admin');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -24,9 +23,8 @@ export default function Login() {
     setError(null);
     setBusy(true);
     try {
-      const { token } = await api.post<LoginResponse>('/api/v1/login', { username, password });
-      setToken(token, username);
-      nav('/', { replace: true });
+      await api.post<Me>('/api/v1/bootstrap', { token, username, password });
+      nav('/login', { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -37,29 +35,33 @@ export default function Login() {
   return (
     <AuthLayout>
       <form onSubmit={onSubmit} className="grid w-full max-w-sm grid-cols-1 gap-8">
-        <Heading>Sign in to 5gpn</Heading>
-        <Text>Panel admin credentials.</Text>
+        <Heading>First-time setup</Heading>
+        <Text>Paste the setup token printed on the daemon's first boot and choose your admin credentials.</Text>
         {error && (
           <Alert open onClose={() => setError(null)}>
-            <AlertTitle>Sign-in failed</AlertTitle>
+            <AlertTitle>Setup failed</AlertTitle>
             <AlertBody>{error}</AlertBody>
           </Alert>
         )}
         <Fieldset>
-          <Legend className="sr-only">Credentials</Legend>
+          <Legend className="sr-only">Setup fields</Legend>
           <FieldGroup>
             <Field>
-              <Label>Username</Label>
-              <Input required autoComplete="username" value={username} onChange={(e) => setUsername(e.target.value)} />
+              <Label>Setup token</Label>
+              <Input required value={token} onChange={(e) => setToken(e.target.value)} />
             </Field>
             <Field>
-              <Label>Password</Label>
-              <Input required type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
+              <Label>Username</Label>
+              <Input required value={username} onChange={(e) => setUsername(e.target.value)} />
+            </Field>
+            <Field>
+              <Label>Password (min. 8 characters)</Label>
+              <Input required type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
             </Field>
           </FieldGroup>
         </Fieldset>
         <Button type="submit" disabled={busy} className="w-full">
-          {busy ? 'Signing in…' : 'Sign in'}
+          {busy ? 'Claiming…' : 'Claim panel'}
         </Button>
       </form>
     </AuthLayout>

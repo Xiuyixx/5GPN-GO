@@ -1,0 +1,79 @@
+import { useAuthStore } from '../stores/auth';
+
+export class APIError extends Error {
+  code: string;
+  status: number;
+  constructor(message: string, code: string, status: number) {
+    super(message);
+    this.code = code;
+    this.status = status;
+  }
+}
+
+async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const token = useAuthStore.getState().token;
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const res = await fetch(path, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+
+  if (res.status === 401) {
+    useAuthStore.getState().clear();
+  }
+
+  if (res.status === 204) return undefined as T;
+
+  const contentType = res.headers.get('content-type') ?? '';
+  const isJSON = contentType.includes('application/json');
+  const payload = isJSON ? await res.json() : await res.text();
+
+  if (!res.ok) {
+    const errBody = isJSON ? (payload as { error?: string; message?: string }) : { message: String(payload) };
+    throw new APIError(errBody.message ?? 'request failed', errBody.error ?? 'error', res.status);
+  }
+  return payload as T;
+}
+
+export const api = {
+  get: <T>(path: string) => request<T>('GET', path),
+  post: <T>(path: string, body?: unknown) => request<T>('POST', path, body),
+  put: <T>(path: string, body?: unknown) => request<T>('PUT', path, body),
+  del: <T>(path: string) => request<T>('DELETE', path),
+};
+
+export interface BootstrapStatus { needs_setup: boolean }
+export interface LoginResponse { token: string }
+export interface Me { user_id: number; username: string }
+
+export interface Rule {
+  id: string;
+  kind: 'DOMAIN' | 'DOMAIN-SUFFIX' | 'DOMAIN-KEYWORD' | 'GEOSITE' | 'GEOIP' | 'IP-CIDR' | 'RULE-SET' | 'MATCH';
+  pattern: string;
+  action: string;
+  priority: number;
+  enabled: boolean;
+  notes?: string;
+}
+
+export interface Fixture { domain: string; ip?: string; expected_exit: string; notes?: string }
+export interface DryRunResult {
+  domain: string;
+  matched_rule: string;
+  matched_kind: string;
+  actual_exit: string;
+  expected_exit: string;
+  pass: boolean;
+  failure_reason?: string;
+}
+export interface DryRunResponse { results: DryRunResult[]; passed: number; failed: number }
+export interface ApplyResponse {
+  snapshot_id: number;
+  rule_version_id: number;
+  rolled_back: boolean;
+  health: string;
+  reason?: string;
+}
