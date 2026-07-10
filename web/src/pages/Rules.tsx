@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import AppShell from '../layouts/AppShell';
 import { Heading } from '../components/ui/heading';
 import { Text } from '../components/ui/text';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table';
@@ -7,7 +8,6 @@ import { Button } from '../components/ui/button';
 import { Alert, AlertBody, AlertTitle } from '../components/ui/alert';
 import { api } from '../api/client';
 import type { ApplyResponse, DryRunResponse, Rule } from '../api/client';
-import { useAuthStore } from '../stores/auth';
 
 const SAMPLE_RULES: Rule[] = [
   { id: 'cn-suffix', kind: 'DOMAIN-SUFFIX', pattern: 'cn', action: 'direct', priority: 10, enabled: true },
@@ -20,8 +20,6 @@ const SAMPLE_FIXTURES = [
 ];
 
 export default function Rules() {
-  const clear = useAuthStore((s) => s.clear);
-  const username = useAuthStore((s) => s.username);
   const [rules, setRules] = useState<Rule[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [dry, setDry] = useState<DryRunResponse | null>(null);
@@ -59,7 +57,7 @@ export default function Rules() {
     try {
       const res = await api.post<ApplyResponse>('/api/v1/rules/apply', {
         rules: rules.length ? rules : SAMPLE_RULES,
-        note: 'panel smoke test',
+        note: 'panel apply',
       });
       setApply(res);
       await refresh();
@@ -70,22 +68,16 @@ export default function Rules() {
     }
   }
 
-  async function logout() {
-    try { await api.post('/api/v1/logout'); } catch { /* ignore */ }
-    clear();
-  }
-
   return (
-    <div className="p-8">
+    <AppShell>
       <div className="flex items-center justify-between">
         <div>
           <Heading>Rules</Heading>
-          <Text className="mt-1">Signed in as {username}. M1 preview: dry-run + apply against the NoOp orchestrator.</Text>
+          <Text className="mt-1">Sandbox dry-run + auto-rollback pipeline. Editing individual rules lands in a future slice.</Text>
         </div>
         <div className="flex gap-3">
           <Button color="zinc" onClick={runDryRun} disabled={busy}>Dry-run</Button>
           <Button color="indigo" onClick={runApply} disabled={busy}>Apply</Button>
-          <Button plain onClick={logout}>Log out</Button>
         </div>
       </div>
 
@@ -172,6 +164,6 @@ export default function Rules() {
           </div>
         </div>
       )}
-    </div>
+    </AppShell>
   );
 }

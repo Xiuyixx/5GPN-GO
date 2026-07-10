@@ -49,9 +49,13 @@ export interface BootstrapStatus { needs_setup: boolean }
 export interface LoginResponse { token: string }
 export interface Me { user_id: number; username: string }
 
+export type RuleKind =
+  | 'DOMAIN' | 'DOMAIN-SUFFIX' | 'DOMAIN-KEYWORD'
+  | 'GEOSITE' | 'GEOIP' | 'IP-CIDR' | 'RULE-SET' | 'MATCH';
+
 export interface Rule {
   id: string;
-  kind: 'DOMAIN' | 'DOMAIN-SUFFIX' | 'DOMAIN-KEYWORD' | 'GEOSITE' | 'GEOIP' | 'IP-CIDR' | 'RULE-SET' | 'MATCH';
+  kind: RuleKind;
   pattern: string;
   action: string;
   priority: number;
@@ -76,4 +80,39 @@ export interface ApplyResponse {
   rolled_back: boolean;
   health: string;
   reason?: string;
+}
+
+export interface ExitSummary {
+  id: string;
+  protocol: string;
+  server: string;
+  port: number;
+  active: boolean;
+  notes?: string;
+}
+export interface ExitsResponse { exits: ExitSummary[]; active: string }
+
+export interface MetricsSample {
+  ts: string;
+  cpu: number;
+  mem_bytes: number;
+  conns: number;
+  tx_bytes: number;
+  rx_bytes: number;
+}
+
+export interface Snapshot {
+  id: number;
+  created_at: string;
+  config_hash: string;
+  note?: string;
+}
+export interface SnapshotsResponse { snapshots: Snapshot[] }
+export interface RollbackResponse { snapshot_id: number; rule_version_id: number }
+
+export interface BackupImportResult {
+  entries: number;
+  total_bytes: number;
+  applied: boolean;
+  note?: string;
 }
