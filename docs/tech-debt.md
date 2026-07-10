@@ -19,4 +19,26 @@ Recorded trade-offs that need revisiting.
 
 ## M3 (deferred)
 
-- **install.sh slim-down** — until M3 lands, the 130KB `5GPN-X/install.sh` remains the ground-truth installer path. New users see the M0 skeleton `deploy/install.sh` and are pointed at the plan.
+- **install.sh slim-down** — resolved. `deploy/install.sh` is now 83 lines and delegates to `cmd/5gpn-installer`.
+
+## M4 policy
+
+Rules under `.github/workflows/` are strict gates unless listed here.
+
+- **File-size guard**: `scripts/check-file-size.sh`; any non-test file
+  under `internal/` above 800 lines fails CI and blocks the pre-commit
+  hook. To exempt a file, split it or bump `MAX_LINES` in the script
+  and record the reason here with an expiry.
+- **Security workflow** (`.github/workflows/security.yml`): govulncheck
+  hard-fails; `npm audit` fails on `high`+. Weekly cron + on-demand + on-push
+  when dep manifests change. Any accepted finding must be pinned and
+  logged here with an expiry date.
+- **e2e smoke** (`tests/e2e/`): `-tags e2e` gated. CI builds the daemon
+  and runs it against a random localhost port. Local devs skip by default.
+- **Coverage baseline** as of M4 kickoff (M4 target ≥ 70% on key packages):
+  - `internal/rules` 75.8%, `internal/exit` 79.0%, `internal/config/render` 78.4%,
+    `internal/installer` 77.9%, `internal/ios` 70.6% — clear.
+  - `internal/api` 51.7% — needs a second pass in the next M4 batch.
+  - `internal/db` 8.6%, `internal/tgbot` 25.6%, `internal/proxy` 17.8`%,
+    `internal/metrics` 35.2%, `internal/orchestrator` 47.5% — not on the
+    plan's ≥70% key-package list; separate follow-up tickets.

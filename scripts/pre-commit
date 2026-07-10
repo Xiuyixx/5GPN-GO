@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Install with: ln -sf ../../scripts/pre-commit .git/hooks/pre-commit
+#
+# Local git pre-commit hook that runs the M4 file-size guard against
+# whatever is currently staged. Fast (~ms); does not run tests or build.
+
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+"$here/check-file-size.sh" --staged

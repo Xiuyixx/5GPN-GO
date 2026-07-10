@@ -3,7 +3,7 @@ GO := go
 NPM := npm
 VERSION ?= 0.0.0-dev
 
-.PHONY: build build-embed dev test lint tidy release clean web-install web-build stage-web
+.PHONY: build build-embed dev test lint tidy release clean web-install web-build stage-web size-check install-hooks coverage
 
 build:
 	$(GO) build ./cmd/5gpn ./cmd/5gpn-installer ./cmd/5gpn-ctl
@@ -45,3 +45,21 @@ release: web-install web-build stage-web
 
 clean:
 	rm -rf dist/ web/dist/ internal/web/dist cover.out coverage.out
+
+# M4 hard gates.
+
+# Fail if any non-test file under internal/ crosses the 800-line
+# per-file limit. Called in CI + by the pre-commit hook.
+size-check:
+	@./scripts/check-file-size.sh --tree
+
+# Wire the pre-commit hook into the local .git/hooks. Idempotent.
+install-hooks:
+	@mkdir -p .git/hooks
+	@ln -sfn ../../scripts/pre-commit .git/hooks/pre-commit
+	@echo "pre-commit hook linked to scripts/pre-commit"
+
+# Emit per-package coverage; used by CI to compare against thresholds.
+coverage:
+	$(GO) test -race -coverprofile=cover.out ./internal/... 2>&1 | tee coverage.log
+	@$(GO) tool cover -func=cover.out | tail -1

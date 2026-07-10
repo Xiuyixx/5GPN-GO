@@ -1,9 +1,23 @@
+# Security posture: weekly cron + on-demand + on-push. Failing this
+# workflow blocks merges to main so vulnerabilities cannot silently
+# accumulate. If a finding needs to be temporarily accepted, record
+# it in docs/tech-debt.md with an expiry date and pin the affected
+# dep at the last-known-clean version.
+
 name: security
 
 on:
   schedule:
-    - cron: "0 3 * * 1"
+    - cron: "0 3 * * 1"  # Mondays 03:00 UTC
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "go.mod"
+      - "go.sum"
+      - "web/package.json"
+      - "web/package-lock.json"
+      - ".github/workflows/security.yml"
 
 jobs:
   govulncheck:
@@ -13,8 +27,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.23"
-      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
-      - run: govulncheck ./... || true
+          cache: true
+      - name: install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: govulncheck
+        run: govulncheck -show verbose ./...
 
   npm-audit:
     runs-on: ubuntu-24.04
@@ -23,6 +40,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: audit
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: install
         working-directory: web
-        run: npm audit --production || true
+        run: npm ci --ignore-scripts
+      - name: audit (production, high+)
+        working-directory: web
+        # M4 policy: high/critical fail the build; moderate is a warning
+        # (npm audit's default), low is ignored. Escalate a moderate to
+        # high in package.json's `overrides` if it's exploitable in prod.
+        run: npm audit --production --audit-level=high

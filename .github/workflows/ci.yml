@@ -68,6 +68,34 @@ jobs:
           version: v1.61
         continue-on-error: true
 
+  # M4 file-size guard. Any non-test .go file under internal/ over
+  # 800 lines fails the pipeline; see scripts/check-file-size.sh and
+  # docs/tech-debt.md.
+  size-check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: file-size guard
+        run: ./scripts/check-file-size.sh --tree
+
+  # M4 e2e smoke suite. Boots the real daemon on a random port and walks
+  # bootstrap → login → protected endpoint. Files are behind a build tag
+  # so dev machines skip them; CI runs them explicitly here.
+  e2e:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+      - name: build daemon
+        run: go build -o dist/5gpn ./cmd/5gpn
+      - name: run smoke
+        env:
+          E2E_BINARY: ${{ github.workspace }}/dist/5gpn
+        run: go test -tags e2e -count=1 -timeout=2m ./tests/e2e/...
+
   # Preview installer behavior against every supported distro fixture
   # without provisioning real VMs. Every fixture must yield `install: ok`
   # in dry-run mode. If you add a fixture, extend the matrix + the
