@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -21,6 +22,7 @@ import (
 	"github.com/Xiuyixx/5GPN-Go/internal/config"
 	"github.com/Xiuyixx/5GPN-Go/internal/db"
 	"github.com/Xiuyixx/5GPN-Go/internal/orchestrator"
+	"github.com/Xiuyixx/5GPN-Go/internal/tgbot"
 	"github.com/Xiuyixx/5GPN-Go/internal/web"
 )
 
@@ -107,6 +109,32 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 	if insecure {
 		cert, key = "", ""
 	}
+	// TG bot (optional — starts only when config.tgbot.token is set).
+	if cfg.TGBot.Token != "" {
+		bot, err := tgbot.New(tgbot.Config{
+			Token:        cfg.TGBot.Token,
+			AdminChatIDs: cfg.TGBot.AdminChatIDs,
+			Handlers: &tgbot.DefaultHandlers{
+				DB:     dbHandle,
+				Logger: logger,
+			},
+			Logger: logger,
+		})
+		if err != nil {
+			if errors.Is(err, tgbot.ErrBotDisabled) {
+				logger.Info("tgbot disabled (empty token after env expansion)")
+			} else {
+				logger.Warn("tgbot init failed — panel still serves", "err", err)
+			}
+		} else {
+			go func() {
+				if err := bot.Serve(ctx); err != nil {
+					logger.Warn("tgbot.Serve exited", "err", err)
+				}
+			}()
+		}
+	}
+
 	logger.Info("5gpn daemon starting",
 		"version", version, "addr", addr, "data", dataDir, "insecure", insecure)
 	return srv.ListenAndServe(ctx, addr, cert, key)
