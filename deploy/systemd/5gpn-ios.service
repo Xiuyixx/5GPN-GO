@@ -1,0 +1,11 @@
+[Unit]
+Description=5GPN iOS DoT Profile HTTP Handler
+Requires=5gpn-ios.socket
+After=5gpn-ios.socket
+
+[Service]
+Type=simple
+DynamicUser=yes
+ExecStart=/usr/local/bin/5gpn ios-http
+StandardInput=socket
+StandardError=journal

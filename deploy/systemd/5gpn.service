@@ -1,0 +1,27 @@
+[Unit]
+Description=5GPN Personal Gateway Daemon
+Documentation=https://github.com/Xiuyixx/5gpn
+After=network-online.target
+Wants=network-online.target
+Requires=dnsdist.service mihomo.service
+
+[Service]
+Type=notify
+DynamicUser=yes
+StateDirectory=5gpn
+RuntimeDirectory=5gpn
+LogsDirectory=5gpn
+ConfigurationDirectory=5gpn
+SupplementaryGroups=systemd-journal
+ExecStart=/usr/local/bin/5gpn --config /etc/5gpn/config.yaml --data /var/lib/5gpn
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=65536
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ReadWritePaths=/etc/dnsdist /etc/mihomo /etc/sniproxy
+
+[Install]
+WantedBy=multi-user.target
