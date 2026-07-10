@@ -295,3 +295,59 @@ func UpsertRuleSourceETag(db *sql.DB, url, kind, etag string) error {
 	)
 	return err
 }
+
+// ApplyStatus mirrors an apply_status row. State is one of
+// 'submitted' | 'confirmed' | 'rolled_back' (CHECK-constrained in DDL).
+type ApplyStatus struct {
+	ID         int64
+	SnapshotID int64
+	State      string
+	Reason     string
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
+// InsertApplyStatus writes a 'submitted' row for a snapshot and returns
+// its id. Applier updates the same row to 'confirmed'/'rolled_back' from
+// the orchestrator's HealthObserver callback.
+func InsertApplyStatus(db *sql.DB, snapshotID int64, reason string) (int64, error) {
+	res, err := db.Exec(
+		`INSERT INTO apply_status(snapshot_id, state, reason)
+		 VALUES(?, 'submitted', ?)`,
+		snapshotID, reason,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// UpdateApplyStatus flips an existing row's state and reason.
+func UpdateApplyStatus(db *sql.DB, id int64, state, reason string) error {
+	_, err := db.Exec(
+		`UPDATE apply_status
+		   SET state = ?, reason = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ?`,
+		state, reason, id,
+	)
+	return err
+}
+
+// LatestApplyStatus returns the most recently updated apply_status row, or
+// (nil, nil) if the table is empty. Powers GET /api/v1/apply/status.
+func LatestApplyStatus(db *sql.DB) (*ApplyStatus, error) {
+	row := db.QueryRow(
+		`SELECT id, snapshot_id, state, COALESCE(reason,''), created_at, updated_at
+		   FROM apply_status
+		  ORDER BY updated_at DESC, id DESC
+		  LIMIT 1`,
+	)
+	var a ApplyStatus
+	if err := row.Scan(&a.ID, &a.SnapshotID, &a.State, &a.Reason, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &a, nil
+}

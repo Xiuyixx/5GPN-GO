@@ -14,6 +14,8 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 
+	"github.com/Xiuyixx/5GPN-Go/internal/config"
+	"github.com/Xiuyixx/5GPN-Go/internal/core"
 	"github.com/Xiuyixx/5GPN-Go/internal/orchestrator"
 )
 
@@ -26,6 +28,8 @@ type Server struct {
 	WebFS        fs.FS
 	SetupToken   string
 	Orchestrator orchestrator.Orchestrator
+	BaseConfig   *config.Config
+	Applier      *core.Applier
 }
 
 // Config bundles user-adjustable server knobs.
@@ -38,6 +42,8 @@ type Config struct {
 	SetupToken     string
 	WebFS          fs.FS
 	Orchestrator   orchestrator.Orchestrator
+	BaseConfig     *config.Config
+	Applier        *core.Applier
 }
 
 // New builds a Server from its dependencies.
@@ -57,6 +63,18 @@ func New(db *sql.DB, cfg Config, logger *slog.Logger) *Server {
 	if cfg.Orchestrator == nil {
 		cfg.Orchestrator = &orchestrator.NoOp{Logger: logger}
 	}
+	if cfg.BaseConfig == nil {
+		cfg.BaseConfig = &config.Config{}
+	}
+	if cfg.Applier == nil {
+		cfg.Applier = &core.Applier{
+			DB:         db,
+			BaseConfig: cfg.BaseConfig,
+			Store:      core.NoStore{},
+			Orch:       cfg.Orchestrator,
+			Logger:     logger,
+		}
+	}
 	return &Server{
 		DB: db,
 		Auth: &Authenticator{
@@ -68,6 +86,8 @@ func New(db *sql.DB, cfg Config, logger *slog.Logger) *Server {
 		WebFS:        cfg.WebFS,
 		SetupToken:   cfg.SetupToken,
 		Orchestrator: cfg.Orchestrator,
+		BaseConfig:   cfg.BaseConfig,
+		Applier:      cfg.Applier,
 	}
 }
 
@@ -103,6 +123,8 @@ func (s *Server) Router() http.Handler {
 		r.Get("/api/v1/rules", s.handleListRules)
 		r.Post("/api/v1/rules/dry-run", s.handleDryRun)
 		r.Post("/api/v1/rules/apply", s.handleApply)
+		r.Post("/api/v1/rules/chinalist/sync", s.handleChinalistSync)
+		r.Get("/api/v1/apply/status", s.handleApplyStatus)
 
 		r.Get("/api/v1/exits", s.handleListExits)
 		r.Post("/api/v1/exits/add", s.handleAddExit)

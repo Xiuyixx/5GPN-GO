@@ -19,14 +19,49 @@ import (
 	"syscall"
 	"time"
 
+	"database/sql"
+
 	"github.com/Xiuyixx/5GPN-Go/internal/api"
 	"github.com/Xiuyixx/5GPN-Go/internal/config"
+	"github.com/Xiuyixx/5GPN-Go/internal/core"
 	"github.com/Xiuyixx/5GPN-Go/internal/db"
 	"github.com/Xiuyixx/5GPN-Go/internal/metrics"
 	"github.com/Xiuyixx/5GPN-Go/internal/orchestrator"
 	"github.com/Xiuyixx/5GPN-Go/internal/tgbot"
 	"github.com/Xiuyixx/5GPN-Go/internal/web"
 )
+
+// bootStore is the boot-time projection of DB state that core.Assemble
+// consumes. It reads the currently-active rule_versions row and returns
+// the yaml-declared exits unchanged (S2 will replace exits with a
+// DB-backed table).
+type bootStore struct {
+	db    *sql.DB
+	exits []config.ExitConfig
+}
+
+func (b *bootStore) ActiveRulesYAML() (string, bool, error) {
+	row, err := db.GetActiveRuleVersion(b.db)
+	if errors.Is(err, db.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return row.RulesYAML, true, nil
+}
+
+func (b *bootStore) ListExits() ([]core.ExitRecord, error) {
+	out := make([]core.ExitRecord, 0, len(b.exits))
+	for _, ex := range b.exits {
+		cfg := map[string]any{}
+		for k, v := range ex.Config {
+			cfg[k] = v
+		}
+		out = append(out, core.ExitRecord{ID: ex.ID, Protocol: ex.Protocol, Config: cfg})
+	}
+	return out, nil
+}
 
 var version = "0.0.0-m1"
 
@@ -88,16 +123,48 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	// Assemble the effective config once at boot so orchestrator + Applier
+	// both agree on what "active" looks like across restarts. Assemble is
+	// tolerant of missing DB rows (fresh install) so this is safe on
+	// first-boot.
+	store := &bootStore{db: dbHandle, exits: cfg.Exits}
+	effectiveCfg, err := core.Assemble(cfg, store)
+	if err != nil {
+		return fmt.Errorf("assemble: %w", err)
+	}
+
 	// Orchestrator: Systemd on Linux hosts (real render + reload + probe +
 	// rollback), NoOp everywhere else so dev on macOS keeps working.
 	var orch orchestrator.Orchestrator
+	var systemd *orchestrator.Systemd
 	if orchestrator.AvailableOnHost() {
-		orch = orchestrator.DefaultSystemd(cfg, logger)
+		systemd = orchestrator.DefaultSystemd(effectiveCfg, logger)
+		orch = systemd
 		logger.Info("orchestrator: systemd")
 	} else {
 		orch = &orchestrator.NoOp{Logger: logger}
 		logger.Info("orchestrator: no-op (non-linux host)")
 	}
+
+	applier := &core.Applier{
+		DB:         dbHandle,
+		BaseConfig: cfg,
+		Store:      store,
+		Orch:       orch,
+		Logger:     logger,
+	}
+	if systemd != nil {
+		systemd.HealthObserver = applier.OnHealth
+	}
+
+	activeExit := ""
+	if len(effectiveCfg.Exits) > 0 {
+		activeExit = effectiveCfg.Exits[0].ID
+	}
+	logger.Info("core: effective config assembled",
+		"effective_rules", len(effectiveCfg.EffectiveRules),
+		"exits", len(effectiveCfg.Exits),
+		"active_exit", activeExit)
 
 	// Metrics collector: samples every 10s into SQLite metrics_snapshot,
 	// trimmed to 24h. Runs for the lifetime of the daemon.
@@ -116,6 +183,8 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 		SetupToken:     setupToken,
 		WebFS:          web.FS,
 		Orchestrator:   orch,
+		BaseConfig:     cfg,
+		Applier:        applier,
 	}, logger)
 
 	addr := listenOverride
