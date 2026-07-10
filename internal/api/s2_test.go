@@ -39,6 +39,20 @@ func authed(t *testing.T, method, path string, body any, token string) *http.Req
 
 func TestS2Metrics(t *testing.T) {
 	srv, tok := s2Setup(t)
+	// Seed a couple of metrics rows so the endpoint has something to return
+	// (M2 S4 replaced the synthetic in-handler generator with a SQLite read).
+	if _, err := srv.DB.Exec(
+		`INSERT INTO metrics_snapshot(ts, cpu, mem, conns, tx_bytes, rx_bytes) VALUES(?, ?, ?, ?, ?, ?)`,
+		"2026-07-10T12:00:00Z", 12.3, 200_000_000, 100, 12345, 67890,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.DB.Exec(
+		`INSERT INTO metrics_snapshot(ts, cpu, mem, conns, tx_bytes, rx_bytes) VALUES(?, ?, ?, ?, ?, ?)`,
+		"2026-07-10T12:00:10Z", 15.5, 210_000_000, 105, 22345, 77890,
+	); err != nil {
+		t.Fatal(err)
+	}
 	rr := do(t, srv, authed(t, "GET", "/api/v1/metrics", nil, tok))
 	if rr.Code != http.StatusOK {
 		t.Fatalf("metrics: %d", rr.Code)
@@ -47,11 +61,11 @@ func TestS2Metrics(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &samples); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(samples) != 60 {
-		t.Fatalf("want 60 samples, got %d", len(samples))
+	if len(samples) != 2 {
+		t.Fatalf("want 2 samples, got %d", len(samples))
 	}
-	if samples[0].CPU < 0 || samples[0].MemBytes < 0 {
-		t.Fatalf("negative sample: %+v", samples[0])
+	if samples[1].CPU != 15.5 {
+		t.Errorf("second sample CPU: %v", samples[1].CPU)
 	}
 }
 
