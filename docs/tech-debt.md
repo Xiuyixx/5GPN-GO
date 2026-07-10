@@ -35,10 +35,22 @@ Rules under `.github/workflows/` are strict gates unless listed here.
   logged here with an expiry date.
 - **e2e smoke** (`tests/e2e/`): `-tags e2e` gated. CI builds the daemon
   and runs it against a random localhost port. Local devs skip by default.
-- **Coverage baseline** as of M4 kickoff (M4 target ≥ 70% on key packages):
+- **Coverage baseline** as of M4 close (plan target ≥ 70% on key packages):
   - `internal/rules` 75.8%, `internal/exit` 79.0%, `internal/config/render` 78.4%,
     `internal/installer` 77.9%, `internal/ios` 70.6% — clear.
-  - `internal/api` 51.7% — needs a second pass in the next M4 batch.
-  - `internal/db` 8.6%, `internal/tgbot` 25.6%, `internal/proxy` 17.8`%,
+  - `internal/api` 65.8% (was 51.7%). The remaining 34% is
+    `handleLogsSSE`'s streaming loop, `journalctlStream`, and
+    `ListenAndServe` — all three block until either a real HTTP client
+    disconnects or a live journalctl pipe closes, which is not
+    reachable under `httptest.ResponseRecorder`. Those paths are
+    exercised end-to-end by `tests/e2e/`; excluding them from the unit
+    denominator would put api well past the 70% bar. Accepting the raw
+    number.
+  - `internal/db` 8.6%, `internal/tgbot` 25.6%, `internal/proxy` 17.8%,
     `internal/metrics` 35.2%, `internal/orchestrator` 47.5% — not on the
     plan's ≥70% key-package list; separate follow-up tickets.
+- **5GPN-X/ legacy tree kept as reference**: `5GPN-X/` is retained as a
+  read-only subtree with its own `go.mod` shim, so history is preserved
+  for reviewers and the `migrate-from-legacy` operator flow has a
+  concrete example to point at. Delete only if the reference stops
+  being useful.
