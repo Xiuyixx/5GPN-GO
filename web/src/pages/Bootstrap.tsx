@@ -10,7 +10,11 @@ import { Text } from '../components/ui/text';
 import { api } from '../api/client';
 import type { Me } from '../api/client';
 
-export default function Bootstrap() {
+interface BootstrapProps {
+  onDone?: () => Promise<void> | void;
+}
+
+export default function Bootstrap({ onDone }: BootstrapProps) {
   const nav = useNavigate();
   const [token, setToken] = useState('');
   const [username, setUsername] = useState('admin');
@@ -24,6 +28,7 @@ export default function Bootstrap() {
     setBusy(true);
     try {
       await api.post<Me>('/api/v1/bootstrap', { token, username, password });
+      if (onDone) await onDone();
       nav('/login', { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
