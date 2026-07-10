@@ -1,0 +1,81 @@
+# 5gpn example config. Single source of truth: dnsdist.conf, mihomo.yaml, and
+# sniproxy.conf are rendered from this document — do not edit those files by hand.
+#
+# ${ENV_VAR} placeholders are expanded from the process environment at load
+# time. Anything unset expands to the empty string.
+
+server:
+  # Domain the panel + DoT run under. Reused for the existing renew-hook.sh
+  # ACME/Let's Encrypt flow; do not run a second certificate manager.
+  domain: "gateway.example.com"
+  panel_port: 8443
+  panel_bind: "0.0.0.0"          # bind 127.0.0.1 to require an SSH tunnel
+  tls:
+    cert: "/etc/letsencrypt/live/gateway.example.com/fullchain.pem"
+    key:  "/etc/letsencrypt/live/gateway.example.com/privkey.pem"
+
+panel:
+  session_ttl: "24h"
+  rate_limit:
+    login_per_minute: 5
+    lockout_minutes:  15
+
+dns:
+  dot_port: 853
+  upstreams:
+    - "1.1.1.1:53"
+    - "8.8.8.8:53"
+  chinalist_source: "https://raw.githubusercontent.com/felixonmars/dnsmasq-china-list/master/accelerated-domains.china.conf"
+
+proxy:
+  sniproxy:
+    listen_http: 80
+    loopback_https: 8443
+  wa_shim:
+    # Mirrors 5GPN-X/wa-shim.py environment-variable defaults 1:1.
+    listen: "0.0.0.0"
+    port: 443
+    backend: "127.0.0.1:8443"
+    wa_host: "g.whatsapp.net"
+    allow_cidr:
+      - "172.22.0.0/16"
+      - "127.0.0.0/8"
+    peek_timeout: "3s"
+    connect_timeout: "8s"
+    dns_ttl: "60s"
+    max_conn: 8192
+  quic:
+    listen: "0.0.0.0:443"
+
+exits:
+  - id: "direct"
+    protocol: "direct"
+  # Additional example — remove or replace:
+  # - id: "wg1"
+  #   protocol: "wireguard"
+  #   config:
+  #     endpoint: "example.wg:51820"
+  #     private_key: "${WG_PRIVATE_KEY}"
+
+rules:
+  defaults_file: "/etc/5gpn/rules.yaml"
+  sources:
+    - url:  "https://github.com/MetaCubeX/meta-rules-dat/releases/latest/download/geosite.mrs"
+      kind: "mrs"
+      cron: "@daily"
+
+tgbot:
+  token: "${TG_TOKEN}"
+  admin_chat_ids:
+    - 123456789
+
+ios:
+  dot_domain: "dot.gateway.example.com"
+  profile_uuid: "auto"
+  http_port: 8111
+
+lowmem:
+  auto_detect_below_mb: 1024
+  hard_limits:
+    go_max_procs: 2
+    mihomo_max_ram: "256m"
