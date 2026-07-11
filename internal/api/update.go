@@ -151,10 +151,16 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Phase 1: swap files synchronously. Unit="" tells Swap to skip its
+	// internal systemctl call — the daemon cannot block on
+	// `systemctl restart 5gpn` when it IS 5gpn: systemctl waits for the
+	// old process to exit, but the old process is stuck in this handler.
+	// We do the file-level swap here and defer the actual restart to a
+	// post-response goroutine below.
 	err = updater.Swap(ctx, updater.SwapOptions{
 		CurrentPath: s.Updater.BinaryPath,
 		NewPath:     newPath,
-		Unit:        s.Updater.Unit,
+		Unit:        "",
 	})
 	if err != nil {
 		_ = db.AppendAudit(s.DB, db.AuditEntry{
@@ -180,6 +186,32 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		Applied:         true,
 		RestartRequired: true,
 	})
+	// Best-effort flush so the client receives the response before we
+	// queue the restart — otherwise systemd may SIGTERM the daemon
+	// mid-write and the panel sees a connection reset instead of the
+	// success payload.
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+
+	// Phase 2: kick off the restart out of band. Detached goroutine on
+	// context.Background() so it survives the request ctx being cancelled
+	// when the handler returns. A short delay gives the TCP write above
+	// time to drain to the client before systemd yanks the process. The
+	// systemctl call uses --no-block so it does not deadlock (see
+	// updater.RestartService docs).
+	unit := s.Updater.Unit
+	if unit != "" {
+		logger := s.Logger
+		go func() {
+			time.Sleep(300 * time.Millisecond)
+			restartCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := updater.RestartService(restartCtx, unit); err != nil && logger != nil {
+				logger.Warn("update.apply: RestartService failed", "unit", unit, "err", err)
+			}
+		}()
+	}
 }
 
 func actorFromCtx(r *http.Request) string {

@@ -161,7 +161,13 @@ func (s *Server) Router() http.Handler {
 	}))
 
 	r.Get("/api/v1/health", func(w http.ResponseWriter, req *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		// version is exposed here (not just on the authenticated /me path)
+		// so the panel's post-upgrade poll can detect the new daemon
+		// coming back up before the auth session has been re-established.
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":      true,
+			"version": s.Updater.Version,
+		})
 	})
 
 	r.Route("/api/v1/bootstrap", func(r chi.Router) {

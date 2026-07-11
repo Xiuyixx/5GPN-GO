@@ -27,10 +27,24 @@ type Manager struct {
 	cfg ManagerConfig
 
 	mu           sync.Mutex
+	rootCtx      context.Context // daemon lifetime ctx captured on first Start
 	token        string
 	adminChatIDs []int64
 	cancel       context.CancelFunc
 	running      bool
+	generation   uint64 // bumped on every startLocked; cleanup uses it to detect "still me?"
+}
+
+// newBotFn is the seam for tests to inject a fake Bot without hitting
+// Telegram's servers. Production keeps the real tgbot.New.
+var newBotFn = func(cfg Config) (runnable, error) {
+	return New(cfg)
+}
+
+// runnable is the minimum surface Manager needs from a live Bot. Kept
+// unexported: the Bot type from bot.go satisfies it implicitly.
+type runnable interface {
+	Serve(ctx context.Context) error
 }
 
 // NewManager builds a Manager. Use Start on daemon boot to bring the bot
@@ -44,26 +58,42 @@ func NewManager(cfg ManagerConfig) *Manager {
 // Returns ErrBotDisabled when token is empty (so callers can skip
 // cleanly on a fresh install with no bot configured yet). Returns
 // whatever error tgbot.New reports otherwise.
+//
+// The ctx passed here is captured as the Manager's *root* lifetime ctx:
+// all bots spawned by later Update() calls derive from it. That way a
+// panel-driven restart (whose caller ctx is a short-lived HTTP request
+// ctx) does not kill the new bot the moment the HTTP response is written.
 func (m *Manager) Start(ctx context.Context, token string, adminChatIDs []int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Always remember the daemon ctx, even on the empty-token path, so a
+	// later panel-driven Update can spawn a bot rooted in the correct
+	// lifetime.
+	if m.rootCtx == nil {
+		m.rootCtx = ctx
+	}
 	if token == "" {
 		return ErrBotDisabled
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.startLocked(ctx, token, adminChatIDs)
+	return m.startLocked(token, adminChatIDs)
 }
 
 // Update replaces token / admin ids in place. Stops any running bot and
 // starts fresh with the new credentials. When token is empty this is
 // equivalent to Stop.
-func (m *Manager) Update(ctx context.Context, token string, adminChatIDs []int64) error {
+//
+// The ctx parameter is used only for cancellation of the token validation
+// (tgbot.New's getMe call) — it is deliberately NOT the parent of the new
+// bot's lifetime. See Start for why: the settings handler passes the HTTP
+// request ctx, which Go cancels the instant the response is written.
+func (m *Manager) Update(_ context.Context, token string, adminChatIDs []int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopLocked()
 	if token == "" {
 		return nil
 	}
-	return m.startLocked(ctx, token, adminChatIDs)
+	return m.startLocked(token, adminChatIDs)
 }
 
 // Stop tears down the bot; no-op if not running. Safe to call multiple
@@ -80,10 +110,10 @@ func (m *Manager) Status() Status {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return Status{
-		Enabled:      m.running,
-		AdminCount:   len(m.adminChatIDs),
-		TokenSet:     m.token != "",
-		TokenMasked:  maskToken(m.token),
+		Enabled:     m.running,
+		AdminCount:  len(m.adminChatIDs),
+		TokenSet:    m.token != "",
+		TokenMasked: maskToken(m.token),
 	}
 }
 
@@ -96,8 +126,8 @@ type Status struct {
 }
 
 // startLocked assumes m.mu is held.
-func (m *Manager) startLocked(parent context.Context, token string, adminChatIDs []int64) error {
-	bot, err := New(Config{
+func (m *Manager) startLocked(token string, adminChatIDs []int64) error {
+	bot, err := newBotFn(Config{
 		Token:        token,
 		AdminChatIDs: adminChatIDs,
 		Handlers:     m.cfg.Handlers,
@@ -106,11 +136,20 @@ func (m *Manager) startLocked(parent context.Context, token string, adminChatIDs
 	if err != nil {
 		return err
 	}
+	parent := m.rootCtx
+	if parent == nil {
+		// Defensive: Start should have set this. Falling back keeps a
+		// caller that only ever uses Update() from crashing, at the cost
+		// of losing daemon-shutdown propagation into this bot.
+		parent = context.Background()
+	}
 	ctx, cancel := context.WithCancel(parent)
 	m.token = token
 	m.adminChatIDs = append([]int64(nil), adminChatIDs...)
 	m.cancel = cancel
 	m.running = true
+	m.generation++
+	myGen := m.generation
 
 	go func() {
 		if err := bot.Serve(ctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -118,11 +157,14 @@ func (m *Manager) startLocked(parent context.Context, token string, adminChatIDs
 				m.cfg.Logger.Warn("tgbot.Serve exited", "err", err)
 			}
 		}
-		// Best-effort cleanup: if the Serve loop exited on its own (e.g.
-		// upstream 401), reflect that in Status so the panel doesn't lie.
+		// If this goroutine's bot is still the current bot (no newer
+		// startLocked has run since), reflect the Serve exit in Status so
+		// the panel does not lie. A newer generation means Update already
+		// swapped state and this cleanup must not stomp on it.
 		m.mu.Lock()
-		if m.cancel != nil && &m.cancel == &cancel {
+		if m.generation == myGen {
 			m.running = false
+			m.cancel = nil
 		}
 		m.mu.Unlock()
 	}()

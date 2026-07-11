@@ -165,13 +165,31 @@ func (c *Client) Download(ctx context.Context, asset *Asset, dest, wantHex strin
 
 // Swap performs a blue-green replacement: back up current, install new,
 // restart systemd unit, health-check, roll back on failure.
+//
+// Callers that need to write an HTTP response BEFORE the daemon dies
+// (e.g. the panel's one-click upgrade) should pass Unit="" here so the
+// file swap runs synchronously without the blocking systemctl call, and
+// then invoke RestartService in a goroutine after the response has been
+// flushed to the client.
 type SwapOptions struct {
-	CurrentPath   string        // path to the running binary
-	NewPath       string        // path to the freshly downloaded binary
-	Unit          string        // systemd unit to restart (empty skips)
+	CurrentPath   string // path to the running binary
+	NewPath       string // path to the freshly downloaded binary
+	Unit          string // systemd unit to restart (empty = skip; caller triggers restart out-of-band)
 	HealthCheck   func(context.Context) error
 	HealthDelay   time.Duration // default 3s
 	HealthTimeout time.Duration // default 5s
+}
+
+// RestartService triggers a non-blocking systemd restart. Uses
+// --no-block so systemctl exits immediately after queuing the restart
+// with systemd, instead of blocking until the service has fully stopped
+// and started — which would deadlock when the caller IS the service.
+// On non-Linux hosts or an empty unit, this is a no-op.
+func RestartService(ctx context.Context, unit string) error {
+	if unit == "" || runtime.GOOS != "linux" {
+		return nil
+	}
+	return exec.CommandContext(ctx, "systemctl", "restart", "--no-block", unit).Run()
 }
 
 // Swap replaces CurrentPath with NewPath, keeping a .prev backup.

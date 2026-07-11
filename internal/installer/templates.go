@@ -26,7 +26,10 @@ TimeoutStopSec=15s
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths={{.DataDir}} {{.ConfigDir}}
+# BinaryDir is included so panel-driven upgrades can rewrite the binary
+# in place (blue-green swap in internal/updater). Without it, ProtectSystem
+# would make /usr/local/bin read-only and one-click upgrade fails EROFS.
+ReadWritePaths={{.DataDir}} {{.ConfigDir}} {{.BinaryDir}}
 PrivateTmp=yes
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
 AmbientCapabilities=CAP_NET_BIND_SERVICE
@@ -72,6 +75,7 @@ func Render(unit string, env Env) ([]byte, error) {
 		"User":       env.User,
 		"Group":      env.Group,
 		"BinaryPath": env.BinaryPath(),
+		"BinaryDir":  filepathDir(env.BinaryPath()),
 		"ConfigPath": env.ConfigPath(),
 		"ConfigDir":  env.ConfigDir,
 		"DataDir":    env.DataDir,
@@ -79,4 +83,23 @@ func Render(unit string, env Env) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// filepathDir is a tiny wrapper around path/filepath.Dir kept local so
+// templates.go does not sprout a new import for a one-liner. Called only
+// from Render.
+func filepathDir(p string) string {
+	if i := lastSlash(p); i >= 0 {
+		return p[:i]
+	}
+	return "."
+}
+
+func lastSlash(p string) int {
+	for i := len(p) - 1; i >= 0; i-- {
+		if p[i] == '/' {
+			return i
+		}
+	}
+	return -1
 }
