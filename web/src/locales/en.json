@@ -1,0 +1,49 @@
+{
+  "app": {
+    "brand": "5gpn",
+    "tagline": "personal gateway"
+  },
+  "nav": {
+    "dashboard": "Dashboard",
+    "rules": "Rules",
+    "exits": "Exits",
+    "snapshots": "Snapshots",
+    "backup": "Backup",
+    "logs": "Logs",
+    "settings": "Settings",
+    "signedIn": "signed in",
+    "logout": "Log out"
+  },
+  "language": {
+    "label": "Language",
+    "en": "English",
+    "zh-CN": "简体中文"
+  },
+  "login": {
+    "heading": "Sign in to 5gpn",
+    "subheading": "personal gateway",
+    "usernameLabel": "Username",
+    "passwordLabel": "Password",
+    "submit": "Sign in",
+    "submitting": "Signing in…",
+    "errorTitle": "Sign-in failed"
+  },
+  "bootstrap": {
+    "heading": "First-time setup",
+    "subheading": "claim your panel",
+    "tokenLabel": "Setup token",
+    "tokenHelp": "One-time token printed to the daemon log at first boot.",
+    "usernameLabel": "Username",
+    "passwordLabel": "Password (min. 8 characters)",
+    "submit": "Claim panel",
+    "submitting": "Claiming…",
+    "errorTitle": "Claim failed"
+  },
+  "common": {
+    "loading": "Loading…",
+    "cancel": "Cancel",
+    "save": "Save",
+    "close": "Close",
+    "retry": "Retry"
+  }
+}

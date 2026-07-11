@@ -1,0 +1,49 @@
+{
+  "app": {
+    "brand": "5gpn",
+    "tagline": "个人网关"
+  },
+  "nav": {
+    "dashboard": "仪表盘",
+    "rules": "规则",
+    "exits": "出口",
+    "snapshots": "快照",
+    "backup": "备份",
+    "logs": "日志",
+    "settings": "设置",
+    "signedIn": "已登录",
+    "logout": "退出"
+  },
+  "language": {
+    "label": "语言",
+    "en": "English",
+    "zh-CN": "简体中文"
+  },
+  "login": {
+    "heading": "登录 5gpn",
+    "subheading": "个人网关",
+    "usernameLabel": "用户名",
+    "passwordLabel": "密码",
+    "submit": "登录",
+    "submitting": "登录中…",
+    "errorTitle": "登录失败"
+  },
+  "bootstrap": {
+    "heading": "首次初始化",
+    "subheading": "领取面板控制权",
+    "tokenLabel": "初始化令牌",
+    "tokenHelp": "首次启动 daemon 时打印在日志中的一次性令牌。",
+    "usernameLabel": "用户名",
+    "passwordLabel": "密码（至少 8 位）",
+    "submit": "领取面板",
+    "submitting": "领取中…",
+    "errorTitle": "领取失败"
+  },
+  "common": {
+    "loading": "加载中…",
+    "cancel": "取消",
+    "save": "保存",
+    "close": "关闭",
+    "retry": "重试"
+  }
+}
