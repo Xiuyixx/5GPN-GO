@@ -21,6 +21,7 @@ import (
 
 	"crypto/tls"
 	"database/sql"
+	"strings"
 
 	"github.com/Xiuyixx/5GPN-Go/internal/api"
 	"github.com/Xiuyixx/5GPN-Go/internal/config"
@@ -30,11 +31,24 @@ import (
 	"github.com/Xiuyixx/5GPN-Go/internal/frontdoor"
 	"github.com/Xiuyixx/5GPN-Go/internal/metrics"
 	"github.com/Xiuyixx/5GPN-Go/internal/orchestrator"
+	"github.com/Xiuyixx/5GPN-Go/internal/proxy/quicforward"
+	"github.com/Xiuyixx/5GPN-Go/internal/proxy/sniforward"
 	"github.com/Xiuyixx/5GPN-Go/internal/resolver"
 	"github.com/Xiuyixx/5GPN-Go/internal/rulesets"
 	"github.com/Xiuyixx/5GPN-Go/internal/settings"
 	"github.com/Xiuyixx/5GPN-Go/internal/tgbot"
 	"github.com/Xiuyixx/5GPN-Go/internal/web"
+
+	"net"
+)
+
+// Default loopback backends used when the operator enables the
+// transparent forwarders. The panel HTTPS listener moves to the TCP
+// port; DoH3 (if also on) moves to the UDP port; sniforward and
+// quicforward own public :443 for their respective transports.
+const (
+	defaultPanelBackendTCP = "127.0.0.1:8444"
+	defaultPanelBackendUDP = "127.0.0.1:8445"
 )
 
 // bootStore is the boot-time projection of DB state that core.Assemble
@@ -296,6 +310,26 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 		}
 	}
 
+	// Path-B transparent-forwarder decision: when sniforward is enabled
+	// it owns the public TCP :443 socket, so the panel HTTPS listener
+	// (whether it's the "primary" bound to panel_port=443 or the ACME
+	// secondary on :443) must vacate :443 entirely and bind the
+	// loopback panelBackendTCP instead. This must happen BEFORE
+	// srv.ListenAndServe so both listeners pick up the move.
+	sniForwardOn, _ := settingsStore.GetBool(context.Background(), settings.KeyFrontdoorSNIForwardEnabled)
+	panelBackendTCP := defaultPanelBackendTCP
+	if v, _ := settingsStore.GetString(context.Background(), settings.KeyFrontdoorPanelBackendTCP); v != "" {
+		panelBackendTCP = v
+	}
+	if sniForwardOn && srv.ACME.Domain != "" {
+		srv.ACMEListenAddr = panelBackendTCP
+		if strings.HasSuffix(addr, ":443") || strings.HasSuffix(addr, ":443/") {
+			logger.Info("path-b: primary panel listener relocated off :443",
+				"was", addr, "now", panelBackendTCP)
+			addr = panelBackendTCP
+		}
+	}
+
 	// Fail-fast guard: refuse to bind plain HTTP on a TLS-standard port.
 	// Without this, a half-configured wizard save (port 443, ACME off,
 	// no cert) yields a listener that serves HTTP on :443. Browsers
@@ -367,6 +401,19 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 // domain via api.setupACME, so this call is idempotent and just returns
 // a wrapper over the same on-disk cert. When certmagic later rotates the
 // cert both the panel and the front-door pick it up on the next handshake.
+//
+// Path-B additions (v0.4.x):
+//   - When frontdoor.spoof_enabled is on, a SpoofPolicy is published to
+//     the resolver so proxy-classified A/AAAA answers point at the
+//     gateway IP instead of the real origin.
+//   - When frontdoor.sni_forward_enabled is on, a TCP :443 sniforward
+//     starts owning public :443 (panel :443 has already been moved to
+//     the loopback backend by main). SNI-matched panel traffic is
+//     forwarded to that loopback backend; other SNIs are forwarded to
+//     the real origin.
+//   - When frontdoor.quic_forward_enabled is on, a UDP :443
+//     quicforward starts; DoH3 (if also on) is rebound to a loopback
+//     UDP port so quicforward can own public :443/UDP.
 func startFrontdoor(
 	ctx context.Context,
 	srv *api.Server,
@@ -377,6 +424,20 @@ func startFrontdoor(
 	logger *slog.Logger,
 ) error {
 	res := resolver.NewResolver(store, resolver.NewUpstream(), metrics)
+	// Expose the live resolver + DoH handler on the api.Server so the
+	// panel's /dns-query route actually resolves DNS (v0.3.x had a
+	// silent bug where /dns-query returned the SPA HTML because no
+	// handler was mounted), and /settings/frontdoor/proxy can
+	// hot-apply spoof policy without a restart.
+	srv.LiveResolver = res
+	srv.DoHHandler = frontdoor.NewDoH(res, logger).Handler()
+
+	// Path-B: publish a SpoofPolicy so proxy-classified A/AAAA answers
+	// point at the gateway IP. Read before wiring transports so a
+	// misconfiguration surfaces at boot rather than mid-request.
+	if err := applySpoofSettings(ctx, res, sset, srv.ACME.Domain, logger); err != nil {
+		logger.Warn("frontdoor: spoof configuration skipped", "err", err)
+	}
 
 	panelTLS, err := api.FrontdoorTLSConfig(ctx, srv.ACME.Domain, srv.ACME.Email, api.ACMEStorageDir(dataDir), logger)
 	if err != nil {
@@ -395,12 +456,21 @@ func startFrontdoor(
 	publicPlain, _ := sset.GetBool(ctx, "frontdoor.public_plain_dns_enabled")
 	doqEnabled, _ := sset.GetBool(ctx, settings.KeyFrontdoorDoQEnabled)
 	doh3Enabled, _ := sset.GetBool(ctx, settings.KeyFrontdoorDoH3Enabled)
+	quicForwardOn, _ := sset.GetBool(ctx, settings.KeyFrontdoorQUICForwardEnabled)
+
+	panelBackendUDP := defaultPanelBackendUDP
+	if v, _ := sset.GetString(ctx, settings.KeyFrontdoorPanelBackendUDP); v != "" {
+		panelBackendUDP = v
+	}
 
 	fdCfg := frontdoor.DefaultConfig()
 	fdCfg.PublicPlainDNSEnabled = publicPlain
 	fdCfg.DoQEnabled = doqEnabled
 	fdCfg.DoH3Enabled = doh3Enabled
 	fdCfg.TLSConfigs = tlsConfigs
+	if quicForwardOn && doh3Enabled {
+		fdCfg.DoH3Bind = []string{panelBackendUDP}
+	}
 
 	fd := frontdoor.New(fdCfg, res, logger)
 	if err := fd.Start(ctx); err != nil {
@@ -408,7 +478,115 @@ func startFrontdoor(
 	}
 	logger.Info("frontdoor: started",
 		"public_plain_dns", publicPlain, "doq", doqEnabled, "doh3", doh3Enabled)
+
+	if err := startProxyForwarders(ctx, sset, srv.ACME.Domain, panelBackendUDP, logger); err != nil {
+		logger.Warn("frontdoor: proxy forwarders skipped", "err", err)
+	}
 	return nil
+}
+
+// applySpoofSettings publishes a SpoofPolicy on res based on
+// panel_settings. Silent no-op if the master switch is off.
+func applySpoofSettings(ctx context.Context, res *resolver.Resolver, sset *settings.Store, panelDomain string, logger *slog.Logger) error {
+	on, _ := sset.GetBool(ctx, settings.KeyFrontdoorSpoofEnabled)
+	if !on {
+		return nil
+	}
+	// server IP: explicit override wins, otherwise use the routing-
+	// table's egress source. panelDomain is unused here but kept in
+	// the signature so a future implementation could resolve the
+	// domain and use its A record as a stability anchor.
+	_ = panelDomain
+	ipStr, _ := sset.GetString(ctx, settings.KeyFrontdoorSpoofServerIP)
+	if ipStr == "" {
+		ipStr = discoverEgressIP()
+	}
+	ip := net.ParseIP(strings.TrimSpace(ipStr))
+	if ip == nil {
+		return fmt.Errorf("spoof: server_ip not set and autodetect failed")
+	}
+
+	scopeStr, _ := sset.GetString(ctx, settings.KeyFrontdoorSpoofScope)
+	scope := resolver.SpoofScopeAll
+	if strings.EqualFold(scopeStr, string(resolver.SpoofScopePrivateOnly)) {
+		scope = resolver.SpoofScopePrivateOnly
+	}
+	cidrStr, _ := sset.GetString(ctx, settings.KeyFrontdoorSpoofAllowCIDR)
+	var cidrs []*net.IPNet
+	if cidrStr != "" {
+		cidrs = resolver.ParseCIDRs(strings.Split(cidrStr, ","))
+	}
+
+	policy := &resolver.SpoofPolicy{
+		Scope:       scope,
+		AllowCIDR:   cidrs,
+		TTL:         60,
+	}
+	if v4 := ip.To4(); v4 != nil {
+		policy.ServerIP4 = v4
+	} else {
+		policy.ServerIP6 = ip
+	}
+	res.SetSpoofPolicy(policy)
+	logger.Info("frontdoor: spoof enabled",
+		"scope", scope, "server_ip", ip.String(), "allow_cidr_count", len(cidrs))
+	return nil
+}
+
+// startProxyForwarders spins up sniforward + quicforward per settings.
+// Both are independent; either can be off without affecting the other.
+func startProxyForwarders(ctx context.Context, sset *settings.Store, panelDomain, panelBackendUDP string, logger *slog.Logger) error {
+	sniOn, _ := sset.GetBool(ctx, settings.KeyFrontdoorSNIForwardEnabled)
+	quicOn, _ := sset.GetBool(ctx, settings.KeyFrontdoorQUICForwardEnabled)
+
+	if sniOn {
+		panelBackendTCP := defaultPanelBackendTCP
+		if v, _ := sset.GetString(ctx, settings.KeyFrontdoorPanelBackendTCP); v != "" {
+			panelBackendTCP = v
+		}
+		sni := sniforward.New(sniforward.Config{
+			Listen:       ":443",
+			PanelDomain:  panelDomain,
+			PanelBackend: panelBackendTCP,
+		}, logger)
+		if err := sni.Start(ctx); err != nil {
+			return fmt.Errorf("sniforward: %w", err)
+		}
+	}
+	if quicOn {
+		qf := quicforward.New(quicforward.Config{
+			Listen:       ":443",
+			PanelDomain:  panelDomain,
+			PanelBackend: panelBackendUDP,
+		}, logger)
+		if err := qf.Start(ctx); err != nil {
+			return fmt.Errorf("quicforward: %w", err)
+		}
+	}
+	return nil
+}
+
+// discoverEgressIP returns the local IPv4 the kernel would pick to
+// reach a public destination. UDP "dial" performs a routing-table
+// lookup without emitting a packet, then LocalAddr reveals which
+// source address the routing decision picked. If that lookup fails
+// (no default route on a sandboxed test host, e.g.), return "" so
+// applySpoofSettings surfaces a clear error rather than trying an
+// address we can't stand behind.
+func discoverEgressIP() string {
+	conn, err := net.Dial("udp", "1.1.1.1:80")
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	la, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok || la.IP == nil || la.IP.IsUnspecified() {
+		return ""
+	}
+	if v4 := la.IP.To4(); v4 != nil {
+		return v4.String()
+	}
+	return la.IP.String()
 }
 
 func loadOrCreateJWTSecret(path string) ([]byte, error) {

@@ -90,6 +90,17 @@ type Server struct {
 	// dns_metrics.go). Optional: nil means the DNS front-door isn't wired
 	// in, and the endpoint reports zero counters instead of panicking.
 	Metrics *resolver.Metrics
+	// LiveResolver is the full DNS resolver instance backing the
+	// front-door listeners (nil until cmd/5gpn's startFrontdoor has
+	// wired one). The path-B settings handler uses it to hot-apply
+	// SpoofPolicy changes without a daemon restart.
+	LiveResolver *resolver.Resolver
+	// DoHHandler is the RFC 8484 DNS-over-HTTPS handler mounted at
+	// /dns-query on the panel router. nil until cmd/5gpn wires one;
+	// nil means /dns-query returns 404 (SPA fallback served) rather
+	// than answering DNS. Populated by startFrontdoor alongside
+	// LiveResolver.
+	DoHHandler http.Handler
 	// applyStore tracks the async rules-apply / rollback lifecycle (see
 	// applies.go) that backs GET /api/v1/applies[/{id}]. Always non-nil.
 	applyStore *applyStore
@@ -97,6 +108,12 @@ type Server struct {
 	// starts certmagic + a second HTTPS listener on :443 in addition to
 	// the primary panel port.
 	ACME ACMEOptions
+	// ACMEListenAddr overrides the default ":443" bind for the ACME
+	// secondary listener. main.go sets this to "127.0.0.1:8444" when
+	// the sniforward transparent proxy owns public :443 and needs the
+	// panel to move out of the way. Empty string keeps the historical
+	// default (:443).
+	ACMEListenAddr string
 }
 
 // Config bundles user-adjustable server knobs.
@@ -226,6 +243,23 @@ func (s *Server) Router() http.Handler {
 	// SPA catch-all below or the router serves index.html instead.
 	r.Get("/ios-dot.mobileconfig", s.handleIOSMobileconfig)
 
+	// RFC 8484 DNS-over-HTTPS. Public + unauthenticated: this is what
+	// iOS profiles + DoH clients hit. Mounted here alongside the
+	// mobileconfig endpoint so both share the same panel router / TLS
+	// listener. Nil DoHHandler means /dns-query falls through to the
+	// SPA — which was the v0.3.x bug: iOS clients got the panel HTML
+	// as a "DNS response", silently. Now returns 503 with a clear
+	// message so the failure mode is obvious.
+	if s.DoHHandler != nil {
+		r.Method("GET", "/dns-query", s.DoHHandler)
+		r.Method("POST", "/dns-query", s.DoHHandler)
+	} else {
+		r.Handle("/dns-query", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			writeError(w, http.StatusServiceUnavailable, "doh_not_wired",
+				"DoH handler not wired at daemon boot — check that startFrontdoor ran")
+		}))
+	}
+
 	r.Group(func(r chi.Router) {
 		r.Use(s.authMiddleware)
 		r.Post("/api/v1/logout", s.handleLogout)
@@ -273,6 +307,10 @@ func (s *Server) Router() http.Handler {
 		r.Get("/api/v1/ios/profile-url", s.handleIOSProfileURL)
 		r.Post("/api/v1/settings/ios/preflight", s.handleIOSPreflight)
 		r.Post("/api/v1/settings/ios/profile-enabled", s.handleIOSProfileToggle)
+
+		r.Get("/api/v1/settings/frontdoor/proxy", s.handleGetFrontdoorProxy)
+		r.Post("/api/v1/settings/frontdoor/proxy", s.handleUpdateFrontdoorProxy)
+		r.Post("/api/v1/settings/frontdoor/proxy/preflight", s.handleFrontdoorProxyPreflight)
 	})
 
 	// Static SPA fallback: any GET that isn't /api/* serves the panel bundle,
@@ -331,8 +369,18 @@ func (s *Server) ListenAndServe(ctx context.Context, addr, certFile, keyFile str
 		// standard :443 so browsers can hit https://<domain>/ without
 		// remembering the panel port. Skip the :443 listener when the
 		// operator already put the panel on :443 to avoid EADDRINUSE.
-		if addr != ":443" && !strings.HasSuffix(addr, ":443") {
-			lc.acmeAddr = ":443"
+		//
+		// s.ACMEListenAddr overrides the default ":443" — set by
+		// main.go when the sniforward transparent proxy is enabled, so
+		// the panel binds a loopback port (e.g. 127.0.0.1:8444) that
+		// sniforward's SNI-split can hand traffic to. Empty means "use
+		// the historical default".
+		secondary := ":443"
+		if s.ACMEListenAddr != "" {
+			secondary = s.ACMEListenAddr
+		}
+		if addr != secondary && !strings.HasSuffix(addr, secondary) {
+			lc.acmeAddr = secondary
 		}
 	case certFile != "" && keyFile != "":
 		cert, err := tlsLoad(certFile, keyFile)

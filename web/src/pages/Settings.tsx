@@ -634,6 +634,326 @@ function PasswordSection() {
   );
 }
 
+interface ProxySettings {
+  spoof_enabled: boolean;
+  spoof_scope: string;
+  spoof_server_ip: string;
+  spoof_allow_cidr: string;
+  sni_forward_enabled: boolean;
+  quic_forward_enabled: boolean;
+  panel_backend_tcp: string;
+  panel_backend_udp: string;
+  server_ip_effective: string;
+  server_ip_autodetected: string;
+  restart_required?: boolean;
+}
+
+function TransparentProxySection() {
+  const { t } = useTranslation();
+  const [cfg, setCfg] = useState<ProxySettings | null>(null);
+  const [draft, setDraft] = useState<ProxySettings | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+  const [banner, setBanner] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [restartNeeded, setRestartNeeded] = useState(false);
+  const [advanced, setAdvanced] = useState(false);
+
+  async function refresh() {
+    try {
+      const c = await api.get<ProxySettings>('/api/v1/settings/frontdoor/proxy');
+      setCfg(c);
+      setDraft(c);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  async function runPreflight() {
+    setBanner(t('settings.proxyPreflightRunning', { defaultValue: 'Probing egress IP…' }));
+    try {
+      const r = await api.post<{ ok: boolean; server_ip_autodetected?: string; error?: string }>(
+        '/api/v1/settings/frontdoor/proxy/preflight',
+        {},
+      );
+      if (r.ok) {
+        setBanner(t('settings.proxyPreflightPass', {
+          defaultValue: 'Egress IP detected: {{ip}}',
+          ip: r.server_ip_autodetected,
+        }));
+        if (draft) setDraft({ ...draft, server_ip_autodetected: r.server_ip_autodetected || '' });
+      } else {
+        setBanner(t('settings.proxyPreflightFail', {
+          defaultValue: 'Preflight failed: {{err}}',
+          err: r.error || 'unknown',
+        }));
+      }
+    } catch (e) {
+      setBanner(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function save() {
+    if (!draft) return;
+    setSaving(true);
+    setErr(null);
+    setBanner(null);
+    try {
+      const r = await api.post<ProxySettings>('/api/v1/settings/frontdoor/proxy', {
+        spoof_enabled: draft.spoof_enabled,
+        spoof_scope: draft.spoof_scope,
+        spoof_server_ip: draft.spoof_server_ip,
+        spoof_allow_cidr: draft.spoof_allow_cidr,
+        sni_forward_enabled: draft.sni_forward_enabled,
+        quic_forward_enabled: draft.quic_forward_enabled,
+        panel_backend_tcp: draft.panel_backend_tcp,
+        panel_backend_udp: draft.panel_backend_udp,
+      });
+      setCfg(r);
+      setDraft(r);
+      if (r.restart_required) {
+        setRestartNeeded(true);
+        setBanner(t('settings.proxyRestartRequired', {
+          defaultValue: 'Saved. Restart the daemon so port :443 changes take effect.',
+        }));
+      } else {
+        setBanner(t('settings.proxySaved', {
+          defaultValue: 'Saved. Spoof policy applied live to the running resolver.',
+        }));
+      }
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function dirty(): boolean {
+    if (!cfg || !draft) return false;
+    return (
+      cfg.spoof_enabled !== draft.spoof_enabled ||
+      cfg.spoof_scope !== draft.spoof_scope ||
+      cfg.spoof_server_ip !== draft.spoof_server_ip ||
+      cfg.spoof_allow_cidr !== draft.spoof_allow_cidr ||
+      cfg.sni_forward_enabled !== draft.sni_forward_enabled ||
+      cfg.quic_forward_enabled !== draft.quic_forward_enabled ||
+      cfg.panel_backend_tcp !== draft.panel_backend_tcp ||
+      cfg.panel_backend_udp !== draft.panel_backend_udp
+    );
+  }
+
+  return (
+    <Section
+      tint="rgb(59 130 246 / 0.35)"
+      title={t('settings.proxyTitle', { defaultValue: 'Transparent Proxy (Path B)' })}
+      description={t('settings.proxyDescription', {
+        defaultValue:
+          'Redirect proxy-classified DNS answers to this gateway, then transparently forward TCP/UDP :443 to the real origin via SNI/QUIC peek.',
+      })}
+    >
+      {loading && <Text>{t('common.loading')}</Text>}
+      {err && (
+        <div className="mb-3">
+          <Alert open onClose={() => setErr(null)}>
+            <AlertTitle>{t('settings.operationFailed')}</AlertTitle>
+            <AlertBody>{err}</AlertBody>
+          </Alert>
+        </div>
+      )}
+      {banner && (
+        <div className="mb-3 rounded-lg border border-blue-500/40 bg-blue-500/10 px-3 py-2 text-sm text-blue-900 dark:text-blue-200">
+          {banner}
+        </div>
+      )}
+      {restartNeeded && (
+        <div className="mb-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-900 dark:text-amber-200">
+          {t('settings.proxyRestartHint', {
+            defaultValue: 'Restart the daemon (Settings → Restart) to apply :443 socket changes.',
+          })}
+        </div>
+      )}
+
+      {!loading && draft && (
+        <div className="space-y-4">
+          {/* Spoof toggle */}
+          <div className="rounded-xl border border-zinc-200 bg-white/60 p-4 dark:border-white/10 dark:bg-white/5">
+            <label className="flex items-center gap-3">
+              <input
+                type="checkbox"
+                checked={draft.spoof_enabled}
+                onChange={(e) => setDraft({ ...draft, spoof_enabled: e.target.checked })}
+                className="h-4 w-4"
+              />
+              <div>
+                <div className="text-sm font-medium">
+                  {t('settings.proxySpoofToggle', { defaultValue: 'DNS Spoof (redirect proxy answers to this gateway)' })}
+                </div>
+                <div className="text-xs text-zinc-500">
+                  {t('settings.proxySpoofHint', {
+                    defaultValue:
+                      'Proxy-classified A/AAAA answers point at this server\'s IP instead of the real origin. Requires SNI/QUIC forward to complete the loop.',
+                  })}
+                </div>
+              </div>
+            </label>
+          </div>
+
+          {/* SNI forward */}
+          <div className="rounded-xl border border-zinc-200 bg-white/60 p-4 dark:border-white/10 dark:bg-white/5">
+            <label className="flex items-center gap-3">
+              <input
+                type="checkbox"
+                checked={draft.sni_forward_enabled}
+                onChange={(e) => setDraft({ ...draft, sni_forward_enabled: e.target.checked })}
+                className="h-4 w-4"
+              />
+              <div>
+                <div className="text-sm font-medium">
+                  {t('settings.proxySNIToggle', { defaultValue: 'TCP :443 SNI Forwarder' })}
+                </div>
+                <div className="text-xs text-zinc-500">
+                  {t('settings.proxySNIHint', {
+                    defaultValue:
+                      'Own public TCP :443. Panel HTTPS moves to a loopback backend; SNI split routes panel-domain traffic to the panel, all other SNIs to the real host. Requires restart.',
+                  })}
+                </div>
+              </div>
+            </label>
+          </div>
+
+          {/* QUIC forward */}
+          <div className="rounded-xl border border-zinc-200 bg-white/60 p-4 dark:border-white/10 dark:bg-white/5">
+            <label className="flex items-center gap-3">
+              <input
+                type="checkbox"
+                checked={draft.quic_forward_enabled}
+                onChange={(e) => setDraft({ ...draft, quic_forward_enabled: e.target.checked })}
+                className="h-4 w-4"
+              />
+              <div>
+                <div className="text-sm font-medium">
+                  {t('settings.proxyQUICToggle', { defaultValue: 'UDP :443 QUIC SNI Forwarder' })}
+                </div>
+                <div className="text-xs text-zinc-500">
+                  {t('settings.proxyQUICHint', {
+                    defaultValue:
+                      'Own public UDP :443 for QUIC/HTTP3. DoH3 (if enabled) moves to a loopback UDP port. Requires restart.',
+                  })}
+                </div>
+              </div>
+            </label>
+          </div>
+
+          {/* Server IP */}
+          <Field>
+            <Label>
+              {t('settings.proxyServerIPLabel', { defaultValue: 'Gateway IP (leave empty to auto-detect)' })}
+            </Label>
+            <Input
+              value={draft.spoof_server_ip}
+              placeholder={draft.server_ip_autodetected || 'auto'}
+              onChange={(e) => setDraft({ ...draft, spoof_server_ip: e.target.value })}
+            />
+            <div className="mt-1 flex items-center gap-3 text-xs text-zinc-500">
+              <span>
+                {t('settings.proxyServerIPHint', {
+                  defaultValue: 'Effective: {{ip}}',
+                  ip: draft.server_ip_effective || '(none)',
+                })}
+              </span>
+              <button
+                type="button"
+                onClick={runPreflight}
+                className="text-blue-600 hover:underline dark:text-blue-400"
+              >
+                {t('settings.proxyRunPreflight', { defaultValue: 'Re-detect' })}
+              </button>
+            </div>
+          </Field>
+
+          {/* Scope */}
+          <Field>
+            <Label>{t('settings.proxyScopeLabel', { defaultValue: 'Spoof Scope' })}</Label>
+            <select
+              value={draft.spoof_scope}
+              onChange={(e) => setDraft({ ...draft, spoof_scope: e.target.value })}
+              className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-white/10 dark:bg-white/5"
+            >
+              <option value="all">
+                {t('settings.proxyScopeAll', { defaultValue: 'all — spoof every proxy client (recommended for public DoH)' })}
+              </option>
+              <option value="private_only">
+                {t('settings.proxyScopePrivate', { defaultValue: 'private_only — spoof only allow-listed CIDRs' })}
+              </option>
+            </select>
+          </Field>
+
+          {/* Allow CIDR — only shown when private_only */}
+          {draft.spoof_scope === 'private_only' && (
+            <Field>
+              <Label>
+                {t('settings.proxyAllowCIDRLabel', {
+                  defaultValue: 'Allow CIDRs (comma-separated, e.g. 172.22.0.0/16)',
+                })}
+              </Label>
+              <Input
+                value={draft.spoof_allow_cidr}
+                placeholder="172.22.0.0/16"
+                onChange={(e) => setDraft({ ...draft, spoof_allow_cidr: e.target.value })}
+              />
+            </Field>
+          )}
+
+          {/* Advanced */}
+          <div>
+            <button
+              type="button"
+              onClick={() => setAdvanced(!advanced)}
+              className="text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"
+            >
+              {advanced
+                ? t('settings.proxyHideAdvanced', { defaultValue: '▼ Hide advanced' })
+                : t('settings.proxyShowAdvanced', { defaultValue: '▶ Advanced (panel backend ports)' })}
+            </button>
+          </div>
+          {advanced && (
+            <div className="space-y-3">
+              <Field>
+                <Label>{t('settings.proxyPanelTCPLabel', { defaultValue: 'Panel loopback TCP backend' })}</Label>
+                <Input
+                  value={draft.panel_backend_tcp}
+                  placeholder="127.0.0.1:8444"
+                  onChange={(e) => setDraft({ ...draft, panel_backend_tcp: e.target.value })}
+                />
+              </Field>
+              <Field>
+                <Label>{t('settings.proxyPanelUDPLabel', { defaultValue: 'Panel loopback UDP backend (DoH3)' })}</Label>
+                <Input
+                  value={draft.panel_backend_udp}
+                  placeholder="127.0.0.1:8445"
+                  onChange={(e) => setDraft({ ...draft, panel_backend_udp: e.target.value })}
+                />
+              </Field>
+            </div>
+          )}
+
+          <div>
+            <Button color="indigo" disabled={saving || !dirty()} onClick={save}>
+              {saving ? t('settings.submitting') : t('settings.proxySave', { defaultValue: 'Save proxy settings' })}
+            </Button>
+          </div>
+        </div>
+      )}
+    </Section>
+  );
+}
+
 function RestartSection() {
   const { t } = useTranslation();
   const [confirm, setConfirm] = useState(false);
@@ -706,6 +1026,7 @@ export default function Settings() {
         <UpgradeSection />
         <TgbotSection />
         <IOSSection />
+        <TransparentProxySection />
         <PasswordSection />
         <RestartSection />
       </div>

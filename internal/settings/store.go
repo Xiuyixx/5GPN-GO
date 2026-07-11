@@ -56,6 +56,35 @@ const (
 	// above.
 	KeyFrontdoorDoQEnabled  = "frontdoor.doq_enabled"
 	KeyFrontdoorDoH3Enabled = "frontdoor.doh3_enabled"
+
+	// Path-B transparent-forwarder controls (5gpn-Go v0.4.x).
+	//
+	// KeyFrontdoorSpoofEnabled turns on resolver-side DNS spoofing:
+	// when a "proxy" classification fires, A/AAAA answers are
+	// synthesised to point at the gateway's own IP instead of the
+	// real origin, so the client's next TCP/UDP :443 attempt lands
+	// on our forwarders.
+	//
+	// KeyFrontdoorSNIForwardEnabled starts the TCP :443 SNI-split
+	// forwarder. When on, the panel's own HTTPS listener is bumped
+	// from :443 to KeyFrontdoorPanelBackendTCP (default 127.0.0.1:8444)
+	// so the forwarder owns the public :443 socket exclusively.
+	//
+	// KeyFrontdoorQUICForwardEnabled starts the UDP :443 QUIC SNI
+	// forwarder. DoH3 (when also enabled) is bumped to
+	// KeyFrontdoorPanelBackendUDP (default 127.0.0.1:8445).
+	//
+	// KeyFrontdoorSpoofServerIP overrides the auto-discovered gateway
+	// IP embedded in spoofed answers. Empty string means "use egress-
+	// interface autodetection at daemon boot".
+	KeyFrontdoorSpoofEnabled       = "frontdoor.spoof_enabled"
+	KeyFrontdoorSpoofScope         = "frontdoor.spoof_scope"
+	KeyFrontdoorSpoofServerIP      = "frontdoor.spoof_server_ip"
+	KeyFrontdoorSpoofAllowCIDR     = "frontdoor.spoof_allow_cidr"
+	KeyFrontdoorSNIForwardEnabled  = "frontdoor.sni_forward_enabled"
+	KeyFrontdoorQUICForwardEnabled = "frontdoor.quic_forward_enabled"
+	KeyFrontdoorPanelBackendTCP    = "frontdoor.panel_backend_tcp"
+	KeyFrontdoorPanelBackendUDP    = "frontdoor.panel_backend_udp"
 )
 
 // ErrNotFound is returned by Get when the key is absent.
