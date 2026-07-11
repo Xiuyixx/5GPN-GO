@@ -105,8 +105,8 @@ export default function Dashboard() {
         <div className="glass p-5">
           <Heading level={3}>{t('dashboard.recentSamples')}</Heading>
           <Divider className="my-3" />
-          <div className="max-h-72 overflow-auto text-sm">
-            <table className="w-full text-left">
+          <div className="-mx-2 max-h-72 overflow-auto text-sm">
+            <table className="w-full min-w-[520px] text-left">
               <thead>
                 <tr className="text-zinc-500">
                   <th className="py-2 font-medium">{t('dashboard.timeColumn')}</th>

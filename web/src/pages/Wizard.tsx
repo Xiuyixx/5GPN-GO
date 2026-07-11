@@ -19,6 +19,7 @@ import { Input } from '../components/ui/input';
 import { Alert, AlertBody, AlertTitle } from '../components/ui/alert';
 import { Switch, SwitchField } from '../components/ui/switch';
 import LanguageSwitcher from '../components/LanguageSwitcher';
+import ThemeSwitcher from '../components/ThemeSwitcher';
 import { api } from '../api/client';
 import type { PanelSettings, PanelSettingsUpdate } from '../api/client';
 
@@ -205,7 +206,10 @@ export default function Wizard({ onDone }: WizardProps) {
                 <div className="text-xs text-zinc-500">{t('wizard.subheading')}</div>
               </div>
             </div>
-            <LanguageSwitcher compact />
+            <div className="flex items-center gap-2">
+              <ThemeSwitcher compact />
+              <LanguageSwitcher compact />
+            </div>
           </div>
 
           <StepPills current={step} />

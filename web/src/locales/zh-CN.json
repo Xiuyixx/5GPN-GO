@@ -19,6 +19,12 @@
     "en": "English",
     "zh-CN": "简体中文"
   },
+  "theme": {
+    "system": "跟随系统",
+    "light": "浅色",
+    "dark": "深色",
+    "switchTo": "切换主题（下一个：{{next}})"
+  },
   "login": {
     "heading": "登录 5gpn",
     "subheading": "个人网关",

@@ -19,6 +19,12 @@
     "en": "English",
     "zh-CN": "简体中文"
   },
+  "theme": {
+    "system": "System",
+    "light": "Light",
+    "dark": "Dark",
+    "switchTo": "Switch theme (next: {{next}})"
+  },
   "login": {
     "heading": "Sign in to 5gpn",
     "subheading": "personal gateway",

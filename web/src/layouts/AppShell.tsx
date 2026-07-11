@@ -13,6 +13,7 @@ import {
 import { SidebarLayout } from '../components/ui/sidebar-layout';
 import { Navbar, NavbarItem, NavbarSection, NavbarSpacer } from '../components/ui/navbar';
 import LanguageSwitcher from '../components/LanguageSwitcher';
+import ThemeSwitcher from '../components/ThemeSwitcher';
 import { api } from '../api/client';
 import type { Me } from '../api/client';
 import { useAuthStore } from '../stores/auth';
@@ -80,6 +81,7 @@ export default function AppShell({ children }: Props) {
           <Navbar>
             <NavbarSpacer />
             <NavbarSection>
+              <ThemeSwitcher className="mr-2" compact />
               <LanguageSwitcher className="mr-4" />
               <NavbarItem onClick={logout}>{t('nav.logout')}</NavbarItem>
             </NavbarSection>
@@ -119,8 +121,9 @@ export default function AppShell({ children }: Props) {
                     <span className="text-[11px] text-zinc-500">{t('nav.signedIn')}</span>
                   </div>
                 </SidebarItem>
-                <div className="px-2 pb-1">
+                <div className="flex flex-wrap items-center gap-2 px-2 pb-1">
                   <LanguageSwitcher />
+                  <ThemeSwitcher />
                 </div>
                 <SidebarItem onClick={logout}>
                   <SidebarLabel>{t('nav.logout')}</SidebarLabel>

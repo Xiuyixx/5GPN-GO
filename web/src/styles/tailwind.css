@@ -1,6 +1,21 @@
 @import "tailwindcss";
 
 /* -------------------------------------------------------------------------
+ * Dark-mode variant
+ *
+ * Tailwind v4 activates `dark:` utilities via prefers-color-scheme by
+ * default. We layer a manual switch on top by defining a custom variant
+ * that also fires when `.dark` is set on the <html> root. The theme
+ * store in src/stores/theme.ts toggles that class based on the
+ * operator's pick (system | light | dark).
+ *
+ * Ordering: prefers-color-scheme is preserved by Tailwind's default; the
+ * class-based match wins because inline styles applied by JS on <html>
+ * always trump media queries in the cascade for a given specificity.
+ * ------------------------------------------------------------------------- */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* -------------------------------------------------------------------------
  * Theme
  *
  * A minimal Apple-style palette layered on top of Catalyst's zinc-first
@@ -34,8 +49,16 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+/* Dark-palette body: fires for either the manual `.dark` class OR the
+ * OS-level prefers-color-scheme signal, so `theme='system'` and
+ * `theme='dark'` produce the same look. */
+:where(html.dark) body,
+:where(body.dark) {
+  color: rgb(244 244 245);
+  background: rgb(9 9 11);
+}
 @media (prefers-color-scheme: dark) {
-  body {
+  :where(html:not(.light)) body {
     color: rgb(244 244 245);
     background: rgb(9 9 11);
   }
@@ -77,8 +100,12 @@ body {
   backdrop-filter: blur(0.5px);
 }
 
+:where(html.dark) .ambient-bg::after {
+  background:
+    linear-gradient(180deg, rgb(9 9 11 / 0.35), rgb(9 9 11 / 0.65));
+}
 @media (prefers-color-scheme: dark) {
-  .ambient-bg::after {
+  :where(html:not(.light)) .ambient-bg::after {
     background:
       linear-gradient(180deg, rgb(9 9 11 / 0.35), rgb(9 9 11 / 0.65));
   }
@@ -127,15 +154,26 @@ body {
   border-radius: 1rem;
 }
 
+:where(html.dark) .glass {
+  background: rgb(24 24 27 / 0.55);
+  border-color: rgb(255 255 255 / 0.08);
+  box-shadow:
+    0 1px 0 rgb(255 255 255 / 0.06) inset,
+    0 20px 60px -20px rgb(0 0 0 / 0.6);
+}
+:where(html.dark) .glass-strong {
+  background: rgb(24 24 27 / 0.75);
+  border-color: rgb(255 255 255 / 0.1);
+}
 @media (prefers-color-scheme: dark) {
-  .glass {
+  :where(html:not(.light)) .glass {
     background: rgb(24 24 27 / 0.55);
     border-color: rgb(255 255 255 / 0.08);
     box-shadow:
       0 1px 0 rgb(255 255 255 / 0.06) inset,
       0 20px 60px -20px rgb(0 0 0 / 0.6);
   }
-  .glass-strong {
+  :where(html:not(.light)) .glass-strong {
     background: rgb(24 24 27 / 0.75);
     border-color: rgb(255 255 255 / 0.1);
   }
