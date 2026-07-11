@@ -154,32 +154,37 @@ func (s *Server) handleUpdatePanelSettings(w http.ResponseWriter, r *http.Reques
 			}
 		}
 	}
-	if req.TGBot != nil {
-		// Token+admin ids drive the live Manager AND get persisted so the
-		// bot survives a daemon restart. Empty token = disable.
-		newToken := ""
-		if v := req.TGBot.Token; v != nil {
-			newToken = *v
-			if err := s.Settings.SetString(ctx, settings.KeyTGBotToken, newToken, actor); err != nil {
-				writeError(w, http.StatusInternalServerError, "write_error", err.Error())
-				return
+	// tgbotWarning is set when the token was accepted by the DB but rejected
+	// by Telegram (401/getMe failure, network drop, etc.). We report it as a
+	// non-fatal warning so the rest of the wizard save still lands and the
+	// user is not stuck in a wizard loop.
+	tgbotWarning := ""
+	if req.TGBot != nil && (req.TGBot.Token != nil || req.TGBot.AdminChatIDs != nil) {
+		// Compute the effective (token, ids) from the request + current DB
+		// snapshot BEFORE any write, so we can attempt the hot-reload first
+		// and only persist if Telegram accepts. This way a bad token never
+		// pollutes panel_settings.
+		token, ids := effectiveTGBot(ctx, s.Settings, req.TGBot.Token, req.TGBot.AdminChatIDs)
+		if s.TGBot != nil {
+			if err := s.TGBot.Update(ctx, token, ids); err != nil {
+				// Common case: Telegram getMe 401 → invalid token. Do NOT
+				// persist tgbot.* fields (leave DB untouched) and surface the
+				// error as a warning so the wizard save completes.
+				tgbotWarning = err.Error()
+				s.Logger.Warn("wizard: tgbot hot-reload rejected — settings not persisted",
+					"actor", actor, "err", err)
 			}
 		}
-		newIDs := []int64(nil)
-		if v := req.TGBot.AdminChatIDs; v != nil {
-			newIDs = *v
-			if err := s.Settings.SetJSON(ctx, settings.KeyTGBotAdminChats, newIDs, actor); err != nil {
-				writeError(w, http.StatusInternalServerError, "write_error", err.Error())
-				return
+		if tgbotWarning == "" {
+			if req.TGBot.Token != nil {
+				if err := s.Settings.SetString(ctx, settings.KeyTGBotToken, *req.TGBot.Token, actor); err != nil {
+					writeError(w, http.StatusInternalServerError, "write_error", err.Error())
+					return
+				}
 			}
-		}
-		// If the caller sent either field, hot-reload the running bot.
-		if req.TGBot.Token != nil || req.TGBot.AdminChatIDs != nil {
-			if s.TGBot != nil {
-				// Merge partial: fill missing from the current DB snapshot.
-				token, ids := effectiveTGBot(ctx, s.Settings, req.TGBot.Token, req.TGBot.AdminChatIDs)
-				if err := s.TGBot.Update(ctx, token, ids); err != nil {
-					writeError(w, http.StatusBadGateway, "tgbot_update_failed", err.Error())
+			if req.TGBot.AdminChatIDs != nil {
+				if err := s.Settings.SetJSON(ctx, settings.KeyTGBotAdminChats, *req.TGBot.AdminChatIDs, actor); err != nil {
+					writeError(w, http.StatusInternalServerError, "write_error", err.Error())
 					return
 				}
 			}
@@ -243,6 +248,17 @@ func (s *Server) handleUpdatePanelSettings(w http.ResponseWriter, r *http.Reques
 	resp, err := readPanelSettings(ctx, s.Settings)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "read_error", err.Error())
+		return
+	}
+	// If TG bot hot-reload failed but every other field landed, surface
+	// the reason to the caller so the wizard can render a warning banner
+	// instead of a red error alert. The wizard save is still considered
+	// successful and wizard.complete is preserved as requested.
+	if tgbotWarning != "" {
+		writeJSON(w, http.StatusOK, struct {
+			*panelSettingsResponse
+			TGBotWarning string `json:"tgbot_warning"`
+		}{panelSettingsResponse: resp, TGBotWarning: tgbotWarning})
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)

@@ -172,7 +172,10 @@
     "groupDeleteAllConfirm": "确认删除这批 {{count}} 条规则？",
     "groupBadgeGfwlist": "gfwlist",
     "groupBadgeImport": "导入",
-    "groupPriorityRange": "优先级 {{low}}–{{high}}"
+    "groupPriorityRange": "优先级 {{low}}–{{high}}",
+    "sectionRules": "规则",
+    "sectionRulesets": "规则集（导入的）",
+    "sectionRulesetsHelp": "从 URL 拉取或粘贴导入的批次。每个规则集保持为一张卡；展开可以看里面的具体规则，或删除整批。"
   },
   "exits": {
     "title": "出口",
@@ -368,6 +371,10 @@
     "reviewTGBot": "Telegram Bot",
     "reviewTGBotOn": "已启用 · {{count}} 位管理员",
     "reviewTGBotOff": "未启用",
-    "restartHint": "面板监听 / 端口的改动需要重启 daemon 才生效。完成后请在 设置 → 重启 daemon 里手动重启。"
+    "restartHint": "面板监听 / 端口的改动需要重启 daemon 才生效。完成后请在 设置 → 重启 daemon 里手动重启。",
+    "tgbotWarningTitle": "TG bot 被 Telegram 拒了 —— 其他设置已保存",
+    "tgbotWarningBody": "Telegram 返回：{{detail}}。你的域名、面板端口、TLS 设置已经保存了。可以重新输入 token 或清空后启用 bot，也可以直接进面板稍后到 设置 里改。",
+    "tgbotWarningRetype": "重新输入 Token",
+    "tgbotWarningContinue": "直接进面板"
   }
 }

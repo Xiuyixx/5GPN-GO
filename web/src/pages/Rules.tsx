@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation, Trans } from 'react-i18next';
 import AppShell from '../layouts/AppShell';
 import { Heading } from '../components/ui/heading';
@@ -410,125 +410,166 @@ export default function Rules() {
         </div>
       )}
 
-      <div className="glass p-2">
-        {draft.length === 0 ? (
-          <div className="p-6 text-center">
-            <Text>
-              <Trans
-                i18nKey="rules.noRulesYet"
-                components={{ strong: <strong /> }}
-              />
-            </Text>
-          </div>
-        ) : (
-          <Table>
-            <TableHead>
-              <TableRow>
-                <TableHeader className="w-16">{t('rules.thPriority')}</TableHeader>
-                <TableHeader>{t('rules.thId')}</TableHeader>
-                <TableHeader>{t('rules.thKind')}</TableHeader>
-                <TableHeader>{t('rules.thPattern')}</TableHeader>
-                <TableHeader>{t('rules.thAction')}</TableHeader>
-                <TableHeader className="w-24">{t('rules.thStatus')}</TableHeader>
-                <TableHeader className="w-40 text-right">{t('rules.thActions')}</TableHeader>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {(() => {
-                const renderRow = (r: Draft, i: number, indented: boolean) => (
-                  <TableRow key={r._key} className="align-middle">
-                    <TableCell className={`metric text-zinc-500 ${indented ? 'pl-8' : ''}`}>{r.priority}</TableCell>
-                    <TableCell className="font-medium">{r.id}</TableCell>
-                    <TableCell>
-                      <Badge color="zinc">{r.kind}</Badge>
-                    </TableCell>
-                    <TableCell className="text-zinc-600 dark:text-zinc-300">
-                      {r.pattern
-                        ? <code className="text-xs">{r.pattern}</code>
-                        : <span className="text-zinc-400">—</span>}
-                    </TableCell>
-                    <TableCell>
-                      {actionOptions.includes(r.action)
-                        ? <code className="text-xs">{r.action}</code>
-                        : <span className="text-red-600 dark:text-red-400 text-xs">{t('rules.unknownAction', { action: r.action })}</span>}
-                    </TableCell>
-                    <TableCell>
-                      <button
-                        type="button"
-                        onClick={() => patch(r._key, { enabled: !r.enabled })}
-                        className="cursor-pointer"
-                        aria-label={r.enabled ? t('rules.disableRule') : t('rules.enableRule')}
-                      >
-                        <Badge color={r.enabled ? 'lime' : 'zinc'}>{r.enabled ? t('rules.statusOn') : t('rules.statusOff')}</Badge>
-                      </button>
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex justify-end gap-1">
-                        <Button plain aria-label={t('rules.moveUp')} onClick={() => move(r._key, -1)} disabled={i === 0}>↑</Button>
-                        <Button plain aria-label={t('rules.moveDown')} onClick={() => move(r._key, 1)} disabled={i === draft.length - 1}>↓</Button>
-                        <Button plain onClick={() => setEditing(editing === r._key ? null : r._key)}>
-                          {editing === r._key ? t('common.close') : t('rules.editButton')}
-                        </Button>
-                        <Button plain aria-label={t('rules.deleteAria')} onClick={() => removeRow(r._key)}>✕</Button>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                );
+      {/*
+        Rulesets and manual rules render as two distinct sections. The
+        Rulesets section only shows when at least one imported batch is
+        in the draft; each batch collapses to one card the operator can
+        expand, bulk-toggle, or delete outright. The Rules table below
+        is only ever populated with rules that carry no group_id.
+      */}
+      {(() => {
+        const rulesetSegs = computeSegments(draft).filter((s) => s.kind === 'group') as Extract<Segment, { kind: 'group' }>[];
+        const singleSegs = computeSegments(draft).filter((s) => s.kind === 'single') as Extract<Segment, { kind: 'single' }>[];
 
-                return computeSegments(draft).map((seg) => {
-                  if (seg.kind === 'single') {
-                    return renderRow(seg.rule, seg.index, false);
-                  }
-                  const expanded = expandedGroups.has(seg.groupId);
-                  const enabledCount = seg.rules.filter(({ rule }) => rule.enabled).length;
-                  const total = seg.rules.length;
-                  const priorities = seg.rules.map(({ rule }) => rule.priority);
-                  const lo = Math.min(...priorities);
-                  const hi = Math.max(...priorities);
-                  const allEnabled = enabledCount === total;
-                  return (
-                    <Fragment key={`grp-${seg.groupId}`}>
-                      <TableRow className="bg-indigo-500/5 align-middle dark:bg-indigo-500/10">
-                        <TableCell colSpan={7}>
-                          <div className="flex flex-wrap items-center gap-3">
-                            <button
-                              type="button"
-                              onClick={() => toggleGroupExpanded(seg.groupId)}
-                              aria-label={expanded ? t('rules.groupCollapse') : t('rules.groupExpand')}
-                              className="font-mono text-sm text-indigo-700 dark:text-indigo-300"
+        const renderRow = (r: Draft, i: number, indented: boolean) => (
+          <TableRow key={r._key} className="align-middle">
+            <TableCell className={`metric text-zinc-500 ${indented ? 'pl-8' : ''}`}>{r.priority}</TableCell>
+            <TableCell className="font-medium">{r.id}</TableCell>
+            <TableCell>
+              <Badge color="zinc">{r.kind}</Badge>
+            </TableCell>
+            <TableCell className="text-zinc-600 dark:text-zinc-300">
+              {r.pattern
+                ? <code className="text-xs">{r.pattern}</code>
+                : <span className="text-zinc-400">—</span>}
+            </TableCell>
+            <TableCell>
+              {actionOptions.includes(r.action)
+                ? <code className="text-xs">{r.action}</code>
+                : <span className="text-red-600 dark:text-red-400 text-xs">{t('rules.unknownAction', { action: r.action })}</span>}
+            </TableCell>
+            <TableCell>
+              <button
+                type="button"
+                onClick={() => patch(r._key, { enabled: !r.enabled })}
+                className="cursor-pointer"
+                aria-label={r.enabled ? t('rules.disableRule') : t('rules.enableRule')}
+              >
+                <Badge color={r.enabled ? 'lime' : 'zinc'}>{r.enabled ? t('rules.statusOn') : t('rules.statusOff')}</Badge>
+              </button>
+            </TableCell>
+            <TableCell className="text-right">
+              <div className="flex justify-end gap-1">
+                <Button plain aria-label={t('rules.moveUp')} onClick={() => move(r._key, -1)} disabled={i === 0}>↑</Button>
+                <Button plain aria-label={t('rules.moveDown')} onClick={() => move(r._key, 1)} disabled={i === draft.length - 1}>↓</Button>
+                <Button plain onClick={() => setEditing(editing === r._key ? null : r._key)}>
+                  {editing === r._key ? t('common.close') : t('rules.editButton')}
+                </Button>
+                <Button plain aria-label={t('rules.deleteAria')} onClick={() => removeRow(r._key)}>✕</Button>
+              </div>
+            </TableCell>
+          </TableRow>
+        );
+
+        return (
+          <>
+            {rulesetSegs.length > 0 && (
+              <div className="glass mb-4 p-4">
+                <div className="mb-3">
+                  <Heading level={2}>{t('rules.sectionRulesets')}</Heading>
+                  <Text className="mt-1 text-xs">{t('rules.sectionRulesetsHelp')}</Text>
+                </div>
+                <div className="space-y-3">
+                  {rulesetSegs.map((seg) => {
+                    const expanded = expandedGroups.has(seg.groupId);
+                    const enabledCount = seg.rules.filter(({ rule }) => rule.enabled).length;
+                    const total = seg.rules.length;
+                    const priorities = seg.rules.map(({ rule }) => rule.priority);
+                    const lo = Math.min(...priorities);
+                    const hi = Math.max(...priorities);
+                    const allEnabled = enabledCount === total;
+                    return (
+                      <div key={seg.groupId} className="rounded-xl border border-indigo-500/30 bg-indigo-500/5 p-3 dark:bg-indigo-500/10">
+                        <div className="flex flex-wrap items-center gap-3">
+                          <button
+                            type="button"
+                            onClick={() => toggleGroupExpanded(seg.groupId)}
+                            aria-label={expanded ? t('rules.groupCollapse') : t('rules.groupExpand')}
+                            className="font-mono text-sm text-indigo-700 dark:text-indigo-300"
+                          >
+                            {expanded ? '▼' : '▶'}
+                          </button>
+                          <span className="font-mono text-xs text-zinc-500">{seg.groupId}</span>
+                          <Badge color="indigo">{t('rules.groupHeaderCount', { count: total })}</Badge>
+                          <span className="text-xs text-zinc-500">{t('rules.groupPriorityRange', { low: lo, high: hi })}</span>
+                          <div className="ml-auto flex flex-wrap gap-1">
+                            <Button plain onClick={() => setGroupEnabled(seg.groupId, !allEnabled)}>
+                              {allEnabled ? t('rules.groupDisableAll') : t('rules.groupEnableAll')}
+                            </Button>
+                            <Button
+                              plain
+                              onClick={() => {
+                                if (window.confirm(t('rules.groupDeleteAllConfirm', { count: total }))) {
+                                  deleteGroup(seg.groupId);
+                                }
+                              }}
                             >
-                              {expanded ? '▼' : '▶'}
-                            </button>
-                            <span className="font-mono text-xs text-zinc-500">{seg.groupId}</span>
-                            <Badge color="indigo">{t('rules.groupHeaderCount', { count: total })}</Badge>
-                            <span className="text-xs text-zinc-500">{t('rules.groupPriorityRange', { low: lo, high: hi })}</span>
-                            <div className="ml-auto flex flex-wrap gap-1">
-                              <Button plain onClick={() => setGroupEnabled(seg.groupId, !allEnabled)}>
-                                {allEnabled ? t('rules.groupDisableAll') : t('rules.groupEnableAll')}
-                              </Button>
-                              <Button
-                                plain
-                                onClick={() => {
-                                  if (window.confirm(t('rules.groupDeleteAllConfirm', { count: total }))) {
-                                    deleteGroup(seg.groupId);
-                                  }
-                                }}
-                              >
-                                {t('rules.groupDeleteAll')}
-                              </Button>
-                            </div>
+                              {t('rules.groupDeleteAll')}
+                            </Button>
                           </div>
-                        </TableCell>
-                      </TableRow>
-                      {expanded && seg.rules.map(({ rule, index }) => renderRow(rule, index, true))}
-                    </Fragment>
-                  );
-                });
-              })()}
-            </TableBody>
-          </Table>
-        )}
-      </div>
+                        </div>
+                        {expanded && (
+                          <div className="mt-3 overflow-x-auto rounded-lg bg-white/50 p-1 dark:bg-zinc-900/50">
+                            <Table>
+                              <TableHead>
+                                <TableRow>
+                                  <TableHeader className="w-16">{t('rules.thPriority')}</TableHeader>
+                                  <TableHeader>{t('rules.thId')}</TableHeader>
+                                  <TableHeader>{t('rules.thKind')}</TableHeader>
+                                  <TableHeader>{t('rules.thPattern')}</TableHeader>
+                                  <TableHeader>{t('rules.thAction')}</TableHeader>
+                                  <TableHeader className="w-24">{t('rules.thStatus')}</TableHeader>
+                                  <TableHeader className="w-40 text-right">{t('rules.thActions')}</TableHeader>
+                                </TableRow>
+                              </TableHead>
+                              <TableBody>
+                                {seg.rules.map(({ rule, index }) => renderRow(rule, index, false))}
+                              </TableBody>
+                            </Table>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            <div className="glass p-2">
+              <div className="mb-2 px-4 pt-3">
+                <Heading level={2}>{t('rules.sectionRules')}</Heading>
+              </div>
+              {singleSegs.length === 0 ? (
+                <div className="p-6 text-center">
+                  <Text>
+                    <Trans
+                      i18nKey="rules.noRulesYet"
+                      components={{ strong: <strong /> }}
+                    />
+                  </Text>
+                </div>
+              ) : (
+                <Table>
+                  <TableHead>
+                    <TableRow>
+                      <TableHeader className="w-16">{t('rules.thPriority')}</TableHeader>
+                      <TableHeader>{t('rules.thId')}</TableHeader>
+                      <TableHeader>{t('rules.thKind')}</TableHeader>
+                      <TableHeader>{t('rules.thPattern')}</TableHeader>
+                      <TableHeader>{t('rules.thAction')}</TableHeader>
+                      <TableHeader className="w-24">{t('rules.thStatus')}</TableHeader>
+                      <TableHeader className="w-40 text-right">{t('rules.thActions')}</TableHeader>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {singleSegs.map((seg) => renderRow(seg.rule, seg.index, false))}
+                  </TableBody>
+                </Table>
+              )}
+            </div>
+          </>
+        );
+      })()}
 
       {editing && (() => {
         const r = draft.find((x) => x._key === editing);

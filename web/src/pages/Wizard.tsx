@@ -68,6 +68,7 @@ export default function Wizard({ onDone }: WizardProps) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
 
   const [server, setServer] = useState<DraftServer>(DEFAULT_SERVER);
   const [tgbot, setTgbot] = useState<DraftTGBot>(DEFAULT_TGBOT);
@@ -142,7 +143,19 @@ export default function Wizard({ onDone }: WizardProps) {
         // Admin IDs entered but no token — persist ids anyway (Skip case).
         patch.tgbot = { admin_chat_ids: parseAdminIds(tgbot.adminIdsText) };
       }
-      await api.post<PanelSettings>('/api/v1/settings/panel', patch);
+      const resp = await api.post<PanelSettings & { tgbot_warning?: string }>(
+        '/api/v1/settings/panel', patch,
+      );
+      // TG bot token was rejected by Telegram (bad token, revoked, etc.).
+      // Everything else was still persisted and wizard is marked complete —
+      // show a non-blocking warning and stay on the wizard page so the
+      // operator can retype or clear the token. Any other outcome navigates
+      // straight to the dashboard.
+      if (resp.tgbot_warning) {
+        setWarning(resp.tgbot_warning);
+        setSaving(false);
+        return;
+      }
       if (onDone) await onDone();
       nav('/', { replace: true });
     } catch (e) {
@@ -179,6 +192,25 @@ export default function Wizard({ onDone }: WizardProps) {
                 <AlertTitle>{t('wizard.errorTitle')}</AlertTitle>
                 <AlertBody>{error}</AlertBody>
               </Alert>
+            </div>
+          )}
+          {warning && (
+            <div className="my-3 rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-900 dark:text-amber-200">
+              <div className="mb-2 font-medium">{t('wizard.tgbotWarningTitle')}</div>
+              <div className="mb-2 text-xs">{t('wizard.tgbotWarningBody', { detail: warning })}</div>
+              <div className="flex justify-end gap-2">
+                <Button plain onClick={() => setWarning(null)}>{t('wizard.tgbotWarningRetype')}</Button>
+                <Button
+                  color="amber"
+                  onClick={async () => {
+                    setWarning(null);
+                    if (onDone) await onDone();
+                    nav('/', { replace: true });
+                  }}
+                >
+                  {t('wizard.tgbotWarningContinue')}
+                </Button>
+              </div>
             </div>
           )}
 

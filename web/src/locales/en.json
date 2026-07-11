@@ -172,7 +172,10 @@
     "groupDeleteAllConfirm": "Delete this whole batch of {{count}} rules?",
     "groupBadgeGfwlist": "gfwlist",
     "groupBadgeImport": "imported",
-    "groupPriorityRange": "priority {{low}}–{{high}}"
+    "groupPriorityRange": "priority {{low}}–{{high}}",
+    "sectionRules": "Rules",
+    "sectionRulesets": "Rulesets (imported)",
+    "sectionRulesetsHelp": "Batches imported from URL or paste. Each ruleset stays as one card; expand to see individual rules or delete the whole batch."
   },
   "exits": {
     "title": "Exits",
@@ -368,6 +371,10 @@
     "reviewTGBot": "Telegram bot",
     "reviewTGBotOn": "enabled · {{count}} admin(s)",
     "reviewTGBotOff": "disabled",
-    "restartHint": "Bind / port changes require a daemon restart to take effect. Use Settings → Restart daemon after finishing."
+    "restartHint": "Bind / port changes require a daemon restart to take effect. Use Settings → Restart daemon after finishing.",
+    "tgbotWarningTitle": "TG bot rejected by Telegram — other settings were saved",
+    "tgbotWarningBody": "Telegram returned: {{detail}}. Your domain, panel port, and TLS settings are already saved. Retype or clear the token to enable the bot, or continue to the dashboard and fix it later in Settings.",
+    "tgbotWarningRetype": "Retype token",
+    "tgbotWarningContinue": "Continue to dashboard"
   }
 }
