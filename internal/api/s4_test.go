@@ -145,43 +145,51 @@ func TestChangePassword_WeakRejected(t *testing.T) {
 // T3: iOS profile URL
 // ------------------------------------------------------------------
 
-func TestIOSProfileURL_UsesDomainAndPort(t *testing.T) {
+// Since v0.2.7 the mobileconfig is served by the panel router itself on
+// :443 (with the LE cert), not by the standalone :8111 listener. The URL
+// therefore no longer carries a port, and the response no longer carries
+// a "port" field. The UUID for "auto" (or empty) config is derived
+// deterministically from the domain, so the same domain always yields
+// the same UUID across reinstalls.
+
+func TestIOSProfileURL_UsesDomainOnPanelPort(t *testing.T) {
 	base := &config.Config{}
 	base.Server.Domain = "gw.example.com"
-	base.IOS.HTTPPort = 9111
-	base.IOS.ProfileUUID = "test-uuid-1234"
+	// A non-empty ProfileUUID that is not a valid RFC 4122 UUID and is
+	// not the literal "auto" — the handler should still fall back to a
+	// derived value here (invalid UUIDs are not trusted verbatim).
+	// If the operator supplies a real UUID we honour it (see next test).
+	base.IOS.ProfileUUID = "auto"
 	srv, token := bootstrapAndLogin(t, Config{BaseConfig: base})
 	rr := authGet(t, srv, "/api/v1/ios/profile-url", token)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("code: %d %s", rr.Code, rr.Body.String())
 	}
 	got := decode[map[string]any](t, rr)
-	if got["url"] != "https://gw.example.com:9111/ios-dot.mobileconfig" {
+	if got["url"] != "https://gw.example.com/ios-dot.mobileconfig" {
 		t.Fatalf("unexpected url: %v", got["url"])
 	}
-	if p, _ := got["port"].(float64); int(p) != 9111 {
-		t.Fatalf("unexpected port: %v", got["port"])
+	if _, ok := got["port"]; ok {
+		t.Fatalf("port field should be absent since v0.2.7, got %v", got["port"])
 	}
-	if got["uuid"] != "test-uuid-1234" {
-		t.Fatalf("unexpected uuid: %v", got["uuid"])
+	uuid, _ := got["uuid"].(string)
+	if uuid == "" || uuid == "auto" {
+		t.Fatalf("uuid should be a derived value, got %q", uuid)
 	}
 }
 
-func TestIOSProfileURL_DefaultsPortWhenZero(t *testing.T) {
+func TestIOSProfileURL_HonoursExplicitUUID(t *testing.T) {
 	base := &config.Config{}
 	base.Server.Domain = "gw.example.com"
+	base.IOS.ProfileUUID = "550e8400-e29b-41d4-a716-446655440000"
 	srv, token := bootstrapAndLogin(t, Config{BaseConfig: base})
 	rr := authGet(t, srv, "/api/v1/ios/profile-url", token)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("code: %d %s", rr.Code, rr.Body.String())
 	}
 	got := decode[map[string]any](t, rr)
-	url, _ := got["url"].(string)
-	if !strings.Contains(url, ":8111/") {
-		t.Fatalf("expected default port 8111, got %q", url)
-	}
-	if p, _ := got["port"].(float64); int(p) != 8111 {
-		t.Fatalf("expected port 8111 in response body, got %v", got["port"])
+	if got["uuid"] != "550e8400-e29b-41d4-a716-446655440000" {
+		t.Fatalf("explicit uuid was rewritten: %v", got["uuid"])
 	}
 }
 
