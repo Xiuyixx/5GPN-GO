@@ -31,9 +31,6 @@ i18n
     },
     fallbackLng: 'en',
     supportedLngs: SUPPORTED_LANGUAGES as unknown as string[],
-    // `zh` from navigator.language → treat as zh-CN; anything else unknown → en.
-    load: 'currentOnly',
-    nonExplicitSupportedLngs: true,
     interpolation: { escapeValue: false }, // React already escapes
     detection: {
       order: ['localStorage', 'navigator'],
@@ -41,6 +38,11 @@ i18n
       caches: ['localStorage'],
     },
     returnNull: false,
+    // Critical: without useSuspense=false, react-i18next assumes a
+    // <Suspense> boundary around <App/> and t() will not re-render on
+    // language change when none is present. main.tsx has no Suspense
+    // wrapper, so this MUST be off.
+    react: { useSuspense: false },
   });
 
 // Keep <html lang> in sync so accessibility tooling picks the right locale.
