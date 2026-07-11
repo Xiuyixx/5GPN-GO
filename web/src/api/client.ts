@@ -45,9 +45,43 @@ export const api = {
   del: <T>(path: string) => request<T>('DELETE', path),
 };
 
-export interface BootstrapStatus { needs_setup: boolean }
+export interface BootstrapStatus { needs_setup: boolean; needs_wizard?: boolean }
 export interface LoginResponse { token: string }
 export interface Me { user_id: number; username: string }
+
+// Panel-managed settings surfaced via GET/POST /api/v1/settings/panel.
+// Read-side (Response): TGBot echoes token_set + token_masked only.
+// Write-side (Update): every field is optional; unset fields are left
+// as-is in the DB. token is sent as a raw string on update.
+export interface PanelSettings {
+  server: { domain: string; panel_bind: string; panel_port: number };
+  tls: { acme_enabled: boolean; acme_email: string };
+  tgbot: { token_set: boolean; token_masked?: string; admin_chat_ids: number[] };
+  washim: {
+    enabled: boolean;
+    listen: string;
+    port: number;
+    backend: string;
+    wa_host: string;
+    allow_cidr: string[];
+  };
+  wizard: { complete: boolean };
+}
+
+export interface PanelSettingsUpdate {
+  server?: { domain?: string; panel_bind?: string; panel_port?: number };
+  tls?: { acme_enabled?: boolean; acme_email?: string };
+  tgbot?: { token?: string; admin_chat_ids?: number[] };
+  washim?: {
+    enabled?: boolean;
+    listen?: string;
+    port?: number;
+    backend?: string;
+    wa_host?: string;
+    allow_cidr?: string[];
+  };
+  wizard?: { complete?: boolean };
+}
 
 export type RuleKind =
   | 'DOMAIN' | 'DOMAIN-SUFFIX' | 'DOMAIN-KEYWORD'
