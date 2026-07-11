@@ -28,6 +28,7 @@ import (
 	xexit "github.com/Xiuyixx/5GPN-Go/internal/exit"
 	"github.com/Xiuyixx/5GPN-Go/internal/metrics"
 	"github.com/Xiuyixx/5GPN-Go/internal/orchestrator"
+	"github.com/Xiuyixx/5GPN-Go/internal/settings"
 	"github.com/Xiuyixx/5GPN-Go/internal/tgbot"
 	"github.com/Xiuyixx/5GPN-Go/internal/web"
 )
@@ -103,6 +104,15 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 	jwtSecret, err := loadOrCreateJWTSecret(filepath.Join(dataDir, "jwt.key"))
 	if err != nil {
 		return err
+	}
+
+	// Panel-managed settings live in SQLite (panel_settings table). Overlay
+	// them onto the YAML cfg so the wizard's saved values win over YAML
+	// defaults for the rest of this boot — YAML stays authoritative for
+	// anything the wizard has not touched.
+	settingsStore := settings.New(dbHandle)
+	if err := settings.OverlayConfig(context.Background(), settingsStore, cfg); err != nil {
+		logger.Warn("settings overlay skipped", "err", err)
 	}
 
 	setupToken := ""
@@ -232,7 +242,8 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 			BinaryPath: binPath,
 			Version:    version,
 		},
-		TGBot: botMgr,
+		TGBot:    botMgr,
+		Settings: settingsStore,
 	}, logger)
 
 	addr := listenOverride

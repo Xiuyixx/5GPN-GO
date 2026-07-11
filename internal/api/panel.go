@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/Xiuyixx/5GPN-Go/internal/db"
+	"github.com/Xiuyixx/5GPN-Go/internal/settings"
 )
 
 type loginRequest struct {
@@ -29,8 +30,20 @@ func (s *Server) handleBootstrapStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "db_error", err.Error())
 		return
 	}
+	// needs_wizard: set when a panel user exists (bootstrap claimed) but
+	// the wizard has not yet been marked complete. Frontend uses this to
+	// redirect post-login users into /wizard on first visit. Fresh installs
+	// (n == 0) always report false for needs_wizard because the wizard
+	// only makes sense AFTER bootstrap.
+	needsWizard := false
+	if n > 0 && s.Settings != nil {
+		if v, err := s.Settings.GetBool(r.Context(), settings.KeyWizardComplete); err == nil {
+			needsWizard = !v
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"needs_setup": n == 0,
+		"needs_setup":  n == 0,
+		"needs_wizard": needsWizard,
 	})
 }
 

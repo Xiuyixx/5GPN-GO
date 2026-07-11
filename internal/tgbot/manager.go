@@ -180,10 +180,12 @@ func (m *Manager) stopLocked() {
 	m.running = false
 }
 
-// maskToken keeps enough of the token to make it recognizable in the
+// MaskToken keeps enough of the token to make it recognizable in the
 // panel without leaking it. Telegram bot tokens look like
-// "123456789:AAF-...-xyz". We show "1234…xyz".
-func maskToken(t string) string {
+// "123456789:AAF-...-xyz". We show "1234…xyz". Exported so the
+// wizard/settings handler can echo a masked form without duplicating
+// the rule.
+func MaskToken(t string) string {
 	if t == "" {
 		return ""
 	}
@@ -192,3 +194,7 @@ func maskToken(t string) string {
 	}
 	return t[:4] + "…" + t[len(t)-3:]
 }
+
+// maskToken is the internal alias kept for backwards compatibility with
+// existing callers inside the package.
+func maskToken(t string) string { return MaskToken(t) }

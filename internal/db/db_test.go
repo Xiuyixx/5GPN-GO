@@ -36,6 +36,7 @@ func TestMigrateAppliesAllTables(t *testing.T) {
 		"bot_sessions",
 		"metrics_snapshot",
 		"panel_sessions",
+		"panel_settings",
 		"panel_users",
 		"rule_sources",
 		"rule_test_fixtures",
