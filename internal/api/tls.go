@@ -108,6 +108,21 @@ func ACMEStorageDir(dataDir string) string {
 	return filepath.Join(dataDir, "acme")
 }
 
+// FrontdoorTLSConfig is the public entry point cmd/5gpn wires the v0.3.0
+// front-door listeners against. It's a thin wrapper over setupACME so the
+// four DNS listeners (DoT / DoH / DoQ / DoH3) share the same on-disk
+// cert cache and renewal cycle as the panel HTTPS listener. Calling it
+// after api.Server has already set up ACME is safe: certmagic's default
+// registry is idempotent, and the returned tls.Config's GetCertificate
+// pulls from the same in-memory cache the panel's TLSConfig uses.
+func FrontdoorTLSConfig(ctx context.Context, domain, email, storageDir string, logger *slog.Logger) (*tls.Config, error) {
+	return setupACME(ctx, ACMEOptions{
+		Domain:     domain,
+		Email:      email,
+		StorageDir: storageDir,
+	}, logger)
+}
+
 // runDual starts the primary listener AND, when acmeAddr is non-empty,
 // a second listener on that address sharing the same handler + TLS
 // config. Blocks until ctx is done or a listener returns an error.

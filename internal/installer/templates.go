@@ -36,8 +36,18 @@ ProtectHome=yes
 # would make /usr/local/bin read-only and one-click upgrade fails EROFS.
 ReadWritePaths={{.DataDir}} {{.ConfigDir}} {{.BinaryDir}}
 PrivateTmp=yes
+# CAP_NET_ADMIN is needed by the DNS front-door's upstream socket to set
+# SO_MARK=0 so its DoT egress bypasses the pgw_exit nftables rules that
+# would otherwise route the resolver's own queries back through a proxy
+# tunnel. CAP_NET_BIND_SERVICE lets the non-root daemon bind :443/:853/:53.
+# Both must be Ambient (in addition to Bounding) for a non-root User to
+# actually retain them at exec time.
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
-AmbientCapabilities=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
+# Four listeners × per-listener connection tables + certmagic + QUIC
+# read buffers can chew through the 1024 default; 65536 gives ~16× headroom
+# for the 1-core VPS profile the plan targets.
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target

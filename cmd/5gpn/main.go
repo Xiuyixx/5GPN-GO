@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"crypto/tls"
 	"database/sql"
 
 	"github.com/Xiuyixx/5GPN-Go/internal/api"
@@ -26,8 +27,10 @@ import (
 	"github.com/Xiuyixx/5GPN-Go/internal/core"
 	"github.com/Xiuyixx/5GPN-Go/internal/db"
 	xexit "github.com/Xiuyixx/5GPN-Go/internal/exit"
+	"github.com/Xiuyixx/5GPN-Go/internal/frontdoor"
 	"github.com/Xiuyixx/5GPN-Go/internal/metrics"
 	"github.com/Xiuyixx/5GPN-Go/internal/orchestrator"
+	"github.com/Xiuyixx/5GPN-Go/internal/resolver"
 	"github.com/Xiuyixx/5GPN-Go/internal/rulesets"
 	"github.com/Xiuyixx/5GPN-Go/internal/settings"
 	"github.com/Xiuyixx/5GPN-Go/internal/tgbot"
@@ -58,7 +61,7 @@ func (b *bootStore) ListExits() ([]core.ExitRecord, error) {
 	return b.exits.Records(context.Background())
 }
 
-var version = "0.2.9"
+var version = "0.3.0"
 
 func main() {
 	configPath := flag.String("config", "/etc/5gpn/config.yaml", "path to config.yaml")
@@ -231,6 +234,14 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 	// stays honest without hitting the network at every apply.
 	go rulesetSyncer.Run(ctx, 6*time.Hour)
 
+	// DNS-plane wiring — v0.3.0. resolverStore holds the currently
+	// active RuleTable; Publish is called from api.handleApply (and
+	// handleRollbackSnapshot) after a snapshot lands, so the DNS
+	// listeners see fresh rules without a daemon restart. resolverMetrics
+	// is the counter set the panel's Dashboard renders.
+	resolverStore := &resolver.Store{}
+	resolverMetrics := resolver.NewMetrics()
+
 	srv := api.New(dbHandle, api.Config{
 		SessionTTL:     cfg.Panel.SessionTTL,
 		LoginPerMinute: cfg.Panel.RateLimit.LoginPerMinute,
@@ -254,6 +265,8 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 		Settings:      settingsStore,
 		Rulesets:      rulesetsStore,
 		RulesetSyncer: rulesetSyncer,
+		Resolver:      resolverStore,
+		Metrics:       resolverMetrics,
 	}, logger)
 
 	addr := listenOverride
@@ -328,7 +341,74 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 
 	logger.Info("5gpn daemon starting",
 		"version", version, "addr", addr, "data", dataDir, "insecure", insecure)
+
+	// DNS front-door (v0.3.0). Only starts when ACME is active, because
+	// DoT/DoH/DoQ/DoH3 all need the LE cert. In --insecure dev boots the
+	// front-door is silently skipped — a dev daemon without a real domain
+	// has nothing to encrypt with. Plain :53 UDP/TCP is fine as-is when
+	// the plan's public_plain_dns_enabled toggle is off (default), because
+	// the loopback + WG interface binds don't need any cert.
+	if !insecure && srv.ACME.Domain != "" {
+		if err := startFrontdoor(ctx, srv, resolverStore, resolverMetrics, settingsStore, dataDir, logger); err != nil {
+			logger.Warn("frontdoor start failed — panel still serves", "err", err)
+		}
+	}
+
 	return srv.ListenAndServe(ctx, addr, cert, key)
+}
+
+// startFrontdoor wires the v0.3.0 DNS listeners onto the running daemon.
+// The plain-DNS bind toggle + DoQ + DoH3 flags live in panel_settings so
+// operators can flip them without editing config.yaml; the initial reads
+// happen here and Frontdoor.Reconcile takes over for runtime flips.
+//
+// The four TLS listeners (DoT / DoH / DoQ / DoH3) share the panel's LE
+// cert by asking certmagic — the panel already started managing the
+// domain via api.setupACME, so this call is idempotent and just returns
+// a wrapper over the same on-disk cert. When certmagic later rotates the
+// cert both the panel and the front-door pick it up on the next handshake.
+func startFrontdoor(
+	ctx context.Context,
+	srv *api.Server,
+	store *resolver.Store,
+	metrics *resolver.Metrics,
+	sset *settings.Store,
+	dataDir string,
+	logger *slog.Logger,
+) error {
+	res := resolver.NewResolver(store, resolver.NewUpstream(), metrics)
+
+	panelTLS, err := api.FrontdoorTLSConfig(ctx, srv.ACME.Domain, srv.ACME.Email, api.ACMEStorageDir(dataDir), logger)
+	if err != nil {
+		return fmt.Errorf("frontdoor: certmagic: %w", err)
+	}
+	getCert := func() (*tls.Certificate, error) {
+		return panelTLS.GetCertificate(&tls.ClientHelloInfo{ServerName: srv.ACME.Domain})
+	}
+	tlsConfigs, err := frontdoor.BuildTLSConfigs(getCert)
+	if err != nil {
+		return fmt.Errorf("frontdoor: tls configs: %w", err)
+	}
+
+	// Public plain :53 stays OFF by default (open-resolver amplification
+	// mitigation, plan R13). Operators opt in via panel_settings.
+	publicPlain, _ := sset.GetBool(ctx, "frontdoor.public_plain_dns_enabled")
+	doqEnabled, _ := sset.GetBool(ctx, settings.KeyFrontdoorDoQEnabled)
+	doh3Enabled, _ := sset.GetBool(ctx, settings.KeyFrontdoorDoH3Enabled)
+
+	fdCfg := frontdoor.DefaultConfig()
+	fdCfg.PublicPlainDNSEnabled = publicPlain
+	fdCfg.DoQEnabled = doqEnabled
+	fdCfg.DoH3Enabled = doh3Enabled
+	fdCfg.TLSConfigs = tlsConfigs
+
+	fd := frontdoor.New(fdCfg, res, logger)
+	if err := fd.Start(ctx); err != nil {
+		return fmt.Errorf("frontdoor: start: %w", err)
+	}
+	logger.Info("frontdoor: started",
+		"public_plain_dns", publicPlain, "doq", doqEnabled, "doh3", doh3Enabled)
+	return nil
 }
 
 func loadOrCreateJWTSecret(path string) ([]byte, error) {
