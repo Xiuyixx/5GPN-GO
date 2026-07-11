@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/Xiuyixx/5GPN-Go/internal/db"
+	"github.com/Xiuyixx/5GPN-Go/internal/rules"
 )
 
 type snapshotEntry struct {
@@ -69,9 +70,11 @@ func (s *Server) handleRollbackSnapshot(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var targetID int64
+	var targetYAML string
 	for _, v := range versions {
 		if v.SnapshotID == snap.ID {
 			targetID = v.ID
+			targetYAML = v.RulesYAML
 			break
 		}
 	}
@@ -91,6 +94,34 @@ func (s *Server) handleRollbackSnapshot(w http.ResponseWriter, r *http.Request) 
 		Result: "ok",
 		IP:     clientIP(r),
 	})
+
+	// Republish the restored (older) RuleTable into the DNS resolver so
+	// query answers reflect the rollback immediately, through the same
+	// singleflight + applyStore machinery forward applies use — the
+	// rollback shows up in /api/v1/applies alongside normal applies.
+	// Best-effort: a parse failure here does not fail the rollback
+	// response since the rule_versions active pointer has already moved.
+	if set, perr := rules.ParseYAML([]byte(targetYAML)); perr == nil {
+		entry := s.rebuildAndPublish(r.Context(), set.Rules, "rollback")
+		if entry.Status == "failed" {
+			s.Logger.Warn("rules.rollback: resolver rebuild failed",
+				"apply_id", entry.ID, "err", entry.Error)
+		}
+		if entry.Status == "pending" {
+			w.Header().Set("Location", "/api/v1/applies/"+entry.ID)
+			writeJSON(w, http.StatusAccepted, map[string]any{
+				"snapshot_id":     snap.ID,
+				"rule_version_id": targetID,
+				"apply_id":        entry.ID,
+				"hash":            entry.Hash,
+				"status":          "pending",
+			})
+			return
+		}
+	} else {
+		s.Logger.Warn("rules.rollback: parse rules_yaml failed", "err", perr)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"snapshot_id":     snap.ID,
 		"rule_version_id": targetID,

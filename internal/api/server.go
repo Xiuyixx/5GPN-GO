@@ -21,6 +21,7 @@ import (
 	"github.com/Xiuyixx/5GPN-Go/internal/core"
 	xexit "github.com/Xiuyixx/5GPN-Go/internal/exit"
 	"github.com/Xiuyixx/5GPN-Go/internal/orchestrator"
+	"github.com/Xiuyixx/5GPN-Go/internal/resolver"
 	"github.com/Xiuyixx/5GPN-Go/internal/rulesets"
 	"github.com/Xiuyixx/5GPN-Go/internal/settings"
 	"github.com/Xiuyixx/5GPN-Go/internal/tgbot"
@@ -63,21 +64,30 @@ type UpdaterConfig struct {
 
 // Server owns the HTTP router + auth + rate limiter for the panel API.
 type Server struct {
-	DB           *sql.DB
-	Auth         *Authenticator
-	Limiter      *ipLimiter
-	Logger       *slog.Logger
-	WebFS        fs.FS
-	SetupToken   string
-	Orchestrator orchestrator.Orchestrator
-	BaseConfig   *config.Config
-	Applier      *core.Applier
-	Store        xexit.Store
-	Updater      UpdaterConfig
-	TGBot        *tgbot.Manager
-	Settings     *settings.Store
+	DB            *sql.DB
+	Auth          *Authenticator
+	Limiter       *ipLimiter
+	Logger        *slog.Logger
+	WebFS         fs.FS
+	SetupToken    string
+	Orchestrator  orchestrator.Orchestrator
+	BaseConfig    *config.Config
+	Applier       *core.Applier
+	Store         xexit.Store
+	Updater       UpdaterConfig
+	TGBot         *tgbot.Manager
+	Settings      *settings.Store
 	Rulesets      *rulesets.Store
 	RulesetSyncer *rulesets.Syncer
+	// Resolver is the DNS plane's atomic RuleTable holder (internal/resolver.
+	// Store). It is optional: a nil Resolver means this Server was built
+	// without the DNS front-door wired in (e.g. most existing tests), and
+	// every resolver-publish step in the rules-apply / rollback handlers
+	// becomes a no-op rather than a nil-pointer panic.
+	Resolver *resolver.Store
+	// applyStore tracks the async rules-apply / rollback lifecycle (see
+	// applies.go) that backs GET /api/v1/applies[/{id}]. Always non-nil.
+	applyStore *applyStore
 	// ACME is optional. When ACME.Domain is non-empty, ListenAndServe
 	// starts certmagic + a second HTTPS listener on :443 in addition to
 	// the primary panel port.
@@ -102,6 +112,8 @@ type Config struct {
 	Settings       *settings.Store
 	Rulesets       *rulesets.Store
 	RulesetSyncer  *rulesets.Syncer
+	// Resolver is optional; see Server.Resolver doc comment.
+	Resolver *resolver.Store
 }
 
 // New builds a Server from its dependencies.
@@ -152,19 +164,21 @@ func New(db *sql.DB, cfg Config, logger *slog.Logger) *Server {
 			DB: db, Secret: cfg.JWTSecret,
 			TokenTTL: cfg.SessionTTL, Issuer: cfg.Issuer,
 		},
-		Limiter:      newIPLimiter(float64(cfg.LoginPerMinute)/60.0, cfg.LoginPerMinute, cfg.LockoutMinutes),
-		Logger:       logger,
-		WebFS:        cfg.WebFS,
-		SetupToken:   cfg.SetupToken,
-		Orchestrator: cfg.Orchestrator,
-		BaseConfig:   cfg.BaseConfig,
-		Applier:      cfg.Applier,
-		Store:        cfg.Store,
-		Updater:      cfg.Updater,
+		Limiter:       newIPLimiter(float64(cfg.LoginPerMinute)/60.0, cfg.LoginPerMinute, cfg.LockoutMinutes),
+		Logger:        logger,
+		WebFS:         cfg.WebFS,
+		SetupToken:    cfg.SetupToken,
+		Orchestrator:  cfg.Orchestrator,
+		BaseConfig:    cfg.BaseConfig,
+		Applier:       cfg.Applier,
+		Store:         cfg.Store,
+		Updater:       cfg.Updater,
 		TGBot:         cfg.TGBot,
 		Settings:      cfg.Settings,
 		Rulesets:      cfg.Rulesets,
 		RulesetSyncer: cfg.RulesetSyncer,
+		Resolver:      cfg.Resolver,
+		applyStore:    newApplyStore(),
 	}
 }
 
@@ -225,6 +239,8 @@ func (s *Server) Router() http.Handler {
 		r.Get("/api/v1/settings/panel", s.handleGetPanelSettings)
 		r.Post("/api/v1/settings/panel", s.handleUpdatePanelSettings)
 		r.Get("/api/v1/apply/status", s.handleApplyStatus)
+		r.Get("/api/v1/applies/{id}", s.handleApplyGet)
+		r.Get("/api/v1/applies", s.handleAppliesList)
 
 		r.Get("/api/v1/exits", s.handleListExits)
 		r.Post("/api/v1/exits/add", s.handleAddExit)
@@ -281,12 +297,12 @@ func (s *Server) serveIndex(w http.ResponseWriter) {
 
 // ListenAndServe starts the panel listener(s). Three modes:
 //
-//   1. Plain HTTP  - both certFile/keyFile empty AND s.ACME.Domain empty.
-//   2. Static TLS  - certFile/keyFile non-empty. HTTPS on `addr` only.
-//   3. ACME TLS    - s.ACME.Domain non-empty. HTTPS on `addr` AND :443,
-//                    with certmagic managing the certificate. Same tls
-//                    config feeds both listeners so a fresh renewal is
-//                    picked up on both ports simultaneously.
+//  1. Plain HTTP  - both certFile/keyFile empty AND s.ACME.Domain empty.
+//  2. Static TLS  - certFile/keyFile non-empty. HTTPS on `addr` only.
+//  3. ACME TLS    - s.ACME.Domain non-empty. HTTPS on `addr` AND :443,
+//     with certmagic managing the certificate. Same tls
+//     config feeds both listeners so a fresh renewal is
+//     picked up on both ports simultaneously.
 //
 // Blocks until ctx is done.
 func (s *Server) ListenAndServe(ctx context.Context, addr, certFile, keyFile string) error {

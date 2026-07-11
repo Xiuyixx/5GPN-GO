@@ -15,8 +15,8 @@ type ruleDoc struct {
 }
 
 type dryRunRequest struct {
-	Rules    []rules.Rule         `json:"rules"`
-	Fixtures []rules.TestFixture  `json:"fixtures"`
+	Rules    []rules.Rule        `json:"rules"`
+	Fixtures []rules.TestFixture `json:"fixtures"`
 }
 
 type dryRunResponse struct {
@@ -175,6 +175,29 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 		Result: result,
 		IP:     clientIP(r),
 	})
+
+	// Hot-swap the DNS resolver's RuleTable to match the just-applied rule
+	// set. This is a concern the handler owns separately from the
+	// orchestrator apply above: if the Applier call failed, the data plane
+	// never changed, so the resolver must not be touched either. A
+	// successful Applier call always proceeds here — the DNS plane build
+	// is independent of the mihomo/orchestrator health-check lifecycle.
+	if appErr == nil {
+		entry := s.rebuildAndPublish(r.Context(), set.Rules, "apply")
+		if entry.Status == "failed" {
+			s.Logger.Warn("rules.apply: resolver rebuild failed",
+				"apply_id", entry.ID, "err", entry.Error)
+		}
+		if entry.Status == "pending" {
+			w.Header().Set("Location", "/api/v1/applies/"+entry.ID)
+			writeJSON(w, http.StatusAccepted, map[string]any{
+				"apply_id": entry.ID,
+				"hash":     entry.Hash,
+				"status":   "pending",
+			})
+			return
+		}
+	}
 
 	writeJSON(w, http.StatusOK, applyResponse{
 		SnapshotID:    snapID,
