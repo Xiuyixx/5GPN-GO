@@ -104,7 +104,7 @@ func (d *DoT) Addr() string {
 // per-query Close here would sever the connection after the first query,
 // breaking the RFC 7858 "many queries per TLS session" model.
 func (d *DoT) handle(w dns.ResponseWriter, req *dns.Msg) {
-	resp, err := d.resolver.Resolve(context.Background(), req)
+	resp, err := d.resolver.Resolve(context.Background(), req, remoteIP(w.RemoteAddr()))
 	if err != nil {
 		d.logger.Warn("dot: resolve error", "error", err, "remote", w.RemoteAddr())
 	}

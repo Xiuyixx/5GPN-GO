@@ -213,7 +213,7 @@ func (q *DoQ) handleStream(stream *quic.Stream) {
 		return
 	}
 
-	resp, resolveErr := q.resolver.Resolve(context.Background(), req)
+	resp, resolveErr := q.resolver.Resolve(context.Background(), req, doqRemoteIP(stream))
 	if resolveErr != nil {
 		q.logger.Warn("doq: resolve error", "error", resolveErr, "qname", qnameOf(req))
 	}

@@ -85,7 +85,7 @@ func TestBlockReturnsNXDOMAIN(t *testing.T) {
 	store.Publish(tbl)
 
 	r := NewResolver(store, NewUpstream(), NewMetrics())
-	resp, err := r.Resolve(context.Background(), makeQuery("ads.example.com", dns.TypeA))
+	resp, err := r.Resolve(context.Background(), makeQuery("ads.example.com", dns.TypeA), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestDirectForwardsToCNUpstream(t *testing.T) {
 	}, nil)
 	r := NewResolver(store, up, NewMetrics())
 
-	resp, err := r.Resolve(context.Background(), makeQuery("www.taobao.com", dns.TypeA))
+	resp, err := r.Resolve(context.Background(), makeQuery("www.taobao.com", dns.TypeA), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,11 +142,11 @@ func TestProxyForwardsAndMissForwards(t *testing.T) {
 	r := NewResolver(store, up, NewMetrics())
 
 	// Hit
-	if _, err := r.Resolve(context.Background(), makeQuery("mail.google.com", dns.TypeA)); err != nil {
+	if _, err := r.Resolve(context.Background(), makeQuery("mail.google.com", dns.TypeA), nil); err != nil {
 		t.Fatal(err)
 	}
 	// Miss (no rule) — should still go proxy per AC-R4.
-	if _, err := r.Resolve(context.Background(), makeQuery("random.example.org", dns.TypeA)); err != nil {
+	if _, err := r.Resolve(context.Background(), makeQuery("random.example.org", dns.TypeA), nil); err != nil {
 		t.Fatal(err)
 	}
 	if snap := r.Metrics.Snapshot(); snap.HitsProxy != 2 {
@@ -161,7 +161,7 @@ func TestAXFRRefused(t *testing.T) {
 	r := NewResolver(store, NewUpstream(), NewMetrics())
 
 	q := makeQuery("example.com", dns.TypeAXFR)
-	resp, err := r.Resolve(context.Background(), q)
+	resp, err := r.Resolve(context.Background(), q, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +196,7 @@ func TestEDNS0StripsClientSubnet(t *testing.T) {
 	o.Option = append(o.Option, ecs)
 	q.Extra = append(q.Extra, o)
 
-	if _, err := r.Resolve(context.Background(), q); err != nil {
+	if _, err := r.Resolve(context.Background(), q, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -255,7 +255,7 @@ func TestHotSwapPinsInFlightSnapshot(t *testing.T) {
 		err  error
 	}, 1)
 	go func() {
-		resp, err := r.Resolve(context.Background(), makeQuery("host.example.com", dns.TypeA))
+		resp, err := r.Resolve(context.Background(), makeQuery("host.example.com", dns.TypeA), nil)
 		done <- struct {
 			resp *dns.Msg
 			err  error

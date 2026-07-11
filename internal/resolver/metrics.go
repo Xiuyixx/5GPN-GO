@@ -10,6 +10,7 @@ type Metrics struct {
 	hitsBlock      atomic.Int64
 	hitsDirect     atomic.Int64
 	hitsProxy      atomic.Int64
+	hitsSpoof      atomic.Int64
 	upstreamErrors atomic.Int64
 	refusedAXFR    atomic.Int64
 }
@@ -20,6 +21,7 @@ type Snapshot struct {
 	HitsBlock      int64 `json:"hits_block"`
 	HitsDirect     int64 `json:"hits_direct"`
 	HitsProxy      int64 `json:"hits_proxy"`
+	HitsSpoof      int64 `json:"hits_spoof"`
 	UpstreamErrors int64 `json:"upstream_errors"`
 	RefusedAXFR    int64 `json:"refused_axfr"`
 }
@@ -31,6 +33,7 @@ func (m *Metrics) IncQueries()       { m.queriesTotal.Add(1) }
 func (m *Metrics) IncBlock()         { m.hitsBlock.Add(1) }
 func (m *Metrics) IncDirect()        { m.hitsDirect.Add(1) }
 func (m *Metrics) IncProxy()         { m.hitsProxy.Add(1) }
+func (m *Metrics) IncSpoof()         { m.hitsSpoof.Add(1) }
 func (m *Metrics) IncUpstreamError() { m.upstreamErrors.Add(1) }
 func (m *Metrics) IncRefusedAXFR()   { m.refusedAXFR.Add(1) }
 
@@ -43,6 +46,7 @@ func (m *Metrics) Snapshot() Snapshot {
 		HitsBlock:      m.hitsBlock.Load(),
 		HitsDirect:     m.hitsDirect.Load(),
 		HitsProxy:      m.hitsProxy.Load(),
+		HitsSpoof:      m.hitsSpoof.Load(),
 		UpstreamErrors: m.upstreamErrors.Load(),
 		RefusedAXFR:    m.refusedAXFR.Load(),
 	}
@@ -50,5 +54,5 @@ func (m *Metrics) Snapshot() Snapshot {
 
 // discardMetrics returns a *Metrics for callers that don't need to read
 // counters back. Each call returns a fresh sink so parallel tests never
-// share writer state; the allocation is cheap (six atomic.Int64s).
+// share writer state; the allocation is cheap (seven atomic.Int64s).
 func discardMetrics() *Metrics { return NewMetrics() }

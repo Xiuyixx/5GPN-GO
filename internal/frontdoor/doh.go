@@ -104,7 +104,7 @@ func (d *DoH) serveHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	out, resolveErr := d.resolver.Resolve(req.Context(), in)
+	out, resolveErr := d.resolver.Resolve(req.Context(), in, httpRemoteIP(req))
 	if resolveErr != nil {
 		d.logger.Warn("doh: resolve error", "error", resolveErr, "qname", qnameOf(in))
 	}

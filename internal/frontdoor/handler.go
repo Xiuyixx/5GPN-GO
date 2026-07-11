@@ -36,7 +36,7 @@ func (fd *Frontdoor) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
-	resp, err := fd.resolver.Resolve(context.Background(), r)
+	resp, err := fd.resolver.Resolve(context.Background(), r, remoteIP(w.RemoteAddr()))
 	if err != nil {
 		fd.logger.Warn("frontdoor: resolve error", "err", err, "remote", w.RemoteAddr())
 	}
