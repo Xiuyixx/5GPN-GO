@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import AppShell from '../layouts/AppShell';
 import { Heading } from '../components/ui/heading';
 import { Text } from '../components/ui/text';
@@ -12,6 +13,7 @@ import { api } from '../api/client';
 import type { ExitSummary, ExitsResponse } from '../api/client';
 
 export default function Exits() {
+  const { t } = useTranslation();
   const [state, setState] = useState<ExitsResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [id, setId] = useState('');
@@ -53,7 +55,7 @@ export default function Exits() {
   }
 
   async function removeExit(target: string) {
-    if (!confirm(`Delete exit "${target}"?`)) return;
+    if (!confirm(t('exits.confirmDelete', { id: target }))) return;
     setErr(null);
     try {
       await api.post('/api/v1/exits/delete', { id: target });
@@ -66,14 +68,14 @@ export default function Exits() {
   return (
     <AppShell>
       <div className="mb-6">
-        <Heading>Exits</Heading>
-        <Text className="mt-1">Add a proxy by pasting its share URI · ss / vmess / trojan / vless / hysteria2 / tuic / anytls / socks5 / http(s).</Text>
+        <Heading>{t('exits.title')}</Heading>
+        <Text className="mt-1">{t('exits.subtitle')}</Text>
       </div>
 
       {err && (
         <div className="mb-4">
           <Alert open onClose={() => setErr(null)}>
-            <AlertTitle>Something went wrong</AlertTitle>
+            <AlertTitle>{t('exits.errorTitle')}</AlertTitle>
             <AlertBody>{err}</AlertBody>
           </Alert>
         </div>
@@ -81,20 +83,20 @@ export default function Exits() {
 
       <form onSubmit={add} className="glass p-6">
         <Fieldset>
-          <Legend>Add exit</Legend>
+          <Legend>{t('exits.addExit')}</Legend>
           <FieldGroup>
             <Field>
-              <Label>ID (short alphanumeric)</Label>
+              <Label>{t('exits.idLabel')}</Label>
               <Input required value={id} onChange={(e) => setId(e.target.value)} placeholder="wg1" />
             </Field>
             <Field>
-              <Label>Share URI</Label>
+              <Label>{t('exits.uriLabel')}</Label>
               <Input required value={uri} onChange={(e) => setUri(e.target.value)} placeholder="trojan://password@host:443?sni=..." />
             </Field>
           </FieldGroup>
         </Fieldset>
         <div className="mt-4">
-          <Button type="submit" color="indigo" disabled={busy}>Add exit</Button>
+          <Button type="submit" color="indigo" disabled={busy}>{t('exits.addExit')}</Button>
         </div>
       </form>
 
@@ -102,12 +104,12 @@ export default function Exits() {
         <Table>
           <TableHead>
             <TableRow>
-              <TableHeader>ID</TableHeader>
-              <TableHeader>Protocol</TableHeader>
-              <TableHeader>Server</TableHeader>
-              <TableHeader>Port</TableHeader>
-              <TableHeader>Status</TableHeader>
-              <TableHeader className="text-right">Actions</TableHeader>
+              <TableHeader>{t('exits.columnId')}</TableHeader>
+              <TableHeader>{t('exits.columnProtocol')}</TableHeader>
+              <TableHeader>{t('exits.columnServer')}</TableHeader>
+              <TableHeader>{t('exits.columnPort')}</TableHeader>
+              <TableHeader>{t('exits.columnStatus')}</TableHeader>
+              <TableHeader className="text-right">{t('exits.columnActions')}</TableHeader>
             </TableRow>
           </TableHead>
           <TableBody>
@@ -118,11 +120,11 @@ export default function Exits() {
                 <TableCell>{e.server}</TableCell>
                 <TableCell className="metric">{e.port || '—'}</TableCell>
                 <TableCell>
-                  {e.active ? <Badge color="lime">active</Badge> : <Badge color="zinc">standby</Badge>}
+                  {e.active ? <Badge color="lime">{t('exits.statusActive')}</Badge> : <Badge color="zinc">{t('exits.statusStandby')}</Badge>}
                 </TableCell>
                 <TableCell className="flex justify-end gap-2">
-                  {!e.active && <Button plain onClick={() => switchExit(e.id)}>Switch</Button>}
-                  {!e.active && <Button plain onClick={() => removeExit(e.id)}>Delete</Button>}
+                  {!e.active && <Button plain onClick={() => switchExit(e.id)}>{t('exits.switch')}</Button>}
+                  {!e.active && <Button plain onClick={() => removeExit(e.id)}>{t('exits.delete')}</Button>}
                 </TableCell>
               </TableRow>
             ))}

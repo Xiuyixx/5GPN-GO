@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useTranslation, Trans } from 'react-i18next';
 import AppShell from '../layouts/AppShell';
 import { Heading } from '../components/ui/heading';
 import { Text } from '../components/ui/text';
@@ -42,6 +43,7 @@ function toDraft(r: Rule): Draft {
 }
 
 export default function Rules() {
+  const { t } = useTranslation();
   const [active, setActive] = useState<Rule[]>([]);
   const [draft, setDraft] = useState<Draft[]>([]);
   const [exits, setExits] = useState<string[]>([]);
@@ -248,20 +250,20 @@ export default function Rules() {
     <AppShell>
       <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
         <div>
-          <Heading>Rules</Heading>
+          <Heading>{t('nav.rules')}</Heading>
           <Text className="mt-1">
-            Edit rules · define test fixtures below · Dry-run must pass before Apply.
+            {t('rules.tagline')}
           </Text>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Button plain onClick={refresh}>Reset</Button>
-          <Button plain onClick={addRow}>+ Add rule</Button>
-          <Button plain onClick={() => setImportOpen(true)}>⤓ Import ruleset</Button>
+          <Button plain onClick={refresh}>{t('rules.reset')}</Button>
+          <Button plain onClick={addRow}>{t('rules.addRule')}</Button>
+          <Button plain onClick={() => setImportOpen(true)}>{t('rules.importRuleset')}</Button>
           <Button color="zinc" onClick={runDryRun} disabled={busy !== 'idle'}>
-            {busy === 'dryrun' ? 'Running…' : 'Dry-run'}
+            {busy === 'dryrun' ? t('rules.running') : t('rules.dryRun')}
           </Button>
           <Button color="indigo" onClick={runApply} disabled={busy !== 'idle' || !isDirty || !dryOk}>
-            {busy === 'apply' ? 'Applying…' : 'Apply'}
+            {busy === 'apply' ? t('rules.applying') : t('rules.apply')}
           </Button>
         </div>
       </div>
@@ -269,13 +271,13 @@ export default function Rules() {
       {error && (
         <div className="mb-4 flex items-start justify-between gap-3 rounded-xl border border-red-400/40 bg-red-500/10 px-4 py-3 text-sm text-red-800 dark:text-red-200">
           <div>
-            <div className="font-semibold">Something went wrong</div>
+            <div className="font-semibold">{t('rules.errorTitle')}</div>
             <div className="mt-0.5">{error}</div>
           </div>
           <button
             type="button"
             onClick={() => setError(null)}
-            aria-label="dismiss error"
+            aria-label={t('rules.dismissError')}
             className="shrink-0 rounded px-2 py-0.5 text-red-700/70 hover:text-red-900 dark:text-red-300/70 dark:hover:text-red-100"
           >
             ✕
@@ -290,17 +292,18 @@ export default function Rules() {
         }`}>
           <div>
             <div className="font-semibold">
-              {applyRes.rolled_back ? 'Apply rolled back' : 'Apply succeeded'}
+              {applyRes.rolled_back ? t('rules.applyRolledBack') : t('rules.applySucceeded')}
             </div>
             <div className="mt-0.5">
-              snapshot #{applyRes.snapshot_id} · health {applyRes.health}
-              {applyRes.rolled_back ? ' · previous config restored' : ''}
+              {applyRes.rolled_back
+                ? t('rules.applyResultDetailRolledBack', { id: applyRes.snapshot_id, health: applyRes.health })
+                : t('rules.applyResultDetail', { id: applyRes.snapshot_id, health: applyRes.health })}
             </div>
           </div>
           <button
             type="button"
             onClick={() => setApplyRes(null)}
-            aria-label="dismiss apply result"
+            aria-label={t('rules.dismissApplyResult')}
             className="shrink-0 rounded px-2 py-0.5 opacity-70 hover:opacity-100"
           >
             ✕
@@ -315,28 +318,34 @@ export default function Rules() {
               ? 'border-red-400/40 bg-red-500/10 text-red-800 dark:text-red-200'
               : 'border-amber-400/40 bg-amber-500/10 text-amber-800 dark:text-amber-200'
         }`}>
-          <div className="font-semibold">Unsaved changes</div>
+          <div className="font-semibold">{t('rules.unsavedChanges')}</div>
           <div className="mt-0.5">
             {dryOk
-              ? `Dry-run passed (${dry?.passed ?? 0} fixture${(dry?.passed ?? 0) === 1 ? '' : 's'}) — Apply is enabled.`
+              ? t('rules.dryRunPassed', { count: dry?.passed ?? 0 })
               : dry
-                ? `Dry-run failed: ${failedDetails.length} of ${dry.results.length} fixture${dry.results.length === 1 ? '' : 's'}.`
+                ? t('rules.dryRunFailed', { count: dry.results.length, failed: failedDetails.length })
                 : fixtures.filter((f) => f.domain.trim()).length === 0
-                  ? 'Add at least one fixture below (domain + expected exit), then run Dry-run.'
-                  : 'Run Dry-run before Apply to guard against regressions.'}
+                  ? t('rules.addFixtureHint')
+                  : t('rules.runDryRunHint')}
           </div>
           {dry && !dryOk && failedDetails.length > 0 && (
             <ul className="mt-2 space-y-1 text-xs">
               {failedDetails.slice(0, 5).map((r) => (
                 <li key={r.domain}>
                   <code className="rounded bg-red-500/10 px-1 py-0.5">{r.domain}</code>{' '}
-                  expected <strong>{r.expected_exit}</strong>, got <strong>{r.actual_exit || '—'}</strong>
-                  {r.matched_rule ? ` (matched ${r.matched_rule})` : ' (no rule matched)'}
+                  <Trans
+                    i18nKey="rules.fixtureFailedLine"
+                    values={{ expected: r.expected_exit, actual: r.actual_exit || '—' }}
+                    components={{ strong: <strong /> }}
+                  />
+                  {r.matched_rule
+                    ? ' ' + t('rules.matchedRuleParen', { rule: r.matched_rule })
+                    : ' ' + t('rules.noRuleMatchedParen')}
                 </li>
               ))}
               {failedDetails.length > 5 && (
                 <li className="text-red-700/70 dark:text-red-300/70">
-                  … and {failedDetails.length - 5} more (see the results table below)
+                  {t('rules.andMoreSeeTable', { count: failedDetails.length - 5 })}
                 </li>
               )}
             </ul>
@@ -347,19 +356,24 @@ export default function Rules() {
       <div className="glass p-2">
         {draft.length === 0 ? (
           <div className="p-6 text-center">
-            <Text>No rules yet. Click <strong>+ Add rule</strong> above.</Text>
+            <Text>
+              <Trans
+                i18nKey="rules.noRulesYet"
+                components={{ strong: <strong /> }}
+              />
+            </Text>
           </div>
         ) : (
           <Table>
             <TableHead>
               <TableRow>
-                <TableHeader className="w-16">Priority</TableHeader>
-                <TableHeader>ID</TableHeader>
-                <TableHeader>Kind</TableHeader>
-                <TableHeader>Pattern</TableHeader>
-                <TableHeader>Action</TableHeader>
-                <TableHeader className="w-24">Status</TableHeader>
-                <TableHeader className="w-40 text-right">Actions</TableHeader>
+                <TableHeader className="w-16">{t('rules.thPriority')}</TableHeader>
+                <TableHeader>{t('rules.thId')}</TableHeader>
+                <TableHeader>{t('rules.thKind')}</TableHeader>
+                <TableHeader>{t('rules.thPattern')}</TableHeader>
+                <TableHeader>{t('rules.thAction')}</TableHeader>
+                <TableHeader className="w-24">{t('rules.thStatus')}</TableHeader>
+                <TableHeader className="w-40 text-right">{t('rules.thActions')}</TableHeader>
               </TableRow>
             </TableHead>
             <TableBody>
@@ -378,26 +392,26 @@ export default function Rules() {
                   <TableCell>
                     {actionOptions.includes(r.action)
                       ? <code className="text-xs">{r.action}</code>
-                      : <span className="text-red-600 dark:text-red-400 text-xs">{r.action} (unknown)</span>}
+                      : <span className="text-red-600 dark:text-red-400 text-xs">{t('rules.unknownAction', { action: r.action })}</span>}
                   </TableCell>
                   <TableCell>
                     <button
                       type="button"
                       onClick={() => patch(r._key, { enabled: !r.enabled })}
                       className="cursor-pointer"
-                      aria-label={r.enabled ? 'disable rule' : 'enable rule'}
+                      aria-label={r.enabled ? t('rules.disableRule') : t('rules.enableRule')}
                     >
-                      <Badge color={r.enabled ? 'lime' : 'zinc'}>{r.enabled ? 'on' : 'off'}</Badge>
+                      <Badge color={r.enabled ? 'lime' : 'zinc'}>{r.enabled ? t('rules.statusOn') : t('rules.statusOff')}</Badge>
                     </button>
                   </TableCell>
                   <TableCell className="text-right">
                     <div className="flex justify-end gap-1">
-                      <Button plain aria-label="move up" onClick={() => move(r._key, -1)} disabled={i === 0}>↑</Button>
-                      <Button plain aria-label="move down" onClick={() => move(r._key, 1)} disabled={i === draft.length - 1}>↓</Button>
+                      <Button plain aria-label={t('rules.moveUp')} onClick={() => move(r._key, -1)} disabled={i === 0}>↑</Button>
+                      <Button plain aria-label={t('rules.moveDown')} onClick={() => move(r._key, 1)} disabled={i === draft.length - 1}>↓</Button>
                       <Button plain onClick={() => setEditing(editing === r._key ? null : r._key)}>
-                        {editing === r._key ? 'Close' : 'Edit'}
+                        {editing === r._key ? t('common.close') : t('rules.editButton')}
                       </Button>
-                      <Button plain aria-label="delete" onClick={() => removeRow(r._key)}>✕</Button>
+                      <Button plain aria-label={t('rules.deleteAria')} onClick={() => removeRow(r._key)}>✕</Button>
                     </div>
                   </TableCell>
                 </TableRow>
@@ -414,19 +428,19 @@ export default function Rules() {
         return (
           <div className="glass fade-up mt-4 p-6">
             <div className="mb-4 flex items-center justify-between">
-              <Heading level={2}>Edit rule</Heading>
-              <Button plain onClick={() => setEditing(null)}>Close</Button>
+              <Heading level={2}>{t('rules.editRule')}</Heading>
+              <Button plain onClick={() => setEditing(null)}>{t('common.close')}</Button>
             </div>
             <Fieldset>
-              <Legend className="sr-only">Fields</Legend>
+              <Legend className="sr-only">{t('rules.fieldsLegend')}</Legend>
               <FieldGroup>
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <Field>
-                    <Label>ID</Label>
+                    <Label>{t('rules.idLabel')}</Label>
                     <Input value={r.id} onChange={(e) => patch(r._key, { id: e.target.value })} />
                   </Field>
                   <Field>
-                    <Label>Priority</Label>
+                    <Label>{t('rules.priorityLabel')}</Label>
                     <Input
                       type="number"
                       value={r.priority}
@@ -434,32 +448,35 @@ export default function Rules() {
                     />
                   </Field>
                   <Field>
-                    <Label>Kind</Label>
+                    <Label>{t('rules.kindLabel')}</Label>
                     <Select value={r.kind} onChange={(e) => patch(r._key, { kind: e.target.value as RuleKind })}>
                       {KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
                     </Select>
                   </Field>
                   <Field>
                     <Label>
-                      Action{' '}
+                      {t('rules.actionLabel')}{' '}
                       <span className="text-zinc-500 text-xs">
-                        (direct / block / one of your exits)
+                        {t('rules.actionHint')}
                       </span>
                     </Label>
                     <Select value={r.action} onChange={(e) => patch(r._key, { action: e.target.value })}>
                       {!actionOptions.includes(r.action) && (
-                        <option value={r.action}>{r.action} (unknown — will fail dry-run)</option>
+                        <option value={r.action}>{t('rules.unknownWillFailDryRun', { action: r.action })}</option>
                       )}
                       {actionOptions.map((a) => <option key={a} value={a}>{a}</option>)}
                     </Select>
                     {exits.length === 0 && (
                       <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">
-                        No custom exits configured yet. Add one on the <a className="underline" href="/exits">Exits</a> page.
+                        <Trans
+                          i18nKey="rules.noCustomExits"
+                          components={{ exitsLink: <a className="underline" href="/exits" /> }}
+                        />
                       </p>
                     )}
                   </Field>
                   <Field className="sm:col-span-2">
-                    <Label>Pattern {isMatch && <span className="text-zinc-500">(disabled for MATCH)</span>}</Label>
+                    <Label>{t('rules.patternLabel')} {isMatch && <span className="text-zinc-500">{t('rules.patternDisabledForMatch')}</span>}</Label>
                     <Input
                       value={r.pattern}
                       onChange={(e) => patch(r._key, { pattern: e.target.value })}
@@ -468,7 +485,7 @@ export default function Rules() {
                         r.kind === 'DOMAIN-SUFFIX' ? 'example.com'
                         : r.kind === 'IP-CIDR' ? '10.0.0.0/8'
                         : r.kind === 'GEOSITE' ? 'cn'
-                        : 'pattern'
+                        : t('rules.patternPlaceholder')
                       }
                     />
                   </Field>
@@ -476,8 +493,8 @@ export default function Rules() {
               </FieldGroup>
             </Fieldset>
             <div className="mt-4 flex justify-between">
-              <Button plain onClick={() => { removeRow(r._key); }}>Delete rule</Button>
-              <Button color="zinc" onClick={() => setEditing(null)}>Done</Button>
+              <Button plain onClick={() => { removeRow(r._key); }}>{t('rules.deleteRule')}</Button>
+              <Button color="zinc" onClick={() => setEditing(null)}>{t('rules.done')}</Button>
             </div>
           </div>
         );
@@ -489,26 +506,24 @@ export default function Rules() {
       <div className="glass mt-6 p-6">
         <div className="mb-3 flex items-center justify-between">
           <div>
-            <Heading level={2}>Dry-run fixtures</Heading>
+            <Heading level={2}>{t('rules.dryRunFixturesHeading')}</Heading>
             <Text className="mt-1 text-sm">
-              Each row asserts: given this domain, the ruleset must route it to the expected exit.
-              Empty = only syntax + render check.
+              {t('rules.dryRunFixturesHelp')}
             </Text>
           </div>
-          <Button plain onClick={addFixture}>+ Add fixture</Button>
+          <Button plain onClick={addFixture}>{t('rules.addFixture')}</Button>
         </div>
         {fixtures.length === 0 ? (
           <div className="rounded border border-zinc-200/50 bg-zinc-50/40 px-4 py-3 text-sm text-zinc-600 dark:border-zinc-700/50 dark:bg-zinc-800/40 dark:text-zinc-400">
-            No fixtures. Dry-run will still validate syntax; add fixtures if you want to
-            assert specific routing decisions.
+            {t('rules.noFixtures')}
           </div>
         ) : (
           <Table>
             <TableHead>
               <TableRow>
-                <TableHeader>Domain</TableHeader>
-                <TableHeader className="w-56">Expected exit</TableHeader>
-                <TableHeader className="w-16 text-right">Remove</TableHeader>
+                <TableHeader>{t('rules.thDomain')}</TableHeader>
+                <TableHeader className="w-56">{t('rules.thExpectedExit')}</TableHeader>
+                <TableHeader className="w-16 text-right">{t('rules.thRemove')}</TableHeader>
               </TableRow>
             </TableHead>
             <TableBody>
@@ -518,7 +533,7 @@ export default function Rules() {
                     <Input
                       value={f.domain}
                       onChange={(e) => patchFixture(f._key, { domain: e.target.value })}
-                      placeholder="e.g. www.example.com"
+                      placeholder={t('rules.domainPlaceholder')}
                     />
                   </TableCell>
                   <TableCell>
@@ -527,13 +542,13 @@ export default function Rules() {
                       onChange={(e) => patchFixture(f._key, { expected_exit: e.target.value })}
                     >
                       {!actionOptions.includes(f.expected_exit) && (
-                        <option value={f.expected_exit}>{f.expected_exit} (unknown)</option>
+                        <option value={f.expected_exit}>{t('rules.unknownAction', { action: f.expected_exit })}</option>
                       )}
                       {actionOptions.map((a) => <option key={a} value={a}>{a}</option>)}
                     </Select>
                   </TableCell>
                   <TableCell className="text-right">
-                    <Button plain aria-label="remove fixture" onClick={() => removeFixture(f._key)}>✕</Button>
+                    <Button plain aria-label={t('rules.removeFixture')} onClick={() => removeFixture(f._key)}>✕</Button>
                   </TableCell>
                 </TableRow>
               ))}
@@ -544,11 +559,11 @@ export default function Rules() {
 
       <form className="glass mt-6 p-6" onSubmit={(e) => e.preventDefault()}>
         <Fieldset>
-          <Legend>Apply metadata</Legend>
+          <Legend>{t('rules.applyMetadata')}</Legend>
           <FieldGroup>
             <Field>
-              <Label>Note (persisted with the snapshot)</Label>
-              <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. added Netflix routing" />
+              <Label>{t('rules.noteLabel')}</Label>
+              <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder={t('rules.notePlaceholder')} />
             </Field>
           </FieldGroup>
         </Fieldset>
@@ -556,17 +571,17 @@ export default function Rules() {
 
       {dry && (
         <div className="mt-8">
-          <Heading level={2}>Dry-run results · passed {dry.passed} · failed {dry.failed}</Heading>
+          <Heading level={2}>{t('rules.dryRunResults', { passed: dry.passed, failed: dry.failed })}</Heading>
           <div className="glass mt-4 p-2">
             <Table>
               <TableHead>
                 <TableRow>
-                  <TableHeader>Domain</TableHeader>
-                  <TableHeader>Matched rule</TableHeader>
-                  <TableHeader>Kind</TableHeader>
-                  <TableHeader>Actual</TableHeader>
-                  <TableHeader>Expected</TableHeader>
-                  <TableHeader>Status</TableHeader>
+                  <TableHeader>{t('rules.thDomain')}</TableHeader>
+                  <TableHeader>{t('rules.thMatchedRule')}</TableHeader>
+                  <TableHeader>{t('rules.thKind')}</TableHeader>
+                  <TableHeader>{t('rules.thActual')}</TableHeader>
+                  <TableHeader>{t('rules.thExpected')}</TableHeader>
+                  <TableHeader>{t('rules.thStatus')}</TableHeader>
                 </TableRow>
               </TableHead>
               <TableBody>
@@ -578,7 +593,7 @@ export default function Rules() {
                     <TableCell>{r.actual_exit || '—'}</TableCell>
                     <TableCell>{r.expected_exit}</TableCell>
                     <TableCell>
-                      <Badge color={r.pass ? 'lime' : 'red'}>{r.pass ? 'pass' : r.failure_reason ?? 'fail'}</Badge>
+                      <Badge color={r.pass ? 'lime' : 'red'}>{r.pass ? t('rules.pass') : r.failure_reason ?? t('rules.fail')}</Badge>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -589,38 +604,35 @@ export default function Rules() {
       )}
 
       <Dialog open={importOpen} onClose={() => setImportOpen(false)} size="2xl">
-        <DialogTitle>Import ruleset</DialogTitle>
+        <DialogTitle>{t('rules.importRulesetTitle')}</DialogTitle>
         <DialogDescription>
-          Fetch a Clash/mihomo-style rule list (one <code>KIND,VALUE,POLICY</code> line per rule)
-          from a URL, or paste one below. All non-<code>direct</code>/<code>block</code> policies
-          are rewritten to the action you choose so imported rules point at a real exit.
-          Nothing is applied — the imported rules land as draft entries you can dry-run
-          and Apply.
+          <Trans
+            i18nKey="rules.importDescription"
+            components={{ code: <code /> }}
+          />
         </DialogDescription>
         <DialogBody>
           <div className="mb-4 flex gap-2">
             {importMode === 'url'
-              ? <Button color="zinc" onClick={() => setImportMode('url')}>URL</Button>
-              : <Button plain onClick={() => setImportMode('url')}>URL</Button>}
+              ? <Button color="zinc" onClick={() => setImportMode('url')}>{t('rules.importUrlTab')}</Button>
+              : <Button plain onClick={() => setImportMode('url')}>{t('rules.importUrlTab')}</Button>}
             {importMode === 'text'
-              ? <Button color="zinc" onClick={() => setImportMode('text')}>Paste</Button>
-              : <Button plain onClick={() => setImportMode('text')}>Paste</Button>}
+              ? <Button color="zinc" onClick={() => setImportMode('text')}>{t('rules.importPasteTab')}</Button>
+              : <Button plain onClick={() => setImportMode('text')}>{t('rules.importPasteTab')}</Button>}
           </div>
 
           {importMode === 'url' ? (
             <Fieldset>
               <FieldGroup>
                 <Field>
-                  <Label>Ruleset URL</Label>
+                  <Label>{t('rules.importUrlLabel')}</Label>
                   <Input
                     value={importUrl}
                     onChange={(e) => setImportUrl(e.target.value)}
                     placeholder="https://example.com/proxy.txt"
                   />
                   <p className="mt-1 text-xs text-zinc-500">
-                    Community-common sources (not endorsed, not preloaded):
-                    Loyalsoldier/clash-rules, ACL4SSR, MetaCubeX/meta-rules-dat.
-                    Verify the source before importing.
+                    {t('rules.importUrlHelp')}
                   </p>
                 </Field>
               </FieldGroup>
@@ -629,7 +641,7 @@ export default function Rules() {
             <Fieldset>
               <FieldGroup>
                 <Field>
-                  <Label>Paste ruleset</Label>
+                  <Label>{t('rules.importPasteLabel')}</Label>
                   <Textarea
                     rows={10}
                     value={importText}
@@ -646,14 +658,14 @@ export default function Rules() {
               <FieldGroup>
                 <Field>
                   <Label>
-                    Rewrite non-terminal policies to:{' '}
+                    {t('rules.rewritePoliciesLabel')}{' '}
                     <span className="text-zinc-500 text-xs">
-                      (direct / block are kept as-is)
+                      {t('rules.rewritePoliciesHint')}
                     </span>
                   </Label>
                   <Select value={importAction} onChange={(e) => setImportAction(e.target.value)}>
                     {!actionOptions.includes(importAction) && (
-                      <option value={importAction}>{importAction} (unknown — dry-run will flag)</option>
+                      <option value={importAction}>{t('rules.unknownDryRunWillFlag', { action: importAction })}</option>
                     )}
                     {actionOptions.map((a) => <option key={a} value={a}>{a}</option>)}
                   </Select>
@@ -670,39 +682,41 @@ export default function Rules() {
 
           {importPreview && (
             <div className="mt-4 rounded-xl border border-emerald-400/40 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-800 dark:text-emerald-200">
-              <div className="font-semibold">Preview</div>
+              <div className="font-semibold">{t('rules.previewLabel')}</div>
               <div className="mt-1">
-                {importPreview.rules.length} rule{importPreview.rules.length === 1 ? '' : 's'} ready to merge
+                {t('rules.previewRulesReady', { count: importPreview.rules.length })}
                 {' · '}
-                {importPreview.dropped} dropped
+                {t('rules.previewDropped', { count: importPreview.dropped })}
                 {importPreview.categories.length > 0 && (
-                  <> · categories: {importPreview.categories.slice(0, 5).join(', ')}
-                    {importPreview.categories.length > 5 ? '…' : ''}</>
+                  <> · {t('rules.previewCategories', {
+                    list: importPreview.categories.slice(0, 5).join(', ')
+                      + (importPreview.categories.length > 5 ? '…' : ''),
+                  })}</>
                 )}
               </div>
               {importPreview.source_url && (
-                <div className="mt-1 text-xs opacity-75">source: {importPreview.source_url}</div>
+                <div className="mt-1 text-xs opacity-75">{t('rules.previewSource', { url: importPreview.source_url })}</div>
               )}
             </div>
           )}
         </DialogBody>
         <DialogActions>
           <Button plain onClick={() => { setImportOpen(false); setImportPreview(null); setImportError(null); }}>
-            Cancel
+            {t('common.cancel')}
           </Button>
           {!importPreview && (
             <Button color="zinc" onClick={runImportPreview}
                     disabled={importBusy
                               || (importMode === 'url' && !importUrl.trim())
                               || (importMode === 'text' && !importText.trim())}>
-              {importBusy ? 'Fetching…' : 'Preview'}
+              {importBusy ? t('rules.fetching') : t('rules.preview')}
             </Button>
           )}
           {importPreview && (
             <>
-              <Button plain onClick={() => setImportPreview(null)}>Back</Button>
+              <Button plain onClick={() => setImportPreview(null)}>{t('rules.back')}</Button>
               <Button color="indigo" onClick={confirmImport} disabled={importPreview.rules.length === 0}>
-                Merge {importPreview.rules.length} rule{importPreview.rules.length === 1 ? '' : 's'}
+                {t('rules.mergeRules', { count: importPreview.rules.length })}
               </Button>
             </>
           )}

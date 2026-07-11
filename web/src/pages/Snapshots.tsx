@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import AppShell from '../layouts/AppShell';
 import { Heading } from '../components/ui/heading';
 import { Text } from '../components/ui/text';
@@ -10,6 +11,7 @@ import { api } from '../api/client';
 import type { Snapshot, SnapshotsResponse } from '../api/client';
 
 export default function Snapshots() {
+  const { t } = useTranslation();
   const [snaps, setSnaps] = useState<Snapshot[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState<number | null>(null);
@@ -27,11 +29,11 @@ export default function Snapshots() {
   useEffect(() => { refresh(); }, []);
 
   async function rollback(id: number, hash: string) {
-    if (!confirm(`Roll back to snapshot #${id} (${hash.slice(0, 12)}…)?`)) return;
+    if (!confirm(t('snapshots.rollbackConfirm', { id, hash: hash.slice(0, 12) }))) return;
     setErr(null); setBusy(id); setOk(null);
     try {
       await api.post(`/api/v1/snapshots/${id}/rollback`);
-      setOk(`Rolled back to snapshot #${id}`);
+      setOk(t('snapshots.rollbackSuccess', { id }));
       await refresh();
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -43,14 +45,14 @@ export default function Snapshots() {
   return (
     <AppShell>
       <div className="mb-6">
-        <Heading>Snapshots</Heading>
-        <Text className="mt-1">Every apply writes an immutable snapshot · rollback restores the paired rule_version as active.</Text>
+        <Heading>{t('snapshots.heading')}</Heading>
+        <Text className="mt-1">{t('snapshots.subheading')}</Text>
       </div>
 
       {err && (
         <div className="mb-4">
           <Alert open onClose={() => setErr(null)}>
-            <AlertTitle>Something went wrong</AlertTitle>
+            <AlertTitle>{t('snapshots.errorTitle')}</AlertTitle>
             <AlertBody>{err}</AlertBody>
           </Alert>
         </div>
@@ -58,7 +60,7 @@ export default function Snapshots() {
       {ok && (
         <div className="mb-4">
           <Alert open onClose={() => setOk(null)}>
-            <AlertTitle>Rollback complete</AlertTitle>
+            <AlertTitle>{t('snapshots.rollbackCompleteTitle')}</AlertTitle>
             <AlertBody>{ok}</AlertBody>
           </Alert>
         </div>
@@ -69,17 +71,17 @@ export default function Snapshots() {
           <TableHead>
             <TableRow>
               <TableHeader>#</TableHeader>
-              <TableHeader>Created</TableHeader>
-              <TableHeader>Hash</TableHeader>
-              <TableHeader>Note</TableHeader>
-              <TableHeader className="text-right">Actions</TableHeader>
+              <TableHeader>{t('snapshots.columnCreated')}</TableHeader>
+              <TableHeader>{t('snapshots.columnHash')}</TableHeader>
+              <TableHeader>{t('snapshots.columnNote')}</TableHeader>
+              <TableHeader className="text-right">{t('snapshots.columnActions')}</TableHeader>
             </TableRow>
           </TableHead>
           <TableBody>
             {snaps.length === 0 && (
               <TableRow>
                 <TableCell colSpan={5}>
-                  <Text>No snapshots yet — apply a ruleset from the Rules page to generate one.</Text>
+                  <Text>{t('snapshots.emptyState')}</Text>
                 </TableCell>
               </TableRow>
             )}
@@ -91,8 +93,8 @@ export default function Snapshots() {
                 <TableCell>{s.note || '—'}</TableCell>
                 <TableCell className="flex justify-end gap-2">
                   {i === 0
-                    ? <Badge color="lime">current</Badge>
-                    : <Button plain disabled={busy === s.id} onClick={() => rollback(s.id, s.config_hash)}>Roll back</Button>}
+                    ? <Badge color="lime">{t('snapshots.currentBadge')}</Badge>
+                    : <Button plain disabled={busy === s.id} onClick={() => rollback(s.id, s.config_hash)}>{t('snapshots.rollbackAction')}</Button>}
                 </TableCell>
               </TableRow>
             ))}

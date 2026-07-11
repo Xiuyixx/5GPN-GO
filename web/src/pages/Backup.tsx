@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import AppShell from '../layouts/AppShell';
 import { Heading } from '../components/ui/heading';
 import { Text } from '../components/ui/text';
@@ -19,12 +20,12 @@ function healthColor(health: string): 'lime' | 'amber' | 'red' | 'zinc' {
   }
 }
 
-function healthLabel(health: string): string {
+function healthLabel(health: string, t: (key: string) => string): string {
   switch (health) {
-    case 'confirmed': return '已确认';
-    case 'observing': return '健康观察中';
-    case 'rolled_back': return '已回滚';
-    default: return health || '未知';
+    case 'confirmed': return t('backup.healthConfirmed');
+    case 'observing': return t('backup.healthObserving');
+    case 'rolled_back': return t('backup.healthRolledBack');
+    default: return health || t('backup.healthUnknown');
   }
 }
 
@@ -56,6 +57,7 @@ async function countRulesInFile(file: File): Promise<number | null> {
 }
 
 export default function Backup() {
+  const { t } = useTranslation();
   const token = useAuthStore((s) => s.token);
   const [err, setErr] = useState<string | null>(null);
   const [importResult, setImportResult] = useState<BackupImportResult | null>(null);
@@ -148,14 +150,14 @@ export default function Backup() {
   return (
     <AppShell>
       <div className="mb-6">
-        <Heading>Backup</Heading>
-        <Text className="mt-1">Export a tar.gz of the active rule set plus snapshot metadata · import applies the bundle to the data plane after dry-run and health checks.</Text>
+        <Heading>{t('backup.heading')}</Heading>
+        <Text className="mt-1">{t('backup.subheading')}</Text>
       </div>
 
       {err && (
         <div className="mb-4">
           <Alert open onClose={() => setErr(null)}>
-            <AlertTitle>Something went wrong</AlertTitle>
+            <AlertTitle>{t('backup.errorTitle')}</AlertTitle>
             <AlertBody>{err}</AlertBody>
           </Alert>
         </div>
@@ -163,21 +165,21 @@ export default function Backup() {
       {importResult && (
         <div className="mb-4">
           <Alert open onClose={() => setImportResult(null)}>
-            <AlertTitle>Import summary</AlertTitle>
+            <AlertTitle>{t('backup.importSummaryTitle')}</AlertTitle>
             <AlertBody>
-              <div>{importResult.entries} entries · {importResult.total_bytes} bytes</div>
+              <div>{t('backup.entriesBytes', { entries: importResult.entries, bytes: importResult.total_bytes })}</div>
               {importResult.applied_snapshot_id !== undefined && (
-                <div className="mt-1">Snapshot #{importResult.applied_snapshot_id}</div>
+                <div className="mt-1">{t('backup.snapshotId', { id: importResult.applied_snapshot_id })}</div>
               )}
               {applyResult && (
                 <div className="mt-2 flex items-center gap-2">
-                  <span>Apply state:</span>
-                  <Badge color={healthColor(applyResult.health)}>{healthLabel(applyResult.health)}</Badge>
-                  {applyResult.rolled_back && <Badge color="red">rolled back</Badge>}
+                  <span>{t('backup.applyState')}</span>
+                  <Badge color={healthColor(applyResult.health)}>{healthLabel(applyResult.health, t)}</Badge>
+                  {applyResult.rolled_back && <Badge color="red">{t('backup.rolledBackBadge')}</Badge>}
                 </div>
               )}
               {applyResult?.reason && (
-                <div className="mt-1 text-sm text-red-700 dark:text-red-400">Reason: {applyResult.reason}</div>
+                <div className="mt-1 text-sm text-red-700 dark:text-red-400">{t('backup.reason', { reason: applyResult.reason })}</div>
               )}
               {importResult.note ? <div className="mt-1 text-sm">{importResult.note}</div> : null}
             </AlertBody>
@@ -193,10 +195,10 @@ export default function Backup() {
             style={{ background: 'radial-gradient(60% 100% at 30% 0%, rgb(99 102 241 / 0.35), transparent 70%)' }}
           />
           <div className="relative">
-            <Heading level={3}>Export</Heading>
-            <Text className="mt-2">Contains rules/active.yaml, snapshots/manifest.json, and a README.</Text>
+            <Heading level={3}>{t('backup.exportHeading')}</Heading>
+            <Text className="mt-2">{t('backup.exportDescription')}</Text>
             <div className="mt-4">
-              <Button color="indigo" onClick={downloadExport}>Download tar.gz</Button>
+              <Button color="indigo" onClick={downloadExport}>{t('backup.downloadTarGz')}</Button>
             </div>
           </div>
         </div>
@@ -207,8 +209,8 @@ export default function Backup() {
             style={{ background: 'radial-gradient(60% 100% at 30% 0%, rgb(20 184 166 / 0.35), transparent 70%)' }}
           />
           <div className="relative">
-            <Heading level={3}>Import</Heading>
-            <Text className="mt-2">Uploads apply the bundled rules immediately. A confirmation dialog previews the change before anything runs.</Text>
+            <Heading level={3}>{t('backup.importHeading')}</Heading>
+            <Text className="mt-2">{t('backup.importDescription')}</Text>
             <div className="mt-4">
               <input
                 ref={fileRef}
@@ -221,34 +223,34 @@ export default function Backup() {
                 }}
                 disabled={importing}
               />
-              {importing && <Text className="mt-2">Applying…</Text>}
+              {importing && <Text className="mt-2">{t('backup.applying')}</Text>}
             </div>
           </div>
         </div>
       </div>
 
       <Dialog open={pending !== null} onClose={cancelImport} size="md">
-        <DialogTitle>确认导入备份</DialogTitle>
+        <DialogTitle>{t('backup.confirmDialogTitle')}</DialogTitle>
         <DialogDescription>
-          导入将立即应用该规则集到数据面（经 dry-run/健康检查，失败自动回滚）。
+          {t('backup.confirmDialogDescription')}
         </DialogDescription>
         <DialogBody>
           <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-sm">
-            <dt className="text-zinc-500">File</dt>
+            <dt className="text-zinc-500">{t('backup.fileLabel')}</dt>
             <dd className="font-medium">{pending?.file.name}</dd>
-            <dt className="text-zinc-500">Size</dt>
-            <dd>{pending ? `${pending.file.size} bytes` : ''}</dd>
-            <dt className="text-zinc-500">Current active rules</dt>
-            <dd>{currentCount !== null ? `${currentCount} rules` : 'unknown'}</dd>
-            <dt className="text-zinc-500">Incoming rules</dt>
+            <dt className="text-zinc-500">{t('backup.sizeLabel')}</dt>
+            <dd>{pending ? t('backup.sizeBytes', { size: pending.file.size }) : ''}</dd>
+            <dt className="text-zinc-500">{t('backup.currentActiveRules')}</dt>
+            <dd>{currentCount !== null ? t('backup.rulesCount', { count: currentCount }) : t('backup.unknown')}</dd>
+            <dt className="text-zinc-500">{t('backup.incomingRules')}</dt>
             <dd>
               {pending?.targetCount !== null && pending?.targetCount !== undefined
-                ? `${pending.targetCount} rules`
-                : 'unable to preview (non-standard tarball layout)'}
+                ? t('backup.rulesCount', { count: pending.targetCount })
+                : t('backup.unableToPreview')}
             </dd>
             {currentCount !== null && pending?.targetCount !== null && pending?.targetCount !== undefined && (
               <>
-                <dt className="text-zinc-500">Diff</dt>
+                <dt className="text-zinc-500">{t('backup.diffLabel')}</dt>
                 <dd className="font-mono">
                   {currentCount} → {pending.targetCount}
                   {' '}
@@ -262,8 +264,8 @@ export default function Backup() {
           </dl>
         </DialogBody>
         <DialogActions>
-          <Button plain onClick={cancelImport}>取消</Button>
-          <Button color="indigo" onClick={confirmImport}>确认导入并应用</Button>
+          <Button plain onClick={cancelImport}>{t('common.cancel')}</Button>
+          <Button color="indigo" onClick={confirmImport}>{t('backup.confirmImportApply')}</Button>
         </DialogActions>
       </Dialog>
     </AppShell>

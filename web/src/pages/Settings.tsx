@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router';
+import { useTranslation } from 'react-i18next';
 import { QRCodeSVG } from 'qrcode.react';
 import AppShell from '../layouts/AppShell';
 import { Heading, Subheading } from '../components/ui/heading';
@@ -64,6 +65,7 @@ function Section({
 }
 
 function UpgradeSection() {
+  const { t } = useTranslation();
   const [check, setCheck] = useState<UpdateCheck | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
@@ -106,19 +108,19 @@ function UpgradeSection() {
     setErr(null);
     setSuccess(null);
     setApplying(true);
-    setBanner('升级中，服务将重启，请稍候…');
+    setBanner(t('settings.upgradeInProgress'));
     try {
       await api.post('/api/v1/update/apply');
       // Server responded before restart — attempt one health probe to refresh.
       const ok = await pollHealth(check.latest);
       if (ok) {
-        setSuccess(`已升级到 ${check.latest}`);
+        setSuccess(t('settings.upgradedTo', { version: check.latest }));
         try {
           const c = await api.get<UpdateCheck>('/api/v1/update/check');
           setCheck(c);
         } catch { /* ignore */ }
       } else {
-        setSuccess('升级请求已提交，请手动刷新页面确认版本。');
+        setSuccess(t('settings.upgradeSubmittedRefresh'));
       }
     } catch (e) {
       // Connection drop during restart is expected → poll health.
@@ -128,13 +130,13 @@ function UpgradeSection() {
       if (isNetErr) {
         const ok = await pollHealth(check.latest);
         if (ok) {
-          setSuccess(`已升级到 ${check.latest}`);
+          setSuccess(t('settings.upgradedTo', { version: check.latest }));
           try {
             const c = await api.get<UpdateCheck>('/api/v1/update/check');
             setCheck(c);
           } catch { /* ignore */ }
         } else {
-          setErr('60 秒内未检测到服务恢复，请手动检查后端状态。');
+          setErr(t('settings.upgradeTimeout'));
         }
       } else {
         setErr(e instanceof Error ? e.message : String(e));
@@ -148,14 +150,14 @@ function UpgradeSection() {
   return (
     <Section
       tint="rgb(99 102 241 / 0.35)"
-      title="升级"
-      description="检查并应用最新版本。升级期间服务将重启，页面会短暂断开。"
+      title={t('settings.upgradeTitle')}
+      description={t('settings.upgradeDescription')}
     >
-      {loading && <Text>正在检查版本…</Text>}
+      {loading && <Text>{t('settings.checkingVersion')}</Text>}
       {err && (
         <div className="mb-3">
           <Alert open onClose={() => setErr(null)}>
-            <AlertTitle>操作失败</AlertTitle>
+            <AlertTitle>{t('settings.operationFailed')}</AlertTitle>
             <AlertBody>{err}</AlertBody>
           </Alert>
         </div>
@@ -163,7 +165,7 @@ function UpgradeSection() {
       {success && (
         <div className="mb-3">
           <Alert open onClose={() => setSuccess(null)}>
-            <AlertTitle>升级完成</AlertTitle>
+            <AlertTitle>{t('settings.upgradeComplete')}</AlertTitle>
             <AlertBody>{success}</AlertBody>
           </Alert>
         </div>
@@ -176,13 +178,13 @@ function UpgradeSection() {
       {check && (
         <>
           <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-sm">
-            <dt className="text-zinc-500">当前版本</dt>
-            <dd className="font-mono">{check.current || '未知'}</dd>
-            <dt className="text-zinc-500">最新版本</dt>
+            <dt className="text-zinc-500">{t('settings.currentVersion')}</dt>
+            <dd className="font-mono">{check.current || t('settings.unknown')}</dd>
+            <dt className="text-zinc-500">{t('settings.latestVersion')}</dt>
             <dd className="font-mono">
-              {check.latest || '未知'}
-              {check.has_update && <Badge color="amber" className="ml-2">有更新</Badge>}
-              {!check.has_update && <Badge color="lime" className="ml-2">已是最新</Badge>}
+              {check.latest || t('settings.unknown')}
+              {check.has_update && <Badge color="amber" className="ml-2">{t('settings.updateAvailable')}</Badge>}
+              {!check.has_update && <Badge color="lime" className="ml-2">{t('settings.upToDate')}</Badge>}
             </dd>
           </dl>
           <div className="mt-4 flex items-center gap-3">
@@ -191,9 +193,9 @@ function UpgradeSection() {
               onClick={apply}
               disabled={!check.has_update || applying}
             >
-              {applying ? '升级中…' : '一键升级'}
+              {applying ? t('settings.upgrading') : t('settings.oneClickUpgrade')}
             </Button>
-            {!check.has_update && <Text>已是最新版本</Text>}
+            {!check.has_update && <Text>{t('settings.alreadyLatest')}</Text>}
           </div>
         </>
       )}
@@ -202,6 +204,7 @@ function UpgradeSection() {
 }
 
 function TgbotSection() {
+  const { t } = useTranslation();
   const [status, setStatus] = useState<TgbotStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
@@ -243,12 +246,12 @@ function TgbotSection() {
         ? { token: '', admin_chat_ids: [] as number[] }
         : { token: token.trim(), admin_chat_ids: parseAdmins(adminIds) };
       if (action === 'enable') {
-        if (!body.token) throw new Error('Token is required');
-        if (body.admin_chat_ids.length === 0) throw new Error('at least one admin chat id required');
+        if (!body.token) throw new Error(t('settings.tokenRequired'));
+        if (body.admin_chat_ids.length === 0) throw new Error(t('settings.adminRequired'));
       }
       const s = await api.post<TgbotStatus>('/api/v1/settings/tgbot', body);
       setStatus(s);
-      setSavedMsg(action === 'disable' ? 'Bot stopped.' : 'Bot restarted with new credentials.');
+      setSavedMsg(action === 'disable' ? t('settings.botStopped') : t('settings.botRestarted'));
       if (action === 'disable') { setToken(''); setAdminIds(''); }
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -260,25 +263,25 @@ function TgbotSection() {
   return (
     <Section
       tint="rgb(20 184 166 / 0.35)"
-      title="TG Bot"
-      description="Telegram 通知机器人。改动立刻生效,无需重启进程。"
+      title={t('settings.tgbotTitle')}
+      description={t('settings.tgbotDescription')}
     >
-      {loading && <Text>加载中…</Text>}
+      {loading && <Text>{t('common.loading')}</Text>}
 
       {!loading && (
         <>
           <dl className="mb-4 grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-sm">
-            <dt className="text-zinc-500">当前状态</dt>
+            <dt className="text-zinc-500">{t('settings.currentStatus')}</dt>
             <dd>
               {status?.enabled
-                ? <Badge color="lime">运行中</Badge>
-                : <Badge color="zinc">未启用</Badge>}
+                ? <Badge color="lime">{t('settings.statusRunning')}</Badge>
+                : <Badge color="zinc">{t('settings.statusDisabled')}</Badge>}
             </dd>
-            <dt className="text-zinc-500">管理员数量</dt>
+            <dt className="text-zinc-500">{t('settings.adminCount')}</dt>
             <dd className="font-mono">{status?.admin_count ?? 0}</dd>
             {status?.token_masked && (
               <>
-                <dt className="text-zinc-500">Token</dt>
+                <dt className="text-zinc-500">{t('settings.tokenLabel')}</dt>
                 <dd className="font-mono">{status.token_masked}</dd>
               </>
             )}
@@ -287,24 +290,24 @@ function TgbotSection() {
           <div className="space-y-3">
             <div>
               <label className="text-xs font-medium uppercase tracking-wide text-zinc-500">
-                Bot Token
+                {t('settings.botTokenLabel')}
               </label>
               <input
                 type="password"
                 className="mt-1 block w-full rounded-lg border border-zinc-300 bg-white/70 px-3 py-2 text-sm shadow-sm outline-none focus:ring-2 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-900/60"
                 value={token}
                 onChange={(e) => setToken(e.target.value)}
-                placeholder={status?.token_masked ? `current ${status.token_masked}` : '123456:AA...'}
+                placeholder={status?.token_masked ? t('settings.currentPlaceholder', { value: status.token_masked }) : '123456:AA...'}
                 autoComplete="off"
               />
               <p className="mt-1 text-xs text-zinc-500">
-                从 BotFather 获取。留空 = 停用 bot。
+                {t('settings.botTokenHelp')}
               </p>
             </div>
 
             <div>
               <label className="text-xs font-medium uppercase tracking-wide text-zinc-500">
-                管理员 Chat IDs
+                {t('settings.adminChatIdsLabel')}
               </label>
               <input
                 type="text"
@@ -314,7 +317,7 @@ function TgbotSection() {
                 placeholder="123456789 987654321"
               />
               <p className="mt-1 text-xs text-zinc-500">
-                空格或逗号分隔。发送 <span className="font-mono">/id</span> 给 bot 可以获取自己的 chat_id。
+                {t('settings.adminChatIdsHelpPrefix')}<span className="font-mono">/id</span>{t('settings.adminChatIdsHelpSuffix')}
               </p>
             </div>
 
@@ -331,14 +334,14 @@ function TgbotSection() {
 
             <div className="flex gap-2 pt-1">
               <Button color="indigo" onClick={() => save('enable')} disabled={saving}>
-                {saving ? '保存中…' : (status?.enabled ? '重启 Bot' : '启动 Bot')}
+                {saving ? t('settings.saving') : (status?.enabled ? t('settings.restartBot') : t('settings.startBot'))}
               </Button>
               {status?.enabled && (
                 <Button plain onClick={() => save('disable')} disabled={saving}>
-                  停用
+                  {t('settings.disable')}
                 </Button>
               )}
-              <Button plain onClick={refresh} disabled={saving}>刷新</Button>
+              <Button plain onClick={refresh} disabled={saving}>{t('settings.refresh')}</Button>
             </div>
           </div>
         </>
@@ -348,6 +351,7 @@ function TgbotSection() {
 }
 
 function IOSSection() {
+  const { t } = useTranslation();
   const [profile, setProfile] = useState<IOSProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
@@ -388,14 +392,14 @@ function IOSSection() {
   return (
     <Section
       tint="rgb(168 85 247 / 0.35)"
-      title="iOS 描述文件"
-      description="扫描二维码或复制链接到 Safari 打开以安装配置。"
+      title={t('settings.iosTitle')}
+      description={t('settings.iosDescription')}
     >
-      {loading && <Text>加载中…</Text>}
+      {loading && <Text>{t('common.loading')}</Text>}
       {err && (
         <div className="mb-3">
           <Alert open onClose={() => setErr(null)}>
-            <AlertTitle>无法获取配置链接</AlertTitle>
+            <AlertTitle>{t('settings.iosProfileError')}</AlertTitle>
             <AlertBody>{err}</AlertBody>
           </Alert>
         </div>
@@ -410,13 +414,13 @@ function IOSSection() {
               {profile.url}
             </div>
             <div className="flex flex-wrap gap-2">
-              <Button color="indigo" onClick={copy}>{copied ? '已复制' : '复制链接'}</Button>
-              <Button href={downloadHref(profile.url)} color="zinc">下载 .mobileconfig</Button>
+              <Button color="indigo" onClick={copy}>{copied ? t('settings.copied') : t('settings.copyLink')}</Button>
+              <Button href={downloadHref(profile.url)} color="zinc">{t('settings.downloadProfile')}</Button>
             </div>
             {profile.uuid && (
               <div className="text-xs text-zinc-500">
                 UUID <span className="font-mono">{profile.uuid}</span>
-                {profile.port ? <> · Port <span className="font-mono">{profile.port}</span></> : null}
+                {profile.port ? <> · {t('settings.port')} <span className="font-mono">{profile.port}</span></> : null}
               </div>
             )}
           </div>
@@ -424,7 +428,7 @@ function IOSSection() {
       )}
       {!loading && !profile?.url && !err && (
         <div className="text-sm text-zinc-500">
-          后端未返回配置链接。扫描请手动输入或使用系统二维码工具。
+          {t('settings.iosNoProfile')}
         </div>
       )}
     </Section>
@@ -432,6 +436,7 @@ function IOSSection() {
 }
 
 function PasswordSection() {
+  const { t } = useTranslation();
   const nav = useNavigate();
   const clearAuth = useAuthStore((s) => s.clear);
   const clearMe = useMeStore((s) => s.clear);
@@ -444,9 +449,9 @@ function PasswordSection() {
 
   function validate(): boolean {
     const fe: { next?: string; confirm?: string; current?: string } = {};
-    if (next.length < 8) fe.next = '新密码至少 8 位';
-    if (next !== confirm) fe.confirm = '两次输入的新密码不一致';
-    if (current && next && current === next) fe.next = '新密码不能与当前密码相同';
+    if (next.length < 8) fe.next = t('settings.newPasswordTooShort');
+    if (next !== confirm) fe.confirm = t('settings.passwordMismatch');
+    if (current && next && current === next) fe.next = t('settings.newPasswordSameAsCurrent');
     setFieldErr(fe);
     return Object.keys(fe).length === 0;
   }
@@ -463,8 +468,8 @@ function PasswordSection() {
       nav('/login', { replace: true });
     } catch (e) {
       if (e instanceof APIError) {
-        if (e.status === 401) setErr('当前密码错误');
-        else setErr(e.message || '修改失败');
+        if (e.status === 401) setErr(t('settings.currentPasswordIncorrect'));
+        else setErr(e.message || t('settings.changePasswordFailed'));
       } else {
         setErr(e instanceof Error ? e.message : String(e));
       }
@@ -476,20 +481,20 @@ function PasswordSection() {
   return (
     <Section
       tint="rgb(239 68 68 / 0.30)"
-      title="修改密码"
-      description="修改成功后当前会话将被清除，需重新登录。"
+      title={t('settings.changePassword')}
+      description={t('settings.changePasswordDescription')}
     >
       {err && (
         <div className="mb-3">
           <Alert open onClose={() => setErr(null)}>
-            <AlertTitle>修改失败</AlertTitle>
+            <AlertTitle>{t('settings.changePasswordFailed')}</AlertTitle>
             <AlertBody>{err}</AlertBody>
           </Alert>
         </div>
       )}
       <form onSubmit={submit} className="space-y-5">
         <Field>
-          <Label>当前密码</Label>
+          <Label>{t('settings.currentPasswordLabel')}</Label>
           <Input
             type="password"
             value={current}
@@ -500,7 +505,7 @@ function PasswordSection() {
           {fieldErr.current && <ErrorMessage>{fieldErr.current}</ErrorMessage>}
         </Field>
         <Field>
-          <Label>新密码</Label>
+          <Label>{t('settings.newPasswordLabel')}</Label>
           <Input
             type="password"
             value={next}
@@ -511,7 +516,7 @@ function PasswordSection() {
           {fieldErr.next && <ErrorMessage>{fieldErr.next}</ErrorMessage>}
         </Field>
         <Field>
-          <Label>确认新密码</Label>
+          <Label>{t('settings.confirmPasswordLabel')}</Label>
           <Input
             type="password"
             value={confirm}
@@ -523,7 +528,7 @@ function PasswordSection() {
         </Field>
         <div>
           <Button type="submit" color="indigo" disabled={submitting}>
-            {submitting ? '提交中…' : '修改密码'}
+            {submitting ? t('settings.submitting') : t('settings.changePassword')}
           </Button>
         </div>
       </form>
@@ -532,11 +537,12 @@ function PasswordSection() {
 }
 
 export default function Settings() {
+  const { t } = useTranslation();
   return (
     <AppShell>
       <div className="mb-6">
-        <Heading>Settings</Heading>
-        <Text className="mt-1">系统升级、Telegram 通知、iOS 描述文件、账户密码。</Text>
+        <Heading>{t('nav.settings')}</Heading>
+        <Text className="mt-1">{t('settings.subtitle')}</Text>
       </div>
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <UpgradeSection />

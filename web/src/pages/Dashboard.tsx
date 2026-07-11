@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import AppShell from '../layouts/AppShell';
 import { Heading } from '../components/ui/heading';
 import { Text } from '../components/ui/text';
@@ -39,6 +40,7 @@ const TILE_ACCENTS = [
 ];
 
 export default function Dashboard() {
+  const { t } = useTranslation();
   const [samples, setSamples] = useState<MetricsSample[]>([]);
   const [exits, setExits] = useState<ExitsResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -67,51 +69,51 @@ export default function Dashboard() {
   return (
     <AppShell>
       <div className="mb-6">
-        <Heading>Dashboard</Heading>
-        <Text className="mt-1">Live metrics · updates every 5 seconds.</Text>
-        {err && <Text className="mt-2 text-red-600">Error: {err}</Text>}
+        <Heading>{t('nav.dashboard')}</Heading>
+        <Text className="mt-1">{t('dashboard.subtitle')}</Text>
+        {err && <Text className="mt-2 text-red-600">{t('dashboard.errorLabel', { message: err })}</Text>}
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Tile
-          title="Active exit"
+          title={t('dashboard.activeExitTitle')}
           value={exits?.active ?? '—'}
-          hint={exits ? `${exits.exits.length} exits configured` : ''}
+          hint={exits ? t('dashboard.exitsConfigured', { count: exits.exits.length }) : ''}
           accent={TILE_ACCENTS[0]}
         />
         <Tile
-          title="Connections"
+          title={t('dashboard.connectionsTitle')}
           value={latest ? String(latest.conns) : '—'}
-          hint="live count"
+          hint={t('dashboard.liveCount')}
           accent={TILE_ACCENTS[1]}
         />
         <Tile
-          title="CPU"
+          title={t('dashboard.cpu')}
           value={latest ? `${latest.cpu.toFixed(1)}%` : '—'}
-          hint="5s window"
+          hint={t('dashboard.cpuWindow')}
           accent={TILE_ACCENTS[2]}
         />
         <Tile
-          title="Memory"
+          title={t('dashboard.memoryTitle')}
           value={latest ? fmtBytes(latest.mem_bytes) : '—'}
-          hint="resident set"
+          hint={t('dashboard.residentSet')}
           accent={TILE_ACCENTS[3]}
         />
       </div>
 
       <div className="mt-8 grid grid-cols-1 gap-4 lg:grid-cols-2">
         <div className="glass p-5">
-          <Heading level={3}>Recent samples</Heading>
+          <Heading level={3}>{t('dashboard.recentSamples')}</Heading>
           <Divider className="my-3" />
           <div className="max-h-72 overflow-auto text-sm">
             <table className="w-full text-left">
               <thead>
                 <tr className="text-zinc-500">
-                  <th className="py-2 font-medium">Time</th>
-                  <th className="py-2 font-medium">CPU</th>
-                  <th className="py-2 font-medium">Conns</th>
-                  <th className="py-2 font-medium">Tx</th>
-                  <th className="py-2 font-medium">Rx</th>
+                  <th className="py-2 font-medium">{t('dashboard.timeColumn')}</th>
+                  <th className="py-2 font-medium">{t('dashboard.cpu')}</th>
+                  <th className="py-2 font-medium">{t('dashboard.connsColumn')}</th>
+                  <th className="py-2 font-medium">{t('dashboard.txColumn')}</th>
+                  <th className="py-2 font-medium">{t('dashboard.rxColumn')}</th>
                 </tr>
               </thead>
               <tbody className="metric">
@@ -129,7 +131,7 @@ export default function Dashboard() {
           </div>
         </div>
         <div className="glass p-5">
-          <Heading level={3}>Exits</Heading>
+          <Heading level={3}>{t('nav.exits')}</Heading>
           <Divider className="my-3" />
           <ul className="space-y-2 text-sm">
             {exits?.exits.map((e) => (
@@ -138,8 +140,8 @@ export default function Dashboard() {
                   {e.id} <span className="ml-1 font-normal text-zinc-500">· {e.protocol}</span>
                 </span>
                 {e.active
-                  ? <Badge color="lime">active</Badge>
-                  : <Badge color="zinc">standby</Badge>}
+                  ? <Badge color="lime">{t('dashboard.badgeActive')}</Badge>
+                  : <Badge color="zinc">{t('dashboard.badgeStandby')}</Badge>}
               </li>
             ))}
           </ul>
