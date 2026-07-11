@@ -8,8 +8,10 @@ import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Select } from '../components/ui/select';
 import { Field, FieldGroup, Fieldset, Label, Legend } from '../components/ui/fieldset';
+import { Dialog, DialogActions, DialogBody, DialogDescription, DialogTitle } from '../components/ui/dialog';
+import { Textarea } from '../components/ui/textarea';
 import { api } from '../api/client';
-import type { ApplyResponse, DryRunResponse, ExitsResponse, Rule, RuleKind } from '../api/client';
+import type { ApplyResponse, DryRunResponse, ExitsResponse, ImportRulesResponse, Rule, RuleKind } from '../api/client';
 
 const KINDS: RuleKind[] = [
   'DOMAIN', 'DOMAIN-SUFFIX', 'DOMAIN-KEYWORD',
@@ -51,6 +53,17 @@ export default function Rules() {
   const [busy, setBusy] = useState<'idle' | 'dryrun' | 'apply'>('idle');
   const [note, setNote] = useState('');
   const [dryOk, setDryOk] = useState(false);
+
+  // Ruleset import dialog state. Keeps the operator in control: fetch or
+  // paste → preview counts → confirm merges rules into draft.
+  const [importOpen, setImportOpen] = useState(false);
+  const [importUrl, setImportUrl] = useState('');
+  const [importText, setImportText] = useState('');
+  const [importMode, setImportMode] = useState<'url' | 'text'>('url');
+  const [importAction, setImportAction] = useState('PROXY');
+  const [importBusy, setImportBusy] = useState(false);
+  const [importPreview, setImportPreview] = useState<ImportRulesResponse | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
 
   // Available action options: direct/block + every configured exit id.
   const actionOptions = useMemo(() => [...SPECIAL_ACTIONS, ...exits], [exits]);
@@ -188,6 +201,49 @@ export default function Rules() {
 
   const failedDetails = dry?.results.filter((r) => !r.pass) ?? [];
 
+  // Ruleset import: preview server-side, merge into draft on confirm.
+  async function runImportPreview() {
+    setImportBusy(true);
+    setImportError(null);
+    setImportPreview(null);
+    try {
+      const body: Record<string, unknown> = { action: importAction };
+      if (importMode === 'url') body.url = importUrl.trim();
+      else body.text = importText;
+      const res = await api.post<ImportRulesResponse>('/api/v1/rules/import', body);
+      setImportPreview(res);
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setImportBusy(false);
+    }
+  }
+
+  function confirmImport() {
+    if (!importPreview) return;
+    const existingIds = new Set(draft.map((r) => r.id));
+    let priorityBase = draft.length
+      ? Math.max(...draft.map((r) => r.priority))
+      : 0;
+    const merged: Draft[] = importPreview.rules.map((r) => {
+      // Ensure a unique id (avoid collision with the operator's manual rules).
+      let id = r.id;
+      let n = 2;
+      while (existingIds.has(id)) {
+        id = `${r.id}-${n++}`;
+      }
+      existingIds.add(id);
+      priorityBase += 10;
+      return { ...r, id, priority: priorityBase, _key: makeKey() };
+    });
+    setDraft((d) => [...d, ...merged]);
+    setImportOpen(false);
+    setImportPreview(null);
+    setImportUrl('');
+    setImportText('');
+    invalidate();
+  }
+
   return (
     <AppShell>
       <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
@@ -200,6 +256,7 @@ export default function Rules() {
         <div className="flex flex-wrap items-center gap-2">
           <Button plain onClick={refresh}>Reset</Button>
           <Button plain onClick={addRow}>+ Add rule</Button>
+          <Button plain onClick={() => setImportOpen(true)}>⤓ Import ruleset</Button>
           <Button color="zinc" onClick={runDryRun} disabled={busy !== 'idle'}>
             {busy === 'dryrun' ? 'Running…' : 'Dry-run'}
           </Button>
@@ -530,6 +587,127 @@ export default function Rules() {
           </div>
         </div>
       )}
+
+      <Dialog open={importOpen} onClose={() => setImportOpen(false)} size="2xl">
+        <DialogTitle>Import ruleset</DialogTitle>
+        <DialogDescription>
+          Fetch a Clash/mihomo-style rule list (one <code>KIND,VALUE,POLICY</code> line per rule)
+          from a URL, or paste one below. All non-<code>direct</code>/<code>block</code> policies
+          are rewritten to the action you choose so imported rules point at a real exit.
+          Nothing is applied — the imported rules land as draft entries you can dry-run
+          and Apply.
+        </DialogDescription>
+        <DialogBody>
+          <div className="mb-4 flex gap-2">
+            {importMode === 'url'
+              ? <Button color="zinc" onClick={() => setImportMode('url')}>URL</Button>
+              : <Button plain onClick={() => setImportMode('url')}>URL</Button>}
+            {importMode === 'text'
+              ? <Button color="zinc" onClick={() => setImportMode('text')}>Paste</Button>
+              : <Button plain onClick={() => setImportMode('text')}>Paste</Button>}
+          </div>
+
+          {importMode === 'url' ? (
+            <Fieldset>
+              <FieldGroup>
+                <Field>
+                  <Label>Ruleset URL</Label>
+                  <Input
+                    value={importUrl}
+                    onChange={(e) => setImportUrl(e.target.value)}
+                    placeholder="https://example.com/proxy.txt"
+                  />
+                  <p className="mt-1 text-xs text-zinc-500">
+                    Community-common sources (not endorsed, not preloaded):
+                    Loyalsoldier/clash-rules, ACL4SSR, MetaCubeX/meta-rules-dat.
+                    Verify the source before importing.
+                  </p>
+                </Field>
+              </FieldGroup>
+            </Fieldset>
+          ) : (
+            <Fieldset>
+              <FieldGroup>
+                <Field>
+                  <Label>Paste ruleset</Label>
+                  <Textarea
+                    rows={10}
+                    value={importText}
+                    onChange={(e) => setImportText(e.target.value)}
+                    placeholder="DOMAIN-SUFFIX,google.com,Proxy&#10;DOMAIN-KEYWORD,openai,Proxy&#10;IP-CIDR,10.0.0.0/8,DIRECT&#10;FINAL,Proxy"
+                  />
+                </Field>
+              </FieldGroup>
+            </Fieldset>
+          )}
+
+          <div className="mt-4">
+            <Fieldset>
+              <FieldGroup>
+                <Field>
+                  <Label>
+                    Rewrite non-terminal policies to:{' '}
+                    <span className="text-zinc-500 text-xs">
+                      (direct / block are kept as-is)
+                    </span>
+                  </Label>
+                  <Select value={importAction} onChange={(e) => setImportAction(e.target.value)}>
+                    {!actionOptions.includes(importAction) && (
+                      <option value={importAction}>{importAction} (unknown — dry-run will flag)</option>
+                    )}
+                    {actionOptions.map((a) => <option key={a} value={a}>{a}</option>)}
+                  </Select>
+                </Field>
+              </FieldGroup>
+            </Fieldset>
+          </div>
+
+          {importError && (
+            <div className="mt-4 rounded-lg border border-red-400/40 bg-red-500/10 px-3 py-2 text-sm text-red-800 dark:text-red-200">
+              {importError}
+            </div>
+          )}
+
+          {importPreview && (
+            <div className="mt-4 rounded-xl border border-emerald-400/40 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-800 dark:text-emerald-200">
+              <div className="font-semibold">Preview</div>
+              <div className="mt-1">
+                {importPreview.rules.length} rule{importPreview.rules.length === 1 ? '' : 's'} ready to merge
+                {' · '}
+                {importPreview.dropped} dropped
+                {importPreview.categories.length > 0 && (
+                  <> · categories: {importPreview.categories.slice(0, 5).join(', ')}
+                    {importPreview.categories.length > 5 ? '…' : ''}</>
+                )}
+              </div>
+              {importPreview.source_url && (
+                <div className="mt-1 text-xs opacity-75">source: {importPreview.source_url}</div>
+              )}
+            </div>
+          )}
+        </DialogBody>
+        <DialogActions>
+          <Button plain onClick={() => { setImportOpen(false); setImportPreview(null); setImportError(null); }}>
+            Cancel
+          </Button>
+          {!importPreview && (
+            <Button color="zinc" onClick={runImportPreview}
+                    disabled={importBusy
+                              || (importMode === 'url' && !importUrl.trim())
+                              || (importMode === 'text' && !importText.trim())}>
+              {importBusy ? 'Fetching…' : 'Preview'}
+            </Button>
+          )}
+          {importPreview && (
+            <>
+              <Button plain onClick={() => setImportPreview(null)}>Back</Button>
+              <Button color="indigo" onClick={confirmImport} disabled={importPreview.rules.length === 0}>
+                Merge {importPreview.rules.length} rule{importPreview.rules.length === 1 ? '' : 's'}
+              </Button>
+            </>
+          )}
+        </DialogActions>
+      </Dialog>
     </AppShell>
   );
 }

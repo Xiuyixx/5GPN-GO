@@ -42,15 +42,22 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 }
 
 func extractBearer(r *http.Request) string {
-	h := r.Header.Get("Authorization")
-	if h == "" {
-		return ""
+	if h := r.Header.Get("Authorization"); h != "" {
+		parts := strings.SplitN(h, " ", 2)
+		if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+			return strings.TrimSpace(parts[1])
+		}
 	}
-	parts := strings.SplitN(h, " ", 2)
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-		return ""
+	// SSE / EventSource fallback: browsers can't set custom headers on
+	// EventSource, so /api/v1/events/* accepts ?access_token=<jwt> as an
+	// alternative. Scoped to /events/ so the query-string surface stays
+	// narrow (JWTs in URLs can leak to server logs / referers).
+	if strings.HasPrefix(r.URL.Path, "/api/v1/events/") {
+		if t := r.URL.Query().Get("access_token"); t != "" {
+			return t
+		}
 	}
-	return strings.TrimSpace(parts[1])
+	return ""
 }
 
 // ipLimiter enforces the login rate limit + IP lockout.

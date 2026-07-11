@@ -74,6 +74,24 @@ export interface DryRunResult {
   failure_reason?: string;
 }
 export interface DryRunResponse { results: DryRunResult[]; passed: number; failed: number }
+
+export interface ImportRulesRequest {
+  url?: string;
+  text?: string;
+  action?: string;
+  id_prefix?: string;
+  starting_priority?: number;
+  keep_categories?: string[];
+  direct_categories?: string[];
+}
+export interface ImportRulesResponse {
+  rules: Rule[];
+  converted: number;
+  dropped: number;
+  categories: string[];
+  source_url?: string;
+  source_kind: 'url' | 'text';
+}
 export interface ApplyResponse {
   snapshot_id: number;
   rule_version_id: number;

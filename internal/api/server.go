@@ -18,6 +18,7 @@ import (
 	"github.com/Xiuyixx/5GPN-Go/internal/core"
 	xexit "github.com/Xiuyixx/5GPN-Go/internal/exit"
 	"github.com/Xiuyixx/5GPN-Go/internal/orchestrator"
+	"github.com/Xiuyixx/5GPN-Go/internal/tgbot"
 	"github.com/Xiuyixx/5GPN-Go/internal/updater"
 )
 
@@ -68,6 +69,7 @@ type Server struct {
 	Applier      *core.Applier
 	Store        xexit.Store
 	Updater      UpdaterConfig
+	TGBot        *tgbot.Manager
 }
 
 // Config bundles user-adjustable server knobs.
@@ -84,6 +86,7 @@ type Config struct {
 	Applier        *core.Applier
 	Store          xexit.Store
 	Updater        UpdaterConfig
+	TGBot          *tgbot.Manager
 }
 
 // New builds a Server from its dependencies.
@@ -140,6 +143,7 @@ func New(db *sql.DB, cfg Config, logger *slog.Logger) *Server {
 		Applier:      cfg.Applier,
 		Store:        cfg.Store,
 		Updater:      cfg.Updater,
+		TGBot:        cfg.TGBot,
 	}
 }
 
@@ -176,7 +180,10 @@ func (s *Server) Router() http.Handler {
 		r.Get("/api/v1/rules", s.handleListRules)
 		r.Post("/api/v1/rules/dry-run", s.handleDryRun)
 		r.Post("/api/v1/rules/apply", s.handleApply)
+		r.Post("/api/v1/rules/import", s.handleImportRules)
 		r.Post("/api/v1/rules/chinalist/sync", s.handleChinalistSync)
+		r.Get("/api/v1/settings/tgbot", s.handleGetTgbotSettings)
+		r.Post("/api/v1/settings/tgbot", s.handleUpdateTgbotSettings)
 		r.Get("/api/v1/apply/status", s.handleApplyStatus)
 
 		r.Get("/api/v1/exits", s.handleListExits)

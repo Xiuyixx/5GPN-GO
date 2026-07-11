@@ -6,6 +6,7 @@ import { Button } from '../components/ui/button';
 import { Field, FieldGroup, Fieldset, Label, Legend } from '../components/ui/fieldset';
 import { Select } from '../components/ui/select';
 import { Input } from '../components/ui/input';
+import { useAuthStore } from '../stores/auth';
 
 const UNITS = ['5gpn', 'dnsdist', 'mihomo', 'sniproxy'];
 
@@ -22,15 +23,32 @@ export default function Logs() {
   const [filter, setFilter] = useState('');
   const [lines, setLines] = useState<Line[]>([]);
   const [connected, setConnected] = useState(false);
+  const [errDetail, setErrDetail] = useState<string | null>(null);
   const esRef = useRef<EventSource | null>(null);
+  const token = useAuthStore((s) => s.token);
 
   function connect(u: string) {
     esRef.current?.close();
     setLines([]);
     setConnected(false);
-    const es = new EventSource(`/api/v1/events/logs?unit=${encodeURIComponent(u)}`);
-    es.onopen = () => setConnected(true);
-    es.onerror = () => setConnected(false);
+    setErrDetail(null);
+    if (!token) {
+      setErrDetail('not signed in — reload the page and log back in');
+      return;
+    }
+    // EventSource cannot set Authorization headers; the backend accepts
+    // ?access_token=<jwt> as a fallback for /api/v1/events/*.
+    const url = `/api/v1/events/logs?unit=${encodeURIComponent(u)}&access_token=${encodeURIComponent(token)}`;
+    const es = new EventSource(url);
+    es.onopen = () => { setConnected(true); setErrDetail(null); };
+    es.onerror = () => {
+      setConnected(false);
+      // EventSource auto-reconnects; the error event fires on every drop.
+      // Only surface a message if we never opened at all.
+      if (es.readyState === EventSource.CLOSED) {
+        setErrDetail('connection closed (auth rejected or server dropped)');
+      }
+    };
     es.onmessage = (ev) => {
       try {
         const line: Line = JSON.parse(ev.data);
@@ -54,7 +72,7 @@ export default function Logs() {
     <AppShell>
       <div className="mb-6">
         <Heading>Logs</Heading>
-        <Text className="mt-1">Live tail via SSE · M2 S4 pipes real journalctl.</Text>
+        <Text className="mt-1">Live tail via SSE · journalctl piped from the daemon host.</Text>
       </div>
 
       <form className="glass p-6" onSubmit={(e) => e.preventDefault()}>
@@ -70,6 +88,11 @@ export default function Logs() {
               {connected ? 'connected' : 'disconnected'}
             </span>
           </Legend>
+          {errDetail && (
+            <div className="mt-2 rounded-lg border border-red-400/40 bg-red-500/10 px-3 py-2 text-xs text-red-800 dark:text-red-200">
+              {errDetail}
+            </div>
+          )}
           <FieldGroup className="sm:grid sm:grid-cols-2 sm:gap-4">
             <Field>
               <Label>Unit</Label>

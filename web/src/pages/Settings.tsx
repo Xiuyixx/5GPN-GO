@@ -204,62 +204,145 @@ function UpgradeSection() {
 function TgbotSection() {
   const [status, setStatus] = useState<TgbotStatus | null>(null);
   const [loading, setLoading] = useState(true);
-  const [unavailable, setUnavailable] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const s = await api.get<TgbotStatus>('/api/v1/settings/tgbot');
-        if (!cancelled) setStatus(s);
-      } catch (e) {
-        if (!cancelled) {
-          if (e instanceof APIError && (e.status === 404 || e.status === 501)) {
-            setUnavailable(true);
-          } else {
-            setUnavailable(true);
-          }
-        }
-      } finally {
-        if (!cancelled) setLoading(false);
+  const [token, setToken] = useState('');
+  const [adminIds, setAdminIds] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [savedMsg, setSavedMsg] = useState<string | null>(null);
+
+  async function refresh() {
+    setErr(null);
+    try {
+      const s = await api.get<TgbotStatus>('/api/v1/settings/tgbot');
+      setStatus(s);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { refresh(); }, []);
+
+  function parseAdmins(raw: string): number[] {
+    return raw
+      .split(/[\s,]+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((s) => Number(s))
+      .filter((n) => Number.isFinite(n) && Number.isInteger(n));
+  }
+
+  async function save(action: 'enable' | 'disable') {
+    setSaving(true);
+    setSavedMsg(null);
+    setErr(null);
+    try {
+      const body = action === 'disable'
+        ? { token: '', admin_chat_ids: [] as number[] }
+        : { token: token.trim(), admin_chat_ids: parseAdmins(adminIds) };
+      if (action === 'enable') {
+        if (!body.token) throw new Error('Token is required');
+        if (body.admin_chat_ids.length === 0) throw new Error('at least one admin chat id required');
       }
-    })();
-    return () => { cancelled = true; };
-  }, []);
+      const s = await api.post<TgbotStatus>('/api/v1/settings/tgbot', body);
+      setStatus(s);
+      setSavedMsg(action === 'disable' ? 'Bot stopped.' : 'Bot restarted with new credentials.');
+      if (action === 'disable') { setToken(''); setAdminIds(''); }
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
 
   return (
     <Section
       tint="rgb(20 184 166 / 0.35)"
       title="TG Bot"
-      description="Telegram 通知机器人状态。修改需编辑 config.yaml 并重启。"
+      description="Telegram 通知机器人。改动立刻生效,无需重启进程。"
     >
       {loading && <Text>加载中…</Text>}
-      {!loading && unavailable && (
-        <div className="rounded-lg border border-zinc-500/30 bg-zinc-500/5 px-3 py-2 text-sm text-zinc-700 dark:text-zinc-300">
-          后端未暴露 TG Bot 状态接口，请查看 config.yaml 中 <span className="font-mono">tgbot</span> 段。
-        </div>
+
+      {!loading && (
+        <>
+          <dl className="mb-4 grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-sm">
+            <dt className="text-zinc-500">当前状态</dt>
+            <dd>
+              {status?.enabled
+                ? <Badge color="lime">运行中</Badge>
+                : <Badge color="zinc">未启用</Badge>}
+            </dd>
+            <dt className="text-zinc-500">管理员数量</dt>
+            <dd className="font-mono">{status?.admin_count ?? 0}</dd>
+            {status?.token_masked && (
+              <>
+                <dt className="text-zinc-500">Token</dt>
+                <dd className="font-mono">{status.token_masked}</dd>
+              </>
+            )}
+          </dl>
+
+          <div className="space-y-3">
+            <div>
+              <label className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                Bot Token
+              </label>
+              <input
+                type="password"
+                className="mt-1 block w-full rounded-lg border border-zinc-300 bg-white/70 px-3 py-2 text-sm shadow-sm outline-none focus:ring-2 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-900/60"
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+                placeholder={status?.token_masked ? `current ${status.token_masked}` : '123456:AA...'}
+                autoComplete="off"
+              />
+              <p className="mt-1 text-xs text-zinc-500">
+                从 BotFather 获取。留空 = 停用 bot。
+              </p>
+            </div>
+
+            <div>
+              <label className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                管理员 Chat IDs
+              </label>
+              <input
+                type="text"
+                className="mt-1 block w-full rounded-lg border border-zinc-300 bg-white/70 px-3 py-2 text-sm shadow-sm outline-none focus:ring-2 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-900/60"
+                value={adminIds}
+                onChange={(e) => setAdminIds(e.target.value)}
+                placeholder="123456789 987654321"
+              />
+              <p className="mt-1 text-xs text-zinc-500">
+                空格或逗号分隔。发送 <span className="font-mono">/id</span> 给 bot 可以获取自己的 chat_id。
+              </p>
+            </div>
+
+            {err && (
+              <div className="rounded-lg border border-red-400/40 bg-red-500/10 px-3 py-2 text-sm text-red-800 dark:text-red-200">
+                {err}
+              </div>
+            )}
+            {savedMsg && (
+              <div className="rounded-lg border border-emerald-400/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-800 dark:text-emerald-200">
+                {savedMsg}
+              </div>
+            )}
+
+            <div className="flex gap-2 pt-1">
+              <Button color="indigo" onClick={() => save('enable')} disabled={saving}>
+                {saving ? '保存中…' : (status?.enabled ? '重启 Bot' : '启动 Bot')}
+              </Button>
+              {status?.enabled && (
+                <Button plain onClick={() => save('disable')} disabled={saving}>
+                  停用
+                </Button>
+              )}
+              <Button plain onClick={refresh} disabled={saving}>刷新</Button>
+            </div>
+          </div>
+        </>
       )}
-      {!loading && !unavailable && status && (
-        <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-sm">
-          <dt className="text-zinc-500">状态</dt>
-          <dd>
-            {status.enabled
-              ? <Badge color="lime">已启用</Badge>
-              : <Badge color="zinc">未启用</Badge>}
-          </dd>
-          <dt className="text-zinc-500">管理员数量</dt>
-          <dd className="font-mono">{status.admin_count}</dd>
-          {status.token_masked && (
-            <>
-              <dt className="text-zinc-500">Token</dt>
-              <dd className="font-mono">{status.token_masked}</dd>
-            </>
-          )}
-        </dl>
-      )}
-      <div className="mt-4 text-xs text-zinc-500">
-        修改需编辑 <span className="font-mono">config.yaml</span> 并重启服务。
-      </div>
     </Section>
   );
 }

@@ -56,7 +56,7 @@ func (b *bootStore) ListExits() ([]core.ExitRecord, error) {
 	return b.exits.Records(context.Background())
 }
 
-var version = "0.2.2"
+var version = "0.2.3"
 
 func main() {
 	configPath := flag.String("config", "/etc/5gpn/config.yaml", "path to config.yaml")
@@ -197,6 +197,22 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 	}).Run(ctx)
 
 	binPath, _ := os.Executable()
+
+	// TG bot Manager. Owned by the daemon lifecycle; wired into the
+	// panel so /api/v1/settings/tgbot can hot-reload the bot without
+	// restarting the daemon. Start below; ignore ErrBotDisabled so a
+	// fresh install with no token boots cleanly.
+	exitState := buildTGBotExitState(exitStore, applier, logger)
+	botMgr := tgbot.NewManager(tgbot.ManagerConfig{
+		Handlers: &tgbot.DefaultHandlers{
+			DB:        dbHandle,
+			Logger:    logger,
+			ExitState: exitState,
+			IOSPort:   cfg.IOS.HTTPPort,
+		},
+		Logger: logger,
+	})
+
 	srv := api.New(dbHandle, api.Config{
 		SessionTTL:     cfg.Panel.SessionTTL,
 		LoginPerMinute: cfg.Panel.RateLimit.LoginPerMinute,
@@ -216,6 +232,7 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 			BinaryPath: binPath,
 			Version:    version,
 		},
+		TGBot: botMgr,
 	}, logger)
 
 	addr := listenOverride
@@ -227,32 +244,13 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 	if insecure {
 		cert, key = "", ""
 	}
-	// TG bot (optional — starts only when config.tgbot.token is set).
-	if cfg.TGBot.Token != "" {
-		exitState := buildTGBotExitState(exitStore, applier, logger)
-		bot, err := tgbot.New(tgbot.Config{
-			Token:        cfg.TGBot.Token,
-			AdminChatIDs: cfg.TGBot.AdminChatIDs,
-			Handlers: &tgbot.DefaultHandlers{
-				DB:        dbHandle,
-				Logger:    logger,
-				ExitState: exitState,
-				IOSPort:   cfg.IOS.HTTPPort,
-			},
-			Logger: logger,
-		})
-		if err != nil {
-			if errors.Is(err, tgbot.ErrBotDisabled) {
-				logger.Info("tgbot disabled (empty token after env expansion)")
-			} else {
-				logger.Warn("tgbot init failed — panel still serves", "err", err)
-			}
+	// Boot the bot from config. Empty token disables it cleanly (fresh
+	// install path); non-empty starts the Serve loop under the daemon ctx.
+	if err := botMgr.Start(ctx, cfg.TGBot.Token, cfg.TGBot.AdminChatIDs); err != nil {
+		if errors.Is(err, tgbot.ErrBotDisabled) {
+			logger.Info("tgbot disabled at boot (no token) — panel can enable later")
 		} else {
-			go func() {
-				if err := bot.Serve(ctx); err != nil {
-					logger.Warn("tgbot.Serve exited", "err", err)
-				}
-			}()
+			logger.Warn("tgbot start failed — panel still serves", "err", err)
 		}
 	}
 
