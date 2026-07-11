@@ -12,7 +12,7 @@ import { Field, FieldGroup, Fieldset, Label, Legend } from '../components/ui/fie
 import { Dialog, DialogActions, DialogBody, DialogDescription, DialogTitle } from '../components/ui/dialog';
 import { Textarea } from '../components/ui/textarea';
 import { api } from '../api/client';
-import type { ApplyResponse, DryRunResponse, ExitsResponse, ImportRulesResponse, Rule, RuleKind } from '../api/client';
+import type { ApplyResponse, DryRunResponse, ExitsResponse, ImportRulesResponse, RegisterRulesetRequest, Rule, RuleKind, RulesetView, RulesetsResponse } from '../api/client';
 
 const KINDS: RuleKind[] = [
   'DOMAIN', 'DOMAIN-SUFFIX', 'DOMAIN-KEYWORD',
@@ -42,35 +42,11 @@ function toDraft(r: Rule): Draft {
   return { ...r, _key: makeKey() };
 }
 
-// Segment splits a Draft[] into rendering units: single rules render as
-// today, groups of consecutive same-group_id rules collapse into one row
-// (expandable to reveal individual rules). Grouping is contiguous by
-// design — if the operator moves a rule out of the batch it visibly
-// splits so the state is never lied about.
-type Segment =
-  | { kind: 'single'; rule: Draft; index: number }
-  | { kind: 'group'; groupId: string; rules: Array<{ rule: Draft; index: number }> };
-
-function computeSegments(draft: Draft[]): Segment[] {
-  const out: Segment[] = [];
-  let i = 0;
-  while (i < draft.length) {
-    const r = draft[i];
-    const gid = r.group_id;
-    if (!gid) {
-      out.push({ kind: 'single', rule: r, index: i });
-      i++;
-      continue;
-    }
-    const bag: Array<{ rule: Draft; index: number }> = [];
-    while (i < draft.length && draft[i].group_id === gid) {
-      bag.push({ rule: draft[i], index: i });
-      i++;
-    }
-    out.push({ kind: 'group', groupId: gid, rules: bag });
-  }
-  return out;
-}
+// Rulesets are rendered from the /api/v1/rulesets snapshot instead of
+// from group_id in draft — the Segment machinery that grouped by
+// group_id has been retired in v0.2.5-rc3. Draft entries carrying a
+// group_id are hidden from the Rules table since their canonical view
+// lives in a Ruleset card.
 
 export default function Rules() {
   const { t } = useTranslation();
@@ -86,10 +62,11 @@ export default function Rules() {
   const [note, setNote] = useState('');
   const [dryOk, setDryOk] = useState(false);
 
-  // expandedGroups tracks which import-batch groups are currently
-  // expanded. New imports land collapsed so a 1000-rule import shows
-  // as one card, not 1000 rows.
-  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  // Rulesets are the panel's native rule-provider registrations. Each
+  // row is a URL 5GPN periodically syncs; Apply expands cached content
+  // into the effective mihomo config. Manual rules stay untouched.
+  const [rulesets, setRulesets] = useState<RulesetView[]>([]);
+  const [syncingRs, setSyncingRs] = useState<string | null>(null);
 
   // Ruleset import dialog state. Keeps the operator in control: fetch or
   // paste → preview counts → confirm merges rules into draft.
@@ -107,20 +84,51 @@ export default function Rules() {
 
   async function refresh() {
     try {
-      const [rulesRes, exitsRes] = await Promise.all([
+      const [rulesRes, exitsRes, rulesetsRes] = await Promise.all([
         api.get<{ rules: Rule[] }>('/api/v1/rules'),
         api.get<ExitsResponse>('/api/v1/exits'),
+        api.get<RulesetsResponse>('/api/v1/rulesets'),
       ]);
       const list = rulesRes.rules ?? [];
       setActive(list);
       setDraft(list.map(toDraft));
       setExits((exitsRes.exits ?? []).map((e) => e.id));
+      setRulesets(rulesetsRes.rulesets ?? []);
       setDry(null);
       setApplyRes(null);
       setDryOk(false);
       setEditing(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function syncRuleset(name: string) {
+    setSyncingRs(name);
+    try {
+      const updated = await api.post<RulesetView>(`/api/v1/rulesets/${encodeURIComponent(name)}/sync`);
+      setRulesets((rs) => rs.map((r) => (r.name === name ? updated : r)));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSyncingRs(null);
+    }
+  }
+  async function toggleRuleset(name: string, enabled: boolean) {
+    try {
+      const updated = await api.post<RulesetView>(
+        `/api/v1/rulesets/${encodeURIComponent(name)}/enabled`, { enabled });
+      setRulesets((rs) => rs.map((r) => (r.name === name ? updated : r)));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+  async function removeRuleset(name: string) {
+    try {
+      await api.del(`/api/v1/rulesets/${encodeURIComponent(name)}`);
+      setRulesets((rs) => rs.filter((r) => r.name !== name));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -167,27 +175,6 @@ export default function Rules() {
     invalidate();
   }
 
-  // Group operations. All work on group_id (not _key) because a group is
-  // a set of rules that came in from the same import batch.
-  function toggleGroupExpanded(groupId: string) {
-    setExpandedGroups((s) => {
-      const next = new Set(s);
-      if (next.has(groupId)) next.delete(groupId);
-      else next.add(groupId);
-      return next;
-    });
-  }
-  function deleteGroup(groupId: string) {
-    setDraft((d) => d.filter((r) => r.group_id !== groupId));
-    setExpandedGroups((s) => {
-      const next = new Set(s);
-      next.delete(groupId);
-      return next;
-    });
-  }
-  function setGroupEnabled(groupId: string, enabled: boolean) {
-    setDraft((d) => d.map((r) => (r.group_id === groupId ? { ...r, enabled } : r)));
-  }
 
   function move(key: string, dir: -1 | 1) {
     setDraft((d) => {
@@ -278,6 +265,34 @@ export default function Rules() {
     }
   }
 
+  // URL mode: register as a native rule provider (rulesets table). The
+  // panel syncs periodically + expands at apply time — nothing is
+  // merged into the draft, so the manual rules table stays clean.
+  const [importRulesetName, setImportRulesetName] = useState('');
+  async function registerRulesetFromImport() {
+    setImportBusy(true);
+    setImportError(null);
+    try {
+      const body: RegisterRulesetRequest = {
+        source_url: importUrl.trim(),
+        action: importAction,
+      };
+      if (importRulesetName.trim()) body.name = importRulesetName.trim();
+      const created = await api.post<RulesetView>('/api/v1/rulesets', body);
+      setRulesets((rs) => [...rs.filter((r) => r.name !== created.name), created]);
+      setImportOpen(false);
+      setImportPreview(null);
+      setImportUrl('');
+      setImportRulesetName('');
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setImportBusy(false);
+    }
+  }
+
+  // Text mode: no URL to sync from, so the pasted content lands
+  // straight in the manual rules draft (legacy behavior).
   function confirmImport() {
     if (!importPreview) return;
     const existingIds = new Set(draft.map((r) => r.id));
@@ -285,7 +300,6 @@ export default function Rules() {
       ? Math.max(...draft.map((r) => r.priority))
       : 0;
     const merged: Draft[] = importPreview.rules.map((r) => {
-      // Ensure a unique id (avoid collision with the operator's manual rules).
       let id = r.id;
       let n = 2;
       while (existingIds.has(id)) {
@@ -418,8 +432,15 @@ export default function Rules() {
         is only ever populated with rules that carry no group_id.
       */}
       {(() => {
-        const rulesetSegs = computeSegments(draft).filter((s) => s.kind === 'group') as Extract<Segment, { kind: 'group' }>[];
-        const singleSegs = computeSegments(draft).filter((s) => s.kind === 'single') as Extract<Segment, { kind: 'single' }>[];
+        // Rulesets are the source of truth for imported batches; render
+        // them from the /api/v1/rulesets snapshot instead of from
+        // group_id in draft. Draft's grouped rules are the result of the
+        // last Apply's expansion — they are hidden from the Rules table
+        // since the operator manages them via Ruleset cards, not row edits.
+        const ungroupedDraftIndices: Array<{ rule: Draft; index: number }> = [];
+        draft.forEach((rule, index) => {
+          if (!rule.group_id) ungroupedDraftIndices.push({ rule, index });
+        });
 
         const renderRow = (r: Draft, i: number, indented: boolean) => (
           <TableRow key={r._key} className="align-middle">
@@ -461,46 +482,60 @@ export default function Rules() {
           </TableRow>
         );
 
+        const rsHeader = (
+          <div className="mb-3">
+            <Heading level={2}>{t('rules.sectionRulesets')}</Heading>
+            <Text className="mt-1 text-xs">{t('rules.sectionRulesetsHelp')}</Text>
+          </div>
+        );
+
         return (
           <>
-            {rulesetSegs.length > 0 && (
-              <div className="glass mb-4 p-4">
-                <div className="mb-3">
-                  <Heading level={2}>{t('rules.sectionRulesets')}</Heading>
-                  <Text className="mt-1 text-xs">{t('rules.sectionRulesetsHelp')}</Text>
-                </div>
+            <div className="glass mb-4 p-4">
+              {rsHeader}
+              {rulesets.length === 0 ? (
+                <Text className="text-xs text-zinc-500">{t('rules.rulesetsEmpty')}</Text>
+              ) : (
                 <div className="space-y-3">
-                  {rulesetSegs.map((seg) => {
-                    const expanded = expandedGroups.has(seg.groupId);
-                    const enabledCount = seg.rules.filter(({ rule }) => rule.enabled).length;
-                    const total = seg.rules.length;
-                    const priorities = seg.rules.map(({ rule }) => rule.priority);
-                    const lo = Math.min(...priorities);
-                    const hi = Math.max(...priorities);
-                    const allEnabled = enabledCount === total;
+                  {rulesets.map((rs) => {
+                    const lastSyncedLabel = rs.last_synced_at
+                      ? new Date(rs.last_synced_at * 1000).toLocaleString()
+                      : t('rules.rulesetNever');
                     return (
-                      <div key={seg.groupId} className="rounded-xl border border-indigo-500/30 bg-indigo-500/5 p-3 dark:bg-indigo-500/10">
+                      <div
+                        key={rs.name}
+                        className={`rounded-xl border p-3 ${
+                          rs.enabled
+                            ? 'border-indigo-500/30 bg-indigo-500/5 dark:bg-indigo-500/10'
+                            : 'border-zinc-400/30 bg-zinc-100/40 dark:bg-zinc-800/40'
+                        }`}
+                      >
                         <div className="flex flex-wrap items-center gap-3">
-                          <button
-                            type="button"
-                            onClick={() => toggleGroupExpanded(seg.groupId)}
-                            aria-label={expanded ? t('rules.groupCollapse') : t('rules.groupExpand')}
-                            className="font-mono text-sm text-indigo-700 dark:text-indigo-300"
-                          >
-                            {expanded ? '▼' : '▶'}
-                          </button>
-                          <span className="font-mono text-xs text-zinc-500">{seg.groupId}</span>
-                          <Badge color="indigo">{t('rules.groupHeaderCount', { count: total })}</Badge>
-                          <span className="text-xs text-zinc-500">{t('rules.groupPriorityRange', { low: lo, high: hi })}</span>
+                          <span className="font-mono text-sm text-indigo-700 dark:text-indigo-300">
+                            {rs.name}
+                          </span>
+                          <Badge color={rs.enabled ? 'indigo' : 'zinc'}>
+                            {t('rules.groupHeaderCount', { count: rs.rule_count })}
+                          </Badge>
+                          <span className="text-xs text-zinc-500">
+                            {t('rules.rulesetActionLabel')}: <code className="text-xs">{rs.action}</code>
+                          </span>
                           <div className="ml-auto flex flex-wrap gap-1">
-                            <Button plain onClick={() => setGroupEnabled(seg.groupId, !allEnabled)}>
-                              {allEnabled ? t('rules.groupDisableAll') : t('rules.groupEnableAll')}
+                            <Button
+                              plain
+                              onClick={() => syncRuleset(rs.name)}
+                              disabled={syncingRs === rs.name}
+                            >
+                              {syncingRs === rs.name ? t('rules.rulesetSyncing') : t('rules.rulesetSyncNow')}
+                            </Button>
+                            <Button plain onClick={() => toggleRuleset(rs.name, !rs.enabled)}>
+                              {rs.enabled ? t('rules.groupDisableAll') : t('rules.groupEnableAll')}
                             </Button>
                             <Button
                               plain
                               onClick={() => {
-                                if (window.confirm(t('rules.groupDeleteAllConfirm', { count: total }))) {
-                                  deleteGroup(seg.groupId);
+                                if (window.confirm(t('rules.rulesetDeleteConfirm', { name: rs.name }))) {
+                                  removeRuleset(rs.name);
                                 }
                               }}
                             >
@@ -508,38 +543,32 @@ export default function Rules() {
                             </Button>
                           </div>
                         </div>
-                        {expanded && (
-                          <div className="mt-3 overflow-x-auto rounded-lg bg-white/50 p-1 dark:bg-zinc-900/50">
-                            <Table>
-                              <TableHead>
-                                <TableRow>
-                                  <TableHeader className="w-16">{t('rules.thPriority')}</TableHeader>
-                                  <TableHeader>{t('rules.thId')}</TableHeader>
-                                  <TableHeader>{t('rules.thKind')}</TableHeader>
-                                  <TableHeader>{t('rules.thPattern')}</TableHeader>
-                                  <TableHeader>{t('rules.thAction')}</TableHeader>
-                                  <TableHeader className="w-24">{t('rules.thStatus')}</TableHeader>
-                                  <TableHeader className="w-40 text-right">{t('rules.thActions')}</TableHeader>
-                                </TableRow>
-                              </TableHead>
-                              <TableBody>
-                                {seg.rules.map(({ rule, index }) => renderRow(rule, index, false))}
-                              </TableBody>
-                            </Table>
-                          </div>
-                        )}
+                        <dl className="mt-2 grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-xs">
+                          <dt className="text-zinc-500">{t('rules.rulesetSourceLabel')}</dt>
+                          <dd className="truncate font-mono text-[11px]">{rs.source_url}</dd>
+                          <dt className="text-zinc-500">{t('rules.rulesetLastSyncedLabel')}</dt>
+                          <dd>{lastSyncedLabel}</dd>
+                          {rs.last_error && (
+                            <>
+                              <dt className="text-red-600 dark:text-red-400">error</dt>
+                              <dd className="text-red-600 dark:text-red-400">
+                                {t('rules.rulesetSyncError', { err: rs.last_error })}
+                              </dd>
+                            </>
+                          )}
+                        </dl>
                       </div>
                     );
                   })}
                 </div>
-              </div>
-            )}
+              )}
+            </div>
 
             <div className="glass p-2">
               <div className="mb-2 px-4 pt-3">
                 <Heading level={2}>{t('rules.sectionRules')}</Heading>
               </div>
-              {singleSegs.length === 0 ? (
+              {ungroupedDraftIndices.length === 0 ? (
                 <div className="p-6 text-center">
                   <Text>
                     <Trans
@@ -562,7 +591,7 @@ export default function Rules() {
                     </TableRow>
                   </TableHead>
                   <TableBody>
-                    {singleSegs.map((seg) => renderRow(seg.rule, seg.index, false))}
+                    {ungroupedDraftIndices.map(({ rule, index }) => renderRow(rule, index, false))}
                   </TableBody>
                 </Table>
               )}
@@ -774,6 +803,9 @@ export default function Rules() {
           {importMode === 'url' ? (
             <Fieldset>
               <FieldGroup>
+                <div className="mb-2 rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-2 text-xs text-indigo-800 dark:text-indigo-200">
+                  {t('rules.importAsRulesetHelp')}
+                </div>
                 <Field>
                   <Label>{t('rules.importUrlLabel')}</Label>
                   <Input
@@ -783,6 +815,17 @@ export default function Rules() {
                   />
                   <p className="mt-1 text-xs text-zinc-500">
                     {t('rules.importUrlHelp')}
+                  </p>
+                </Field>
+                <Field>
+                  <Label>{t('rules.importRulesetNameLabel')}</Label>
+                  <Input
+                    value={importRulesetName}
+                    onChange={(e) => setImportRulesetName(e.target.value)}
+                    placeholder="gfwlist"
+                  />
+                  <p className="mt-1 text-xs text-zinc-500">
+                    {t('rules.importRulesetNameHelp')}
                   </p>
                 </Field>
               </FieldGroup>
@@ -865,9 +908,19 @@ export default function Rules() {
           {importPreview && (
             <>
               <Button plain onClick={() => setImportPreview(null)}>{t('rules.back')}</Button>
-              <Button color="indigo" onClick={confirmImport} disabled={importPreview.rules.length === 0}>
-                {t('rules.mergeRules', { count: importPreview.rules.length })}
-              </Button>
+              {importMode === 'url' ? (
+                <Button
+                  color="indigo"
+                  onClick={registerRulesetFromImport}
+                  disabled={importPreview.rules.length === 0 || importBusy}
+                >
+                  {importBusy ? t('rules.rulesetRegisterInProgress') : t('rules.rulesetRegister')}
+                </Button>
+              ) : (
+                <Button color="indigo" onClick={confirmImport} disabled={importPreview.rules.length === 0}>
+                  {t('rules.mergeRules', { count: importPreview.rules.length })}
+                </Button>
+              )}
             </>
           )}
         </DialogActions>

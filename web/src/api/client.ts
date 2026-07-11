@@ -179,6 +179,32 @@ export interface ApplyResult {
   reason?: string;
 }
 
+// Ruleset (native rule-provider) — one row in the rulesets table.
+// last_synced_at is Unix epoch or null; the panel renders "just now" /
+// "3 hours ago" from it.
+export interface RulesetView {
+  name: string;
+  source_url: string;
+  kind: string;
+  action: string;
+  priority: number;
+  enabled: boolean;
+  rule_count: number;
+  last_synced_at?: number;
+  last_error?: string;
+  created_at: number;
+  created_by?: string;
+}
+export interface RulesetsResponse { rulesets: RulesetView[] }
+export interface RegisterRulesetRequest {
+  name?: string;
+  source_url: string;
+  kind?: string;
+  action: string;
+  priority?: number;
+  enabled?: boolean;
+}
+
 export interface BackupImportResult {
   entries: number;
   total_bytes: number;

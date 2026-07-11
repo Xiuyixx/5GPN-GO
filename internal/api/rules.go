@@ -62,6 +62,15 @@ func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
+	// Merge registered rulesets (native rule-provider engine) with the
+	// caller's manually-authored rules so dry-run matches whatever the
+	// effective config will look like post-apply. Rulesets contribute
+	// their cached content; ungrouped rules keep their existing shape.
+	if s.Rulesets != nil {
+		if extra, err := s.Rulesets.Expand(r.Context()); err == nil && len(extra) > 0 {
+			req.Rules = append(req.Rules, extra...)
+		}
+	}
 	set := &rules.RuleSet{Rules: req.Rules}
 	if err := set.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, "validation_failed", err.Error())
@@ -87,6 +96,16 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
+	}
+	// Expand registered rulesets into the effective set. The rules_yaml
+	// we snapshot below is the FULL set (manual + expanded ruleset
+	// entries) so the mihomo config always matches what the operator
+	// saw in dry-run. GroupID tags survive so the panel can still
+	// render the two-section split (Rules + Rulesets) on next load.
+	if s.Rulesets != nil {
+		if extra, err := s.Rulesets.Expand(r.Context()); err == nil && len(extra) > 0 {
+			req.Rules = append(req.Rules, extra...)
+		}
 	}
 	set := &rules.RuleSet{Rules: req.Rules}
 	if err := set.Validate(); err != nil {

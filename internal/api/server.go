@@ -21,6 +21,7 @@ import (
 	"github.com/Xiuyixx/5GPN-Go/internal/core"
 	xexit "github.com/Xiuyixx/5GPN-Go/internal/exit"
 	"github.com/Xiuyixx/5GPN-Go/internal/orchestrator"
+	"github.com/Xiuyixx/5GPN-Go/internal/rulesets"
 	"github.com/Xiuyixx/5GPN-Go/internal/settings"
 	"github.com/Xiuyixx/5GPN-Go/internal/tgbot"
 	"github.com/Xiuyixx/5GPN-Go/internal/updater"
@@ -75,6 +76,8 @@ type Server struct {
 	Updater      UpdaterConfig
 	TGBot        *tgbot.Manager
 	Settings     *settings.Store
+	Rulesets      *rulesets.Store
+	RulesetSyncer *rulesets.Syncer
 	// ACME is optional. When ACME.Domain is non-empty, ListenAndServe
 	// starts certmagic + a second HTTPS listener on :443 in addition to
 	// the primary panel port.
@@ -97,6 +100,8 @@ type Config struct {
 	Updater        UpdaterConfig
 	TGBot          *tgbot.Manager
 	Settings       *settings.Store
+	Rulesets       *rulesets.Store
+	RulesetSyncer  *rulesets.Syncer
 }
 
 // New builds a Server from its dependencies.
@@ -156,8 +161,10 @@ func New(db *sql.DB, cfg Config, logger *slog.Logger) *Server {
 		Applier:      cfg.Applier,
 		Store:        cfg.Store,
 		Updater:      cfg.Updater,
-		TGBot:        cfg.TGBot,
-		Settings:     cfg.Settings,
+		TGBot:         cfg.TGBot,
+		Settings:      cfg.Settings,
+		Rulesets:      cfg.Rulesets,
+		RulesetSyncer: cfg.RulesetSyncer,
 	}
 }
 
@@ -202,6 +209,11 @@ func (s *Server) Router() http.Handler {
 		r.Post("/api/v1/rules/apply", s.handleApply)
 		r.Post("/api/v1/rules/import", s.handleImportRules)
 		r.Post("/api/v1/rules/chinalist/sync", s.handleChinalistSync)
+		r.Get("/api/v1/rulesets", s.handleListRulesets)
+		r.Post("/api/v1/rulesets", s.handleRegisterRuleset)
+		r.Post("/api/v1/rulesets/{name}/sync", s.handleSyncRuleset)
+		r.Post("/api/v1/rulesets/{name}/enabled", s.handleToggleRuleset)
+		r.Delete("/api/v1/rulesets/{name}", s.handleDeleteRuleset)
 		r.Get("/api/v1/settings/tgbot", s.handleGetTgbotSettings)
 		r.Post("/api/v1/settings/tgbot", s.handleUpdateTgbotSettings)
 		r.Get("/api/v1/settings/panel", s.handleGetPanelSettings)

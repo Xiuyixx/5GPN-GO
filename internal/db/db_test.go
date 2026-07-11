@@ -41,6 +41,7 @@ func TestMigrateAppliesAllTables(t *testing.T) {
 		"rule_sources",
 		"rule_test_fixtures",
 		"rule_versions",
+		"rulesets",
 		"snapshots",
 	}
 	rows, err := handle.Query(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'goose_%'`)

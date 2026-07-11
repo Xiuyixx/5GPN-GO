@@ -28,6 +28,7 @@ import (
 	xexit "github.com/Xiuyixx/5GPN-Go/internal/exit"
 	"github.com/Xiuyixx/5GPN-Go/internal/metrics"
 	"github.com/Xiuyixx/5GPN-Go/internal/orchestrator"
+	"github.com/Xiuyixx/5GPN-Go/internal/rulesets"
 	"github.com/Xiuyixx/5GPN-Go/internal/settings"
 	"github.com/Xiuyixx/5GPN-Go/internal/tgbot"
 	"github.com/Xiuyixx/5GPN-Go/internal/web"
@@ -223,6 +224,13 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 		Logger: logger,
 	})
 
+	rulesetsStore := rulesets.New(dbHandle)
+	rulesetSyncer := rulesets.NewSyncer(rulesetsStore, logger, rulesets.SyncOptions{})
+	// Background refresh: every 6 hours we re-check every enabled ruleset
+	// with ETag / If-Modified-Since so the operator's cached rule count
+	// stays honest without hitting the network at every apply.
+	go rulesetSyncer.Run(ctx, 6*time.Hour)
+
 	srv := api.New(dbHandle, api.Config{
 		SessionTTL:     cfg.Panel.SessionTTL,
 		LoginPerMinute: cfg.Panel.RateLimit.LoginPerMinute,
@@ -242,8 +250,10 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 			BinaryPath: binPath,
 			Version:    version,
 		},
-		TGBot:    botMgr,
-		Settings: settingsStore,
+		TGBot:         botMgr,
+		Settings:      settingsStore,
+		Rulesets:      rulesetsStore,
+		RulesetSyncer: rulesetSyncer,
 	}, logger)
 
 	addr := listenOverride
