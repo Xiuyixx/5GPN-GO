@@ -62,6 +62,7 @@ func (s *Server) handleApplyPreview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
+	req.Rules = stripRulesetExpansions(req.Rules)
 	if s.Rulesets != nil {
 		if extra, err := s.Rulesets.Expand(r.Context()); err == nil && len(extra) > 0 {
 			req.Rules = append(req.Rules, extra...)

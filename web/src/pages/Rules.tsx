@@ -66,6 +66,11 @@ export default function Rules() {
   // row is a URL 5GPN periodically syncs; Apply expands cached content
   // into the effective mihomo config. Manual rules stay untouched.
   const [rulesets, setRulesets] = useState<RulesetView[]>([]);
+  // Snapshot of rulesets as of the last refresh — used for isDirty.
+  // Ruleset registration / deletion / enable-toggle updates `rulesets`
+  // immediately but leaves `activeRulesets` unchanged until the next
+  // refresh (which happens after Apply). Any divergence => dirty.
+  const [activeRulesets, setActiveRulesets] = useState<RulesetView[]>([]);
   const [syncingRs, setSyncingRs] = useState<string | null>(null);
 
   // Ruleset import dialog state. Keeps the operator in control: fetch or
@@ -89,11 +94,20 @@ export default function Rules() {
         api.get<ExitsResponse>('/api/v1/exits'),
         api.get<RulesetsResponse>('/api/v1/rulesets'),
       ]);
-      const list = rulesRes.rules ?? [];
+      // GET /api/v1/rules serves the last-applied rules_yaml verbatim,
+      // which for historical reasons can include rules materialized by a
+      // previous Ruleset.Expand() (they carry a non-empty group_id). The
+      // canonical view of those rows lives in Ruleset cards; the manual
+      // rules table only manages ungrouped rows. Filter here so both
+      // `active` (dirty baseline) and `draft` (editor state) are the
+      // pure manual set. The server strips group_id on apply anyway.
+      const list = (rulesRes.rules ?? []).filter((r) => !r.group_id);
+      const rsList = rulesetsRes.rulesets ?? [];
       setActive(list);
       setDraft(list.map(toDraft));
       setExits((exitsRes.exits ?? []).map((e) => e.id));
-      setRulesets(rulesetsRes.rulesets ?? []);
+      setRulesets(rsList);
+      setActiveRulesets(rsList);
       setDry(null);
       setApplyRes(null);
       setDryOk(false);
@@ -119,6 +133,7 @@ export default function Rules() {
       const updated = await api.post<RulesetView>(
         `/api/v1/rulesets/${encodeURIComponent(name)}/enabled`, { enabled });
       setRulesets((rs) => rs.map((r) => (r.name === name ? updated : r)));
+      invalidate();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -127,6 +142,7 @@ export default function Rules() {
     try {
       await api.del(`/api/v1/rulesets/${encodeURIComponent(name)}`);
       setRulesets((rs) => rs.filter((r) => r.name !== name));
+      invalidate();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -136,13 +152,28 @@ export default function Rules() {
 
   const isDirty = useMemo(() => {
     if (draft.length !== active.length) return true;
-    return draft.some((r, i) => {
+    const rulesChanged = draft.some((r, i) => {
       const a = active[i];
       return !a
         || r.id !== a.id || r.kind !== a.kind || r.pattern !== a.pattern
         || r.action !== a.action || r.priority !== a.priority || r.enabled !== a.enabled;
     });
-  }, [draft, active]);
+    if (rulesChanged) return true;
+    // Rulesets contribute to the effective config on Apply, so any
+    // change (add/remove/toggle/action edit) must count as dirty even
+    // if the manual rules table is untouched. Compare against the
+    // last-refreshed snapshot; server-side sync-metadata changes
+    // (last_synced_at, rule_count, last_error) do not count.
+    if (rulesets.length !== activeRulesets.length) return true;
+    const byName = new Map(activeRulesets.map((r) => [r.name, r]));
+    return rulesets.some((r) => {
+      const a = byName.get(r.name);
+      return !a
+        || r.action !== a.action || r.priority !== a.priority
+        || r.enabled !== a.enabled || r.source_url !== a.source_url
+        || r.kind !== a.kind;
+    });
+  }, [draft, active, rulesets, activeRulesets]);
 
   function invalidate() {
     setDry(null);
@@ -280,6 +311,7 @@ export default function Rules() {
       if (importRulesetName.trim()) body.name = importRulesetName.trim();
       const created = await api.post<RulesetView>('/api/v1/rulesets', body);
       setRulesets((rs) => [...rs.filter((r) => r.name !== created.name), created]);
+      invalidate();
       setImportOpen(false);
       setImportPreview(null);
       setImportUrl('');

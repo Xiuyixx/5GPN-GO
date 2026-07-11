@@ -38,6 +38,25 @@ type applyResponse struct {
 	Reason        string `json:"reason,omitempty"`
 }
 
+// stripRulesetExpansions drops rules that carry a GroupID from the incoming
+// draft. Any rule with GroupID != "" was materialized by a previous apply's
+// call to Rulesets.Expand() and persisted into rule_versions.rules_yaml,
+// which handleListRules serves back to the panel verbatim. Re-appending
+// them here without stripping would collide with the fresh Expand() call
+// below (ruleset expansion produces deterministic IDs like "<name>-<idx>"),
+// tripping RuleSet.Validate's "duplicate id" check and blocking every
+// dry-run/apply after the first successful apply with rulesets registered.
+func stripRulesetExpansions(in []rules.Rule) []rules.Rule {
+	out := in[:0]
+	for _, r := range in {
+		if r.GroupID != "" {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
 func (s *Server) handleListRules(w http.ResponseWriter, r *http.Request) {
 	active, err := db.GetActiveRuleVersion(s.DB)
 	if err == db.ErrNoRows {
@@ -66,6 +85,7 @@ func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
 	// caller's manually-authored rules so dry-run matches whatever the
 	// effective config will look like post-apply. Rulesets contribute
 	// their cached content; ungrouped rules keep their existing shape.
+	req.Rules = stripRulesetExpansions(req.Rules)
 	if s.Rulesets != nil {
 		if extra, err := s.Rulesets.Expand(r.Context()); err == nil && len(extra) > 0 {
 			req.Rules = append(req.Rules, extra...)
@@ -102,6 +122,7 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 	// entries) so the mihomo config always matches what the operator
 	// saw in dry-run. GroupID tags survive so the panel can still
 	// render the two-section split (Rules + Rulesets) on next load.
+	req.Rules = stripRulesetExpansions(req.Rules)
 	if s.Rulesets != nil {
 		if extra, err := s.Rulesets.Expand(r.Context()); err == nil && len(extra) > 0 {
 			req.Rules = append(req.Rules, extra...)
