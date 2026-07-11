@@ -177,8 +177,16 @@ jobs:
           \`\`\`
           EOF
           )
+          # Any tag containing rc/beta/alpha is treated as a pre-release
+          # so it does not clobber the "latest" pointer install.sh
+          # follows. Production tags (plain v0.2.5 etc.) publish normally.
+          prerelease_flag=""
+          case "${GITHUB_REF_NAME}" in
+            *rc*|*beta*|*alpha*) prerelease_flag="--prerelease";;
+          esac
           gh release create "${GITHUB_REF_NAME}" \
             --title "${GITHUB_REF_NAME}" \
             --notes "${notes}" \
             --generate-notes \
+            ${prerelease_flag} \
             release/*
