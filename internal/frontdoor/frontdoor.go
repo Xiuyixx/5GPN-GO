@@ -1,0 +1,379 @@
+package frontdoor
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/Xiuyixx/5GPN-Go/internal/resolver"
+)
+
+// Config controls which addresses the DNS plane's plain :53 UDP/TCP
+// listeners bind to. The zero value is usable directly with New/Start —
+// Frontdoor falls back to DefaultConfig()'s binds whenever both bind
+// lists are left empty.
+type Config struct {
+	// BindUDP53 lists the addresses the UDP :53 listener binds to.
+	// Default (see DefaultConfig): ["[::1]:53"] plus the WireGuard
+	// interface IP when autodetection finds one; or ["[::]:53"] once
+	// PublicPlainDNSEnabled is true.
+	BindUDP53 []string
+
+	// BindTCP53 mirrors BindUDP53 for the TCP :53 fallback listener.
+	BindTCP53 []string
+
+	// PublicPlainDNSEnabled, when true, allows a wildcard bind
+	// (0.0.0.0:53 / [::]:53 / a bare ":53") to survive the safety
+	// filter applied at Start(). When false (the default), any
+	// wildcard address in BindUDP53/BindTCP53 is dropped rather than
+	// bound — plain :53 is loopback + WireGuard only unless an
+	// operator explicitly opts in to public exposure (plan §4 Phase 2,
+	// R13 open-resolver mitigation).
+	PublicPlainDNSEnabled bool
+}
+
+// wireGuardIfacePrefixes lists the interface-name prefixes considered
+// "the" WireGuard interface for DefaultConfig's autodetection.
+var wireGuardIfacePrefixes = []string{"pgw-", "wg"}
+
+// discoverWireGuardIP scans net.Interfaces() for the first interface
+// whose name matches a WireGuard prefix and returns its first
+// non-loopback, non-unspecified unicast IP. ok is false when none is
+// found, or the interface list can't be read (e.g. a sandboxed test
+// environment) — callers treat that the same as "no WireGuard bind
+// available", never as a hard error.
+func discoverWireGuardIP() (ip string, ok bool) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return "", false
+	}
+	for _, iface := range ifaces {
+		name := strings.ToLower(iface.Name)
+		matched := false
+		for _, prefix := range wireGuardIfacePrefixes {
+			if strings.HasPrefix(name, prefix) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipNet, ok := a.(*net.IPNet)
+			if !ok || ipNet.IP.IsLoopback() || ipNet.IP.IsUnspecified() {
+				continue
+			}
+			return ipNet.IP.String(), true
+		}
+	}
+	return "", false
+}
+
+// DefaultConfig returns the safe, non-public default bind set: IPv6
+// loopback plus the WireGuard interface IP when autodetection finds
+// one. It never returns a wildcard (0.0.0.0 / [::]) address — public
+// exposure is opt-in via Config.PublicPlainDNSEnabled and is applied by
+// the safety filter at Start(), not baked into this default.
+func DefaultConfig() Config {
+	binds := []string{"[::1]:53"}
+	if ip, ok := discoverWireGuardIP(); ok {
+		binds = append(binds, net.JoinHostPort(ip, "53"))
+	}
+	return Config{
+		BindUDP53: binds,
+		BindTCP53: append([]string(nil), binds...),
+	}
+}
+
+// isWildcardBind reports whether addr's host is a wildcard/unspecified
+// address (0.0.0.0, ::, or an empty host as in ":53") — the pattern
+// that exposes a listener on every interface, including the public
+// one.
+func isWildcardBind(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	if host == "" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsUnspecified()
+}
+
+// sanitizeBinds drops wildcard addresses from binds unless
+// publicEnabled is true. This is defense in depth (plan R13): even if
+// a misconfigured Config (or a future settings-layer bug) hands
+// Frontdoor a public wildcard bind, plain :53 stays closed to the
+// internet unless the operator has explicitly opted in.
+func sanitizeBinds(binds []string, publicEnabled bool, logger *slog.Logger) []string {
+	if publicEnabled {
+		return binds
+	}
+	out := make([]string, 0, len(binds))
+	for _, addr := range binds {
+		if isWildcardBind(addr) {
+			logger.Warn("frontdoor: dropping public wildcard bind; set public_plain_dns_enabled to allow it", "addr", addr)
+			continue
+		}
+		out = append(out, addr)
+	}
+	return out
+}
+
+// Frontdoor owns the DNS plane's plain :53 UDP/TCP listeners plus the
+// supervisor that restarts them on crash. DoH (see doh.go) is handled
+// separately since it rides the panel's existing HTTP/chi listener
+// rather than owning a socket of its own; DoT/DoQ/DoH3 land in later
+// phases alongside these.
+type Frontdoor struct {
+	resolver *resolver.Resolver
+	logger   *slog.Logger
+
+	supervisor *Supervisor
+
+	mu      sync.Mutex
+	cfg     Config
+	udp     []*udpServer
+	tcp     []*tcpServer
+	started bool
+	cancel  context.CancelFunc
+	done    chan struct{}
+
+	// degraded is flipped by enterDegraded (the supervisor's onGiveUp
+	// callback, wired in Start) once the restart budget is exhausted.
+	// ServeDNS checks it before ever touching the resolver — see
+	// handler.go.
+	degraded atomic.Bool
+}
+
+// New wires a Frontdoor around an existing resolver. logger may be nil
+// (slog.Default() is used). cfg is not validated or bound to sockets
+// until Start.
+func New(cfg Config, resolver *resolver.Resolver, logger *slog.Logger) *Frontdoor {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Frontdoor{
+		cfg:        cfg,
+		resolver:   resolver,
+		logger:     logger,
+		supervisor: NewSupervisor(logger),
+	}
+}
+
+// effectiveBinds resolves fd.cfg into the addresses Start actually
+// binds to: DefaultConfig()'s binds when the caller left both lists
+// empty, then the wildcard safety filter (sanitizeBinds). Caller must
+// hold fd.mu.
+func (fd *Frontdoor) effectiveBinds() (udpAddrs, tcpAddrs []string) {
+	udpAddrs, tcpAddrs = fd.cfg.BindUDP53, fd.cfg.BindTCP53
+	if len(udpAddrs) == 0 && len(tcpAddrs) == 0 {
+		def := DefaultConfig()
+		udpAddrs, tcpAddrs = def.BindUDP53, def.BindTCP53
+	}
+	return sanitizeBinds(udpAddrs, fd.cfg.PublicPlainDNSEnabled, fd.logger),
+		sanitizeBinds(tcpAddrs, fd.cfg.PublicPlainDNSEnabled, fd.logger)
+}
+
+// bindLocked binds every listener in fd.effectiveBinds(), rolling back
+// (closing) any partial binds on the first failure, and commits the
+// result to fd.udp/fd.tcp only on full success. Caller must hold fd.mu.
+func (fd *Frontdoor) bindLocked(ctx context.Context) error {
+	udpAddrs, tcpAddrs := fd.effectiveBinds()
+
+	udp := make([]*udpServer, 0, len(udpAddrs))
+	for _, addr := range udpAddrs {
+		s := newUDPServer(fd, addr)
+		if err := s.listen(ctx); err != nil {
+			shutdownUDP(udp)
+			return err
+		}
+		udp = append(udp, s)
+	}
+
+	tcp := make([]*tcpServer, 0, len(tcpAddrs))
+	for _, addr := range tcpAddrs {
+		s := newTCPServer(fd, addr)
+		if err := s.listen(ctx); err != nil {
+			shutdownUDP(udp)
+			shutdownTCP(tcp)
+			return err
+		}
+		tcp = append(tcp, s)
+	}
+
+	fd.udp, fd.tcp = udp, tcp
+	return nil
+}
+
+// closeListenersLocked shuts down and clears every currently-bound
+// listener. Caller must hold fd.mu.
+func (fd *Frontdoor) closeListenersLocked() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, s := range fd.udp {
+		_ = s.Shutdown(ctx)
+	}
+	for _, s := range fd.tcp {
+		_ = s.Shutdown(ctx)
+	}
+	fd.udp, fd.tcp = nil, nil
+}
+
+func shutdownUDP(servers []*udpServer) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	for _, s := range servers {
+		_ = s.Shutdown(ctx)
+	}
+}
+
+func shutdownTCP(servers []*tcpServer) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	for _, s := range servers {
+		_ = s.Shutdown(ctx)
+	}
+}
+
+// Start binds every configured listener (returning an error
+// immediately on a bind failure, e.g. a port already in use) and hands
+// the running listener tree to the supervisor, which restarts it —
+// bounded, see supervisor.go — if it ever crashes. Start returns once
+// the initial bind succeeds; it does not block for the server's
+// lifetime.
+func (fd *Frontdoor) Start(ctx context.Context) error {
+	fd.mu.Lock()
+	if fd.started {
+		fd.mu.Unlock()
+		return errors.New("frontdoor: already started")
+	}
+	if err := fd.bindLocked(ctx); err != nil {
+		fd.mu.Unlock()
+		return fmt.Errorf("frontdoor: start: %w", err)
+	}
+	fd.started = true
+	runCtx, cancel := context.WithCancel(context.Background())
+	fd.cancel = cancel
+	fd.done = make(chan struct{})
+	done := fd.done
+	fd.mu.Unlock()
+
+	go func() {
+		defer close(done)
+		_ = fd.supervisor.Run(runCtx, fd.serveAll, fd.enterDegraded)
+	}()
+	return nil
+}
+
+// serveAll is the task the supervisor watches. Its first invocation
+// (from Start) reuses the listeners bound there; every subsequent
+// invocation (a restart after a crash) rebinds from scratch — full
+// re-bind semantics per plan §4 Phase 2 Round 3 "Interpretation A", so
+// a restart always picks up current config rather than reusing
+// possibly-broken sockets. It returns nil on a clean stop (ctx
+// cancelled via Shutdown) or a non-nil error on crash, which the
+// supervisor treats as "restart me".
+func (fd *Frontdoor) serveAll(ctx context.Context) error {
+	fd.mu.Lock()
+	if len(fd.udp) == 0 && len(fd.tcp) == 0 {
+		if err := fd.bindLocked(ctx); err != nil {
+			fd.mu.Unlock()
+			return err
+		}
+	}
+	udp := append([]*udpServer(nil), fd.udp...)
+	tcp := append([]*tcpServer(nil), fd.tcp...)
+	fd.mu.Unlock()
+
+	errCh := make(chan error, len(udp)+len(tcp))
+	var wg sync.WaitGroup
+	for _, s := range udp {
+		wg.Add(1)
+		go func(s *udpServer) { defer wg.Done(); errCh <- s.serve() }(s)
+	}
+	for _, s := range tcp {
+		wg.Add(1)
+		go func(s *tcpServer) { defer wg.Done(); errCh <- s.serve() }(s)
+	}
+	allDone := make(chan struct{})
+	go func() { wg.Wait(); close(allDone) }()
+
+	select {
+	case <-ctx.Done():
+		fd.mu.Lock()
+		fd.closeListenersLocked()
+		fd.mu.Unlock()
+		<-allDone
+		return nil
+	case err := <-errCh:
+		// Treat this as a crash: tear down whatever else is still
+		// running so the next supervised attempt starts from a clean
+		// slate and rebinds everything.
+		fd.mu.Lock()
+		fd.closeListenersLocked()
+		fd.mu.Unlock()
+		<-allDone
+		return err
+	}
+}
+
+// enterDegraded is the supervisor's give-up callback: it flips the
+// degraded flag so ServeDNS answers SERVFAIL directly, without ever
+// touching the resolver, on every still-bound listener until an
+// operator intervenes (plan: restart the daemon, or a settings flip
+// that resets the supervisor budget — out of scope for this phase).
+func (fd *Frontdoor) enterDegraded() {
+	fd.degraded.Store(true)
+}
+
+// Shutdown stops the supervised listener tree and waits for it to
+// finish, or for ctx to expire first.
+func (fd *Frontdoor) Shutdown(ctx context.Context) error {
+	fd.mu.Lock()
+	if !fd.started {
+		fd.mu.Unlock()
+		return nil
+	}
+	fd.started = false
+	cancel := fd.cancel
+	done := fd.done
+	fd.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Reconcile applies a new Config at runtime. Phase 2 stub: later phases
+// (plan §4 Phase 9) make this start/stop individual listeners without a
+// process restart, wired to a settings-change broadcast. For now it
+// only records cfg for the next Start; it does not touch already-bound
+// listeners.
+func (fd *Frontdoor) Reconcile(ctx context.Context, cfg Config) error {
+	fd.mu.Lock()
+	fd.cfg = cfg
+	fd.mu.Unlock()
+	return nil
+}
