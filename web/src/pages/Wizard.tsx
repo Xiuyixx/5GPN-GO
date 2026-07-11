@@ -41,9 +41,18 @@ const DEFAULT_SERVER: DraftServer = {
   domain: '',
   panelBind: '0.0.0.0',
   panelPort: 443,
-  acmeEnabled: false,
+  // ACME is ON by default. The wizard's whole point is auto-SSL on a
+  // public domain; leaving it off + panelPort=443 makes the daemon
+  // serve plain HTTP on :443, which browsers reject with
+  // ERR_SSL_PROTOCOL_ERROR. If the operator really wants no TLS they
+  // must also move the port off 443/80.
+  acmeEnabled: true,
   acmeEmail: '',
 };
+
+// TLS-standard ports we refuse to bind plain HTTP on. Keep in sync
+// with the backend guard in cmd/5gpn/main.go.
+const TLS_STANDARD_PORTS = new Set<number>([80, 443]);
 
 const DEFAULT_TGBOT: DraftTGBot = { token: '', adminIdsText: '' };
 
@@ -107,9 +116,25 @@ export default function Wizard({ onDone }: WizardProps) {
   const serverStepValid = useMemo(() => {
     if (!server.domain.trim()) return false;
     if (server.panelPort < 1 || server.panelPort > 65535) return false;
+    // TLS-standard ports (80/443) must have ACME on. Otherwise the
+    // daemon would bind plain HTTP on :443 and browsers would fail
+    // the TLS handshake with ERR_SSL_PROTOCOL_ERROR. This mirrors the
+    // fail-fast guard on the daemon side (cmd/5gpn/main.go).
+    if (TLS_STANDARD_PORTS.has(server.panelPort) && !server.acmeEnabled) return false;
     if (server.acmeEnabled && !/@/.test(server.acmeEmail)) return false;
     return true;
   }, [server]);
+
+  const tlsPortWarning = useMemo(() => {
+    if (TLS_STANDARD_PORTS.has(server.panelPort) && !server.acmeEnabled) {
+      return t('wizard.tlsPortRequiresAcme', {
+        defaultValue:
+          'Port {{port}} is reserved for TLS. Turn on Auto-SSL, or move the panel to another port.',
+        port: server.panelPort,
+      });
+    }
+    return null;
+  }, [server.panelPort, server.acmeEnabled, t]);
 
   const tgbotStepValid = useMemo(() => {
     // Empty token is OK (skip). If a token is present, at least one admin id.
@@ -215,7 +240,7 @@ export default function Wizard({ onDone }: WizardProps) {
           )}
 
           {!loading && step === 'server' && (
-            <ServerStep server={server} setServer={setServer} />
+            <ServerStep server={server} setServer={setServer} tlsPortWarning={tlsPortWarning} />
           )}
           {!loading && step === 'tgbot' && (
             <TGBotStep tgbot={tgbot} setTgbot={setTgbot} />
@@ -295,8 +320,12 @@ function StepPills({ current }: { current: Step }) {
   );
 }
 
-interface ServerStepProps { server: DraftServer; setServer: (v: DraftServer) => void }
-function ServerStep({ server, setServer }: ServerStepProps) {
+interface ServerStepProps {
+  server: DraftServer;
+  setServer: (v: DraftServer) => void;
+  tlsPortWarning: string | null;
+}
+function ServerStep({ server, setServer, tlsPortWarning }: ServerStepProps) {
   const { t } = useTranslation();
   return (
     <Fieldset>
@@ -333,6 +362,11 @@ function ServerStep({ server, setServer }: ServerStepProps) {
             <div className="mt-1 text-xs text-zinc-500">{t('wizard.serverPanelPortHelp')}</div>
           </Field>
         </div>
+        {tlsPortWarning && (
+          <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-900 dark:text-amber-200">
+            {tlsPortWarning}
+          </div>
+        )}
         <SwitchField>
           <Label>{t('wizard.tlsEnableLabel')}</Label>
           <Switch

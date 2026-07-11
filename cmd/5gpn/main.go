@@ -58,7 +58,7 @@ func (b *bootStore) ListExits() ([]core.ExitRecord, error) {
 	return b.exits.Records(context.Background())
 }
 
-var version = "0.2.5"
+var version = "0.2.6"
 
 func main() {
 	configPath := flag.String("config", "/etc/5gpn/config.yaml", "path to config.yaml")
@@ -280,6 +280,26 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 				Email:      acmeEmail,
 				StorageDir: api.ACMEStorageDir(dataDir),
 			}
+		}
+	}
+
+	// Fail-fast guard: refuse to bind plain HTTP on a TLS-standard port.
+	// Without this, a half-configured wizard save (port 443, ACME off,
+	// no cert) yields a listener that serves HTTP on :443. Browsers
+	// send TLS ClientHello, get a torn-down TCP connection back and
+	// surface ERR_SSL_PROTOCOL_ERROR — a very confusing failure mode.
+	// Refusing here forces the operator to either finish the ACME
+	// wizard step or move the panel off 80/443. Mirror this list in
+	// web/src/pages/Wizard.tsx (TLS_STANDARD_PORTS).
+	if !insecure && cert == "" && key == "" && srv.ACME.Domain == "" {
+		switch cfg.Server.PanelPort {
+		case 80, 443:
+			return fmt.Errorf(
+				"panel_port %d is a TLS-standard port but no TLS is configured "+
+					"(no static cert, no ACME). Re-run the wizard with Auto-SSL enabled, "+
+					"or move server.panel_port off %d. Booting plain HTTP on this port "+
+					"would cause ERR_SSL_PROTOCOL_ERROR for every browser visit",
+				cfg.Server.PanelPort, cfg.Server.PanelPort)
 		}
 	}
 	// Boot the bot from config. Empty token disables it cleanly (fresh
