@@ -61,7 +61,7 @@ func (b *bootStore) ListExits() ([]core.ExitRecord, error) {
 	return b.exits.Records(context.Background())
 }
 
-var version = "0.3.1"
+var version = "0.3.2"
 
 func main() {
 	configPath := flag.String("config", "/etc/5gpn/config.yaml", "path to config.yaml")

@@ -356,6 +356,19 @@ function IOSSection() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [enabled, setEnabled] = useState<boolean>(false);
+  const [preflightRunning, setPreflightRunning] = useState(false);
+  const [preflightResult, setPreflightResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [toggling, setToggling] = useState(false);
+
+  async function refreshEnabled() {
+    try {
+      const s = await api.get<{ ios?: { profile_enabled?: boolean } }>('/api/v1/settings/panel');
+      setEnabled(Boolean(s.ios?.profile_enabled));
+    } catch {
+      // fall through — leave enabled=false
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -368,9 +381,47 @@ function IOSSection() {
       } finally {
         if (!cancelled) setLoading(false);
       }
+      await refreshEnabled();
     })();
     return () => { cancelled = true; };
   }, []);
+
+  async function runPreflight() {
+    setPreflightRunning(true);
+    setPreflightResult(null);
+    try {
+      const r = await api.post<{ ok: boolean; dot_handshake: boolean; sample_query: boolean; error?: string }>(
+        '/api/v1/settings/ios/preflight',
+        {},
+      );
+      setPreflightResult({
+        ok: r.ok,
+        message: r.ok
+          ? t('settings.iosPreflightPass', { defaultValue: 'Preflight passed — DoT is answering.' })
+          : t('settings.iosPreflightFail', {
+              defaultValue: 'Preflight failed: {{err}}',
+              err: r.error || 'unknown',
+            }),
+      });
+    } catch (e) {
+      setPreflightResult({ ok: false, message: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setPreflightRunning(false);
+    }
+  }
+
+  async function toggleEnabled(next: boolean) {
+    setToggling(true);
+    try {
+      await api.post('/api/v1/settings/ios/profile-enabled', { enabled: next });
+      setEnabled(next);
+      if (next) setPreflightResult({ ok: true, message: t('settings.iosProfileTurnedOn', { defaultValue: 'iOS profile enabled — the download link is now live.' }) });
+    } catch (e) {
+      setPreflightResult({ ok: false, message: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setToggling(false);
+    }
+  }
 
   async function copy() {
     if (!profile?.url) return;
@@ -402,6 +453,53 @@ function IOSSection() {
             <AlertTitle>{t('settings.iosProfileError')}</AlertTitle>
             <AlertBody>{err}</AlertBody>
           </Alert>
+        </div>
+      )}
+
+      {!loading && (
+        <div className="mb-4 rounded-xl border border-zinc-200 bg-white/60 p-4 dark:border-white/10 dark:bg-white/5">
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                {t('settings.iosProfileToggleTitle', { defaultValue: 'iOS Profile' })}
+              </div>
+              <div className="text-xs text-zinc-500">
+                {enabled
+                  ? t('settings.iosProfileEnabledHint', { defaultValue: 'Enabled — the mobileconfig download link is live.' })
+                  : t('settings.iosProfileDisabledHint', {
+                      defaultValue: 'Disabled — run preflight, then enable so the mobileconfig link goes live.',
+                    })}
+              </div>
+            </div>
+            <Button
+              color={enabled ? 'zinc' : 'indigo'}
+              onClick={() => toggleEnabled(!enabled)}
+              disabled={toggling}
+            >
+              {toggling
+                ? t('common.loading')
+                : enabled
+                ? t('settings.iosDisable', { defaultValue: 'Disable' })
+                : t('settings.iosEnable', { defaultValue: 'Enable' })}
+            </Button>
+          </div>
+          <div className="mt-3 flex items-center gap-2">
+            <Button plain onClick={runPreflight} disabled={preflightRunning}>
+              {preflightRunning
+                ? t('settings.iosPreflightRunning', { defaultValue: 'Running preflight…' })
+                : t('settings.iosPreflightRun', { defaultValue: 'Run preflight' })}
+            </Button>
+            {preflightResult && (
+              <span
+                className={
+                  'text-xs ' +
+                  (preflightResult.ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400')
+                }
+              >
+                {preflightResult.message}
+              </span>
+            )}
+          </div>
         </div>
       )}
       {profile?.url && (

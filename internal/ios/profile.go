@@ -75,9 +75,11 @@ var mobileConfigTemplate = template.Must(template.New("mobileconfig").Parse(`<?x
             <key>DNSSettings</key>
             <dict>
                 <key>DNSProtocol</key>
-                <string>TLS</string>
+                <string>HTTPS</string>
                 <key>ServerName</key>
                 <string>{{ .Domain }}</string>
+                <key>ServerURL</key>
+                <string>https://{{ .Domain }}/dns-query</string>
 {{- if .OnDemand }}
 ` + onDemandRulesBlock + `{{- end }}
             </dict>
@@ -102,8 +104,6 @@ var mobileConfigTemplate = template.Must(template.New("mobileconfig").Parse(`<?x
                 <string>TLS</string>
                 <key>ServerName</key>
                 <string>{{ .FallbackDoT }}</string>
-{{- if .OnDemand }}
-` + onDemandRulesBlock + `{{- end }}
             </dict>
             <key>PayloadDescription</key>
             <string>5GPN gateway fallback encrypted DNS profile</string>

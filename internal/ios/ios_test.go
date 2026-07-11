@@ -77,9 +77,22 @@ func TestRenderOnDemandAndFallback(t *testing.T) {
 	if got := strings.Count(s, "<key>DNSSettings</key>"); got != 2 {
 		t.Errorf("want 2 DNSSettings dicts, got %d", got)
 	}
-	// Two OnDemandRules blocks (one per DNSSettings payload).
-	if got := strings.Count(s, "<key>OnDemandRules</key>"); got != 2 {
-		t.Errorf("want 2 OnDemandRules blocks, got %d", got)
+	// Only ONE OnDemandRules block — on the primary payload. Duplicating
+	// it on the fallback confuses iOS (Apple docs: only one DNS proxy /
+	// DNS settings profile is active at a time; a second OnDemand block
+	// on the fallback creates ambiguous priority) and was seen in the
+	// wild causing the fallback to be preferred when it shouldn't be.
+	if got := strings.Count(s, "<key>OnDemandRules</key>"); got != 1 {
+		t.Errorf("want 1 OnDemandRules block (primary only), got %d", got)
+	}
+	// Primary must advertise DoH so it survives GFW / carrier DPI on
+	// :853 — see plan §4 Phase 8 rev-2. Fallback keeps DoT for
+	// backwards-compat with older clients + when :443 is throttled.
+	if !strings.Contains(s, "<string>HTTPS</string>") {
+		t.Errorf("primary payload should be DoH (DNSProtocol=HTTPS)\n%s", s)
+	}
+	if !strings.Contains(s, "https://dot.example.com/dns-query") {
+		t.Errorf("primary payload missing ServerURL\n%s", s)
 	}
 	validatePlistIfPossible(t, body)
 }
