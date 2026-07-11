@@ -95,6 +95,11 @@ export interface Rule {
   priority: number;
   enabled: boolean;
   notes?: string;
+  // group_id: shared by every rule that came in through the same import
+  // batch. Undefined for manually-added rules. The panel collapses same-
+  // group rules into one card; group_id has no effect on dry-run or
+  // apply — it's UI-only metadata.
+  group_id?: string;
 }
 
 export interface Fixture { domain: string; ip?: string; expected_exit: string; notes?: string }
@@ -125,6 +130,12 @@ export interface ImportRulesResponse {
   categories: string[];
   source_url?: string;
   source_kind: 'url' | 'text';
+  // group_id every returned rule carries. Frontend uses it to collapse
+  // the batch into one card in the Rules list.
+  group_id: string;
+  // source_format is populated when the auto-detector fell into a
+  // non-native path (currently only "gfwlist"). Empty for plain Clash.
+  source_format?: string;
 }
 export interface ApplyResponse {
   snapshot_id: number;

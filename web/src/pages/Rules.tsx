@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useTranslation, Trans } from 'react-i18next';
 import AppShell from '../layouts/AppShell';
 import { Heading } from '../components/ui/heading';
@@ -42,6 +42,36 @@ function toDraft(r: Rule): Draft {
   return { ...r, _key: makeKey() };
 }
 
+// Segment splits a Draft[] into rendering units: single rules render as
+// today, groups of consecutive same-group_id rules collapse into one row
+// (expandable to reveal individual rules). Grouping is contiguous by
+// design — if the operator moves a rule out of the batch it visibly
+// splits so the state is never lied about.
+type Segment =
+  | { kind: 'single'; rule: Draft; index: number }
+  | { kind: 'group'; groupId: string; rules: Array<{ rule: Draft; index: number }> };
+
+function computeSegments(draft: Draft[]): Segment[] {
+  const out: Segment[] = [];
+  let i = 0;
+  while (i < draft.length) {
+    const r = draft[i];
+    const gid = r.group_id;
+    if (!gid) {
+      out.push({ kind: 'single', rule: r, index: i });
+      i++;
+      continue;
+    }
+    const bag: Array<{ rule: Draft; index: number }> = [];
+    while (i < draft.length && draft[i].group_id === gid) {
+      bag.push({ rule: draft[i], index: i });
+      i++;
+    }
+    out.push({ kind: 'group', groupId: gid, rules: bag });
+  }
+  return out;
+}
+
 export default function Rules() {
   const { t } = useTranslation();
   const [active, setActive] = useState<Rule[]>([]);
@@ -55,6 +85,11 @@ export default function Rules() {
   const [busy, setBusy] = useState<'idle' | 'dryrun' | 'apply'>('idle');
   const [note, setNote] = useState('');
   const [dryOk, setDryOk] = useState(false);
+
+  // expandedGroups tracks which import-batch groups are currently
+  // expanded. New imports land collapsed so a 1000-rule import shows
+  // as one card, not 1000 rows.
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
 
   // Ruleset import dialog state. Keeps the operator in control: fetch or
   // paste → preview counts → confirm merges rules into draft.
@@ -130,6 +165,28 @@ export default function Rules() {
     setDraft((d) => d.filter((r) => r._key !== key));
     if (editing === key) setEditing(null);
     invalidate();
+  }
+
+  // Group operations. All work on group_id (not _key) because a group is
+  // a set of rules that came in from the same import batch.
+  function toggleGroupExpanded(groupId: string) {
+    setExpandedGroups((s) => {
+      const next = new Set(s);
+      if (next.has(groupId)) next.delete(groupId);
+      else next.add(groupId);
+      return next;
+    });
+  }
+  function deleteGroup(groupId: string) {
+    setDraft((d) => d.filter((r) => r.group_id !== groupId));
+    setExpandedGroups((s) => {
+      const next = new Set(s);
+      next.delete(groupId);
+      return next;
+    });
+  }
+  function setGroupEnabled(groupId: string, enabled: boolean) {
+    setDraft((d) => d.map((r) => (r.group_id === groupId ? { ...r, enabled } : r)));
   }
 
   function move(key: string, dir: -1 | 1) {
@@ -377,45 +434,97 @@ export default function Rules() {
               </TableRow>
             </TableHead>
             <TableBody>
-              {draft.map((r, i) => (
-                <TableRow key={r._key} className="align-middle">
-                  <TableCell className="metric text-zinc-500">{r.priority}</TableCell>
-                  <TableCell className="font-medium">{r.id}</TableCell>
-                  <TableCell>
-                    <Badge color="zinc">{r.kind}</Badge>
-                  </TableCell>
-                  <TableCell className="text-zinc-600 dark:text-zinc-300">
-                    {r.pattern
-                      ? <code className="text-xs">{r.pattern}</code>
-                      : <span className="text-zinc-400">—</span>}
-                  </TableCell>
-                  <TableCell>
-                    {actionOptions.includes(r.action)
-                      ? <code className="text-xs">{r.action}</code>
-                      : <span className="text-red-600 dark:text-red-400 text-xs">{t('rules.unknownAction', { action: r.action })}</span>}
-                  </TableCell>
-                  <TableCell>
-                    <button
-                      type="button"
-                      onClick={() => patch(r._key, { enabled: !r.enabled })}
-                      className="cursor-pointer"
-                      aria-label={r.enabled ? t('rules.disableRule') : t('rules.enableRule')}
-                    >
-                      <Badge color={r.enabled ? 'lime' : 'zinc'}>{r.enabled ? t('rules.statusOn') : t('rules.statusOff')}</Badge>
-                    </button>
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <div className="flex justify-end gap-1">
-                      <Button plain aria-label={t('rules.moveUp')} onClick={() => move(r._key, -1)} disabled={i === 0}>↑</Button>
-                      <Button plain aria-label={t('rules.moveDown')} onClick={() => move(r._key, 1)} disabled={i === draft.length - 1}>↓</Button>
-                      <Button plain onClick={() => setEditing(editing === r._key ? null : r._key)}>
-                        {editing === r._key ? t('common.close') : t('rules.editButton')}
-                      </Button>
-                      <Button plain aria-label={t('rules.deleteAria')} onClick={() => removeRow(r._key)}>✕</Button>
-                    </div>
-                  </TableCell>
-                </TableRow>
-              ))}
+              {(() => {
+                const renderRow = (r: Draft, i: number, indented: boolean) => (
+                  <TableRow key={r._key} className="align-middle">
+                    <TableCell className={`metric text-zinc-500 ${indented ? 'pl-8' : ''}`}>{r.priority}</TableCell>
+                    <TableCell className="font-medium">{r.id}</TableCell>
+                    <TableCell>
+                      <Badge color="zinc">{r.kind}</Badge>
+                    </TableCell>
+                    <TableCell className="text-zinc-600 dark:text-zinc-300">
+                      {r.pattern
+                        ? <code className="text-xs">{r.pattern}</code>
+                        : <span className="text-zinc-400">—</span>}
+                    </TableCell>
+                    <TableCell>
+                      {actionOptions.includes(r.action)
+                        ? <code className="text-xs">{r.action}</code>
+                        : <span className="text-red-600 dark:text-red-400 text-xs">{t('rules.unknownAction', { action: r.action })}</span>}
+                    </TableCell>
+                    <TableCell>
+                      <button
+                        type="button"
+                        onClick={() => patch(r._key, { enabled: !r.enabled })}
+                        className="cursor-pointer"
+                        aria-label={r.enabled ? t('rules.disableRule') : t('rules.enableRule')}
+                      >
+                        <Badge color={r.enabled ? 'lime' : 'zinc'}>{r.enabled ? t('rules.statusOn') : t('rules.statusOff')}</Badge>
+                      </button>
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <div className="flex justify-end gap-1">
+                        <Button plain aria-label={t('rules.moveUp')} onClick={() => move(r._key, -1)} disabled={i === 0}>↑</Button>
+                        <Button plain aria-label={t('rules.moveDown')} onClick={() => move(r._key, 1)} disabled={i === draft.length - 1}>↓</Button>
+                        <Button plain onClick={() => setEditing(editing === r._key ? null : r._key)}>
+                          {editing === r._key ? t('common.close') : t('rules.editButton')}
+                        </Button>
+                        <Button plain aria-label={t('rules.deleteAria')} onClick={() => removeRow(r._key)}>✕</Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                );
+
+                return computeSegments(draft).map((seg) => {
+                  if (seg.kind === 'single') {
+                    return renderRow(seg.rule, seg.index, false);
+                  }
+                  const expanded = expandedGroups.has(seg.groupId);
+                  const enabledCount = seg.rules.filter(({ rule }) => rule.enabled).length;
+                  const total = seg.rules.length;
+                  const priorities = seg.rules.map(({ rule }) => rule.priority);
+                  const lo = Math.min(...priorities);
+                  const hi = Math.max(...priorities);
+                  const allEnabled = enabledCount === total;
+                  return (
+                    <Fragment key={`grp-${seg.groupId}`}>
+                      <TableRow className="bg-indigo-500/5 align-middle dark:bg-indigo-500/10">
+                        <TableCell colSpan={7}>
+                          <div className="flex flex-wrap items-center gap-3">
+                            <button
+                              type="button"
+                              onClick={() => toggleGroupExpanded(seg.groupId)}
+                              aria-label={expanded ? t('rules.groupCollapse') : t('rules.groupExpand')}
+                              className="font-mono text-sm text-indigo-700 dark:text-indigo-300"
+                            >
+                              {expanded ? '▼' : '▶'}
+                            </button>
+                            <span className="font-mono text-xs text-zinc-500">{seg.groupId}</span>
+                            <Badge color="indigo">{t('rules.groupHeaderCount', { count: total })}</Badge>
+                            <span className="text-xs text-zinc-500">{t('rules.groupPriorityRange', { low: lo, high: hi })}</span>
+                            <div className="ml-auto flex flex-wrap gap-1">
+                              <Button plain onClick={() => setGroupEnabled(seg.groupId, !allEnabled)}>
+                                {allEnabled ? t('rules.groupDisableAll') : t('rules.groupEnableAll')}
+                              </Button>
+                              <Button
+                                plain
+                                onClick={() => {
+                                  if (window.confirm(t('rules.groupDeleteAllConfirm', { count: total }))) {
+                                    deleteGroup(seg.groupId);
+                                  }
+                                }}
+                              >
+                                {t('rules.groupDeleteAll')}
+                              </Button>
+                            </div>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                      {expanded && seg.rules.map(({ rule, index }) => renderRow(rule, index, true))}
+                    </Fragment>
+                  );
+                });
+              })()}
             </TableBody>
           </Table>
         )}

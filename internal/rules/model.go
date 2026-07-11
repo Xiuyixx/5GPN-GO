@@ -31,6 +31,12 @@ var allKinds = map[Kind]struct{}{
 }
 
 // Rule is one entry in a rules list. Priority is 0-based; lower wins on ties.
+//
+// GroupID is optional UI-only metadata: rules that share a GroupID were
+// added as one batch (usually an import). The panel collapses them into
+// a single card. Manually-created rules leave GroupID empty and continue
+// to render one-card-per-rule. GroupID has no effect on dry-run, apply,
+// or the mihomo emission — it is a rendering hint only.
 type Rule struct {
 	ID       string `yaml:"id"       json:"id"`
 	Kind     Kind   `yaml:"kind"     json:"kind"`
@@ -39,6 +45,7 @@ type Rule struct {
 	Priority int    `yaml:"priority" json:"priority"`
 	Enabled  bool   `yaml:"enabled"  json:"enabled"`
 	Notes    string `yaml:"notes"    json:"notes,omitempty"`
+	GroupID  string `yaml:"group_id,omitempty" json:"group_id,omitempty"`
 }
 
 // ToMihomoLine serializes the rule to a single mihomo rules-list entry.

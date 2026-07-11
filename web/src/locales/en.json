@@ -161,7 +161,18 @@
     "preview": "Preview",
     "back": "Back",
     "mergeRules_one": "Merge {{count}} rule",
-    "mergeRules_other": "Merge {{count}} rules"
+    "mergeRules_other": "Merge {{count}} rules",
+    "groupHeaderCount_one": "{{count}} rule in this batch",
+    "groupHeaderCount_other": "{{count}} rules in this batch",
+    "groupExpand": "Expand group",
+    "groupCollapse": "Collapse group",
+    "groupEnableAll": "Enable all",
+    "groupDisableAll": "Disable all",
+    "groupDeleteAll": "Delete group",
+    "groupDeleteAllConfirm": "Delete this whole batch of {{count}} rules?",
+    "groupBadgeGfwlist": "gfwlist",
+    "groupBadgeImport": "imported",
+    "groupPriorityRange": "priority {{low}}–{{high}}"
   },
   "exits": {
     "title": "Exits",

@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -33,6 +35,13 @@ type importResponse struct {
 	Categories []string     `json:"categories"`
 	SourceURL  string       `json:"source_url,omitempty"`
 	SourceKind string       `json:"source_kind"` // "url" | "text"
+	// GroupID is the shared UI-only marker every rule in this batch
+	// carries. The frontend renders one collapsible card per group so
+	// 500-rule imports don't flood the Rules page.
+	GroupID string `json:"group_id"`
+	// SourceFormat is set to "gfwlist" when the auto-detector fell into
+	// the gfwlist / AutoProxy path so the UI can show a badge.
+	SourceFormat string `json:"source_format,omitempty"`
 }
 
 // handleImportRules fetches or parses a ruleset and returns candidate
@@ -82,11 +91,26 @@ func (s *Server) handleImportRules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse via the existing legacy importer.
-	csvLines, rep := rules.ImportLegacy(body, rules.ImportLegacyOptions{
+	// Auto-detect format (native Clash / raw gfwlist / base64 gfwlist)
+	// and parse. See internal/rules/importgfwlist.go for the detector.
+	csvLines, rep := rules.Import(body, rules.ImportLegacyOptions{
 		KeepCategories:   req.Keep,
 		DirectCategories: req.DirectCats,
 	})
+
+	// Detect gfwlist path from the report so the response can badge it.
+	sourceFormat := ""
+	for _, c := range rep.Categories {
+		if c == "gfwlist" {
+			sourceFormat = "gfwlist"
+			break
+		}
+	}
+
+	// One GroupID per import batch so the panel can collapse the whole
+	// batch into a single card. Format: imp-<sourceKind>-<hex>. Random
+	// suffix keeps repeated imports distinguishable.
+	groupID := "imp-" + sourceKind + "-" + randomHexShort(6)
 
 	// Convert CSV lines into Rule structs so the frontend can merge them.
 	out := make([]rules.Rule, 0, len(csvLines))
@@ -123,18 +147,30 @@ func (s *Server) handleImportRules(w http.ResponseWriter, r *http.Request) {
 			Action:   ruleAction,
 			Priority: prio,
 			Enabled:  true,
+			GroupID:  groupID,
 		})
 		prio += 10
 	}
 
 	writeJSON(w, http.StatusOK, importResponse{
-		Rules:      out,
-		Converted:  rep.Converted,
-		Dropped:    rep.Dropped,
-		Categories: rep.Categories,
-		SourceURL:  sourceURL,
-		SourceKind: sourceKind,
+		Rules:        out,
+		Converted:    rep.Converted,
+		Dropped:      rep.Dropped,
+		Categories:   rep.Categories,
+		SourceURL:    sourceURL,
+		SourceKind:   sourceKind,
+		GroupID:      groupID,
+		SourceFormat: sourceFormat,
 	})
+}
+
+// randomHexShort returns n random hex bytes for use in unique IDs.
+// Errors from rand.Read are ignored (very rare) — an empty string still
+// keeps the caller working, just without the collision guard.
+func randomHexShort(n int) string {
+	buf := make([]byte, n)
+	_, _ = rand.Read(buf)
+	return hex.EncodeToString(buf)
 }
 
 // fetchRuleset does a bounded HTTP GET. Bounded body size + timeout keeps

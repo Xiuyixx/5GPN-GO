@@ -161,7 +161,18 @@
     "preview": "预览",
     "back": "返回",
     "mergeRules_one": "合并 {{count}} 条规则",
-    "mergeRules_other": "合并 {{count}} 条规则"
+    "mergeRules_other": "合并 {{count}} 条规则",
+    "groupHeaderCount_one": "本批 {{count}} 条规则",
+    "groupHeaderCount_other": "本批 {{count}} 条规则",
+    "groupExpand": "展开这组",
+    "groupCollapse": "收起这组",
+    "groupEnableAll": "全部启用",
+    "groupDisableAll": "全部禁用",
+    "groupDeleteAll": "删除整组",
+    "groupDeleteAllConfirm": "确认删除这批 {{count}} 条规则？",
+    "groupBadgeGfwlist": "gfwlist",
+    "groupBadgeImport": "导入",
+    "groupPriorityRange": "优先级 {{low}}–{{high}}"
   },
   "exits": {
     "title": "出口",
