@@ -3,6 +3,7 @@ package resolver
 import (
 	"context"
 	"net"
+	"sync/atomic"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -76,9 +77,9 @@ func TestSpoof_AAAAWithoutV6FallsThroughToUpstream(t *testing.T) {
 	})
 	store.Publish(tbl)
 
-	forwarded := false
+	var forwarded atomic.Bool
 	up := newFakeUpstream(t, func(q *dns.Msg) *dns.Msg {
-		forwarded = true
+		forwarded.Store(true)
 		m := new(dns.Msg)
 		m.SetReply(q)
 		return m
@@ -93,7 +94,7 @@ func TestSpoof_AAAAWithoutV6FallsThroughToUpstream(t *testing.T) {
 	if _, err := r.Resolve(context.Background(), spoofTestQuery("chat.openai.com", dns.TypeAAAA), nil); err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if !forwarded {
+	if !forwarded.Load() {
 		t.Fatal("AAAA without ServerIP6 must forward, not spoof")
 	}
 	if snap := r.Metrics.Snapshot(); snap.HitsSpoof != 0 || snap.HitsProxy != 1 {
@@ -141,9 +142,9 @@ func TestSpoof_DirectAndBlockUnaffected(t *testing.T) {
 	})
 	store.Publish(tbl)
 
-	directHit := false
+	var directHit atomic.Bool
 	up := newFakeUpstream(t, func(q *dns.Msg) *dns.Msg {
-		directHit = true
+		directHit.Store(true)
 		m := new(dns.Msg)
 		m.SetReply(q)
 		m.Answer = []dns.RR{&dns.A{
@@ -167,7 +168,7 @@ func TestSpoof_DirectAndBlockUnaffected(t *testing.T) {
 	if _, err := r.Resolve(context.Background(), spoofTestQuery("www.taobao.com", dns.TypeA), nil); err != nil {
 		t.Fatal(err)
 	}
-	if !directHit {
+	if !directHit.Load() {
 		t.Fatal("direct classification did not reach upstream")
 	}
 
@@ -300,9 +301,9 @@ func TestSpoof_NonAddressTypesFallThrough(t *testing.T) {
 	})
 	store.Publish(tbl)
 
-	forwarded := false
+	var forwarded atomic.Bool
 	up := newFakeUpstream(t, func(q *dns.Msg) *dns.Msg {
-		forwarded = true
+		forwarded.Store(true)
 		m := new(dns.Msg)
 		m.SetReply(q)
 		return m
@@ -317,7 +318,7 @@ func TestSpoof_NonAddressTypesFallThrough(t *testing.T) {
 	if _, err := r.Resolve(context.Background(), spoofTestQuery("chat.openai.com", dns.TypeHTTPS), nil); err != nil {
 		t.Fatal(err)
 	}
-	if !forwarded {
+	if !forwarded.Load() {
 		t.Fatal("HTTPS-type query on proxy path must forward, not spoof")
 	}
 }
