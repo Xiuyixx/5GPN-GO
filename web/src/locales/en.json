@@ -304,7 +304,16 @@
     "newPasswordTooShort": "New password must be at least 8 characters",
     "passwordMismatch": "The two new passwords do not match",
     "newPasswordSameAsCurrent": "New password must be different from the current one",
-    "submitting": "Submitting…"
+    "submitting": "Submitting…",
+    "restartTitle": "Restart daemon",
+    "restartDescription": "Apply bind/port and TLS changes. The panel will be unreachable for a few seconds while systemd restarts the process.",
+    "restartButton": "Restart daemon",
+    "restarting": "Restarting…",
+    "restartQueued": "Restart queued. The panel will drop briefly and come back on the new settings.",
+    "restartConfirmTitle": "Restart the daemon?",
+    "restartConfirmBody": "The panel will drop for a few seconds. Any in-flight upload or dry-run will be aborted. Continue?",
+    "restartConfirm": "Yes, restart",
+    "restartUnavailable": "The daemon is not managed by systemd — restart is unavailable here."
   },
   "wizard": {
     "heading": "First-time setup",

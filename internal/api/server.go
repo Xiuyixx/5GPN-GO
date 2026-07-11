@@ -224,6 +224,7 @@ func (s *Server) Router() http.Handler {
 
 		r.Get("/api/v1/update/check", s.handleUpdateCheck)
 		r.Post("/api/v1/update/apply", s.handleUpdateApply)
+		r.Post("/api/v1/system/restart", s.handleSystemRestart)
 
 		r.Get("/api/v1/ios/profile-url", s.handleIOSProfileURL)
 	})

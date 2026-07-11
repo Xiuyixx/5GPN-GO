@@ -536,6 +536,66 @@ function PasswordSection() {
   );
 }
 
+function RestartSection() {
+  const { t } = useTranslation();
+  const [confirm, setConfirm] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [banner, setBanner] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function doRestart() {
+    setConfirm(false);
+    setErr(null);
+    setBusy(true);
+    setBanner(t('settings.restarting'));
+    try {
+      await api.post('/api/v1/system/restart');
+      setBanner(t('settings.restartQueued'));
+    } catch (e) {
+      if (e instanceof APIError && e.status === 503) {
+        setErr(t('settings.restartUnavailable'));
+      } else {
+        setErr(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Section
+      tint="rgb(244 63 94 / 0.35)"
+      title={t('settings.restartTitle')}
+      description={t('settings.restartDescription')}
+    >
+      {err && (
+        <div className="mb-3">
+          <Alert open onClose={() => setErr(null)}>
+            <AlertTitle>{t('settings.operationFailed')}</AlertTitle>
+            <AlertBody>{err}</AlertBody>
+          </Alert>
+        </div>
+      )}
+      {banner && (
+        <div className="mb-3 rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm text-rose-900 dark:text-rose-200">
+          {banner}
+        </div>
+      )}
+      <Button color="red" disabled={busy} onClick={() => setConfirm(true)}>
+        {busy ? t('settings.restarting') : t('settings.restartButton')}
+      </Button>
+      <Alert open={confirm} onClose={() => setConfirm(false)}>
+        <AlertTitle>{t('settings.restartConfirmTitle')}</AlertTitle>
+        <AlertBody>{t('settings.restartConfirmBody')}</AlertBody>
+        <div className="mt-4 flex justify-end gap-2">
+          <Button plain onClick={() => setConfirm(false)}>{t('common.cancel')}</Button>
+          <Button color="red" onClick={doRestart}>{t('settings.restartConfirm')}</Button>
+        </div>
+      </Alert>
+    </Section>
+  );
+}
+
 export default function Settings() {
   const { t } = useTranslation();
   return (
@@ -549,6 +609,7 @@ export default function Settings() {
         <TgbotSection />
         <IOSSection />
         <PasswordSection />
+        <RestartSection />
       </div>
     </AppShell>
   );

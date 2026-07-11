@@ -304,7 +304,16 @@
     "newPasswordTooShort": "新密码至少 8 位",
     "passwordMismatch": "两次输入的新密码不一致",
     "newPasswordSameAsCurrent": "新密码不能与当前密码相同",
-    "submitting": "提交中…"
+    "submitting": "提交中…",
+    "restartTitle": "重启 daemon",
+    "restartDescription": "应用监听地址 / 端口和 TLS 的修改。systemd 重启期间面板会短暂无法访问。",
+    "restartButton": "重启 daemon",
+    "restarting": "重启中…",
+    "restartQueued": "已提交重启。面板会短暂断开，随后按新设置恢复。",
+    "restartConfirmTitle": "确认重启 daemon？",
+    "restartConfirmBody": "面板会断开几秒。任何正在进行的上传 / Dry-run 都会被中断。继续吗？",
+    "restartConfirm": "确认重启",
+    "restartUnavailable": "当前 daemon 不由 systemd 管理 — 此处无法重启。"
   },
   "wizard": {
     "heading": "首次配置",
