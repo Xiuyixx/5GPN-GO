@@ -7,6 +7,7 @@ import { Badge } from '../components/ui/badge';
 import { Divider } from '../components/ui/divider';
 import { api } from '../api/client';
 import type { ExitsResponse, MetricsSample } from '../api/client';
+import DNSPlaneCard from './DashboardDNS';
 
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -146,6 +147,10 @@ export default function Dashboard() {
             ))}
           </ul>
         </div>
+      </div>
+
+      <div className="mt-8">
+        <DNSPlaneCard />
       </div>
     </AppShell>
   );

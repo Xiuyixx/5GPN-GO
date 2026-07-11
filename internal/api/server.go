@@ -85,6 +85,11 @@ type Server struct {
 	// every resolver-publish step in the rules-apply / rollback handlers
 	// becomes a no-op rather than a nil-pointer panic.
 	Resolver *resolver.Store
+	// Metrics is the DNS plane's lock-free query counter set
+	// (internal/resolver.Metrics), read by GET /api/v1/metrics/dns (see
+	// dns_metrics.go). Optional: nil means the DNS front-door isn't wired
+	// in, and the endpoint reports zero counters instead of panicking.
+	Metrics *resolver.Metrics
 	// applyStore tracks the async rules-apply / rollback lifecycle (see
 	// applies.go) that backs GET /api/v1/applies[/{id}]. Always non-nil.
 	applyStore *applyStore
@@ -114,6 +119,8 @@ type Config struct {
 	RulesetSyncer  *rulesets.Syncer
 	// Resolver is optional; see Server.Resolver doc comment.
 	Resolver *resolver.Store
+	// Metrics is optional; see Server.Metrics doc comment.
+	Metrics *resolver.Metrics
 }
 
 // New builds a Server from its dependencies.
@@ -178,6 +185,7 @@ func New(db *sql.DB, cfg Config, logger *slog.Logger) *Server {
 		Rulesets:      cfg.Rulesets,
 		RulesetSyncer: cfg.RulesetSyncer,
 		Resolver:      cfg.Resolver,
+		Metrics:       cfg.Metrics,
 		applyStore:    newApplyStore(),
 	}
 }
@@ -227,6 +235,7 @@ func (s *Server) Router() http.Handler {
 		r.Get("/api/v1/rules", s.handleListRules)
 		r.Post("/api/v1/rules/dry-run", s.handleDryRun)
 		r.Post("/api/v1/rules/apply", s.handleApply)
+		r.Post("/api/v1/rules/apply/preview", s.handleApplyPreview)
 		r.Post("/api/v1/rules/import", s.handleImportRules)
 		r.Post("/api/v1/rules/chinalist/sync", s.handleChinalistSync)
 		r.Get("/api/v1/rulesets", s.handleListRulesets)
@@ -254,6 +263,7 @@ func (s *Server) Router() http.Handler {
 		r.Post("/api/v1/backup/import", s.handleImportBackup)
 
 		r.Get("/api/v1/metrics", s.handleMetrics)
+		r.Get("/api/v1/metrics/dns", s.handleDNSMetrics)
 		r.Get("/api/v1/events/logs", s.handleLogsSSE)
 
 		r.Get("/api/v1/update/check", s.handleUpdateCheck)
@@ -261,6 +271,8 @@ func (s *Server) Router() http.Handler {
 		r.Post("/api/v1/system/restart", s.handleSystemRestart)
 
 		r.Get("/api/v1/ios/profile-url", s.handleIOSProfileURL)
+		r.Post("/api/v1/settings/ios/preflight", s.handleIOSPreflight)
+		r.Post("/api/v1/settings/ios/profile-enabled", s.handleIOSProfileToggle)
 	})
 
 	// Static SPA fallback: any GET that isn't /api/* serves the panel bundle,

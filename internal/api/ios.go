@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Xiuyixx/5GPN-Go/internal/ios"
+	"github.com/Xiuyixx/5GPN-Go/internal/settings"
 )
 
 // handleIOSProfileURL returns the https URL where the iOS mobileconfig
@@ -40,6 +41,14 @@ func (s *Server) handleIOSProfileURL(w http.ResponseWriter, r *http.Request) {
 // Public + unauthenticated: Apple's OTA install flow hits this URL
 // without any bearer token, and everything it discloses (the DoT server
 // hostname) is already public via DNS.
+//
+// Gated behind settings.KeyFrontdoorIOSProfileEnabled (plan §4 Phase 8):
+// v0.2.9 let a device install this profile before the panel's own :853 DoT
+// listener was actually answering queries, which sent the phone's entire
+// DNS resolution into a black hole. The flag can only be set to true after
+// a passing preflight (see preflight.go's handleIOSProfileToggle), so a
+// 503 here means "the operator hasn't proven DoT works yet" rather than a
+// transient failure.
 func (s *Server) handleIOSMobileconfig(w http.ResponseWriter, r *http.Request) {
 	if s.BaseConfig == nil {
 		writeError(w, http.StatusInternalServerError, "no_config", "server has no base config")
@@ -50,11 +59,37 @@ func (s *Server) handleIOSMobileconfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "no_domain", "server.domain is not configured")
 		return
 	}
+
+	var enabled bool
+	if s.Settings != nil {
+		var err error
+		enabled, err = s.Settings.GetBool(r.Context(), settings.KeyFrontdoorIOSProfileEnabled)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "settings_error", err.Error())
+			return
+		}
+	}
+	if !enabled {
+		writeError(w, http.StatusServiceUnavailable, "ios_profile_disabled",
+			"the iOS profile is disabled until a DoT preflight passes; enable via POST /api/v1/settings/ios/profile-enabled after running POST /api/v1/settings/ios/preflight")
+		return
+	}
+
+	fallbackDoT := defaultIOSFallbackDoT
+	if s.Settings != nil {
+		if v, err := s.Settings.GetString(r.Context(), settings.KeyFrontdoorFallbackDoT); err == nil && v != "" {
+			fallbackDoT = v
+		}
+	}
+
 	profileUUID := iosProfileUUID(domain, s.BaseConfig.IOS.ProfileUUID)
 	payload, err := ios.Render(ios.ProfileParams{
-		Domain:      domain,
-		UUID:        profileUUID,
-		PayloadUUID: iosPayloadUUID(profileUUID),
+		Domain:              domain,
+		UUID:                profileUUID,
+		PayloadUUID:         iosPayloadUUID(profileUUID),
+		OnDemand:            true,
+		FallbackDoT:         fallbackDoT,
+		FallbackPayloadUUID: iosFallbackPayloadUUID(profileUUID),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "render", err.Error())
@@ -86,4 +121,11 @@ func iosProfileUUID(domain, configured string) string {
 // keeps them stable and eliminates persisting a second value.
 func iosPayloadUUID(profileUUID string) string {
 	return uuid.NewSHA1(uuid.NameSpaceURL, []byte("5gpn-dot-payload:"+profileUUID)).String()
+}
+
+// iosFallbackPayloadUUID derives the PayloadUUID for the second
+// (FallbackDoT) DNSSettings payload — plan §4 Phase 8 / AC-I5. Same
+// derive-don't-persist rationale as iosPayloadUUID above.
+func iosFallbackPayloadUUID(profileUUID string) string {
+	return uuid.NewSHA1(uuid.NameSpaceURL, []byte("5gpn-dot-fallback-payload:"+profileUUID)).String()
 }

@@ -205,6 +205,40 @@ export interface RegisterRulesetRequest {
   enabled?: boolean;
 }
 
+// DNS Plane observability — GET /api/v1/metrics/dns (Dashboard's
+// DNSPlaneCard polls this every 5s). Nil-safe on the backend: when the
+// DNS front-door isn't wired in, counters are zero and every listener
+// reports "not_configured".
+export type DNSListenerHealth = 'healthy' | 'degraded' | 'not_configured';
+
+export interface DNSListenerStatus {
+  udp53: DNSListenerHealth;
+  tcp53: DNSListenerHealth;
+  dot: DNSListenerHealth;
+  doh: DNSListenerHealth;
+}
+
+export interface DNSCertStatus {
+  domain: string;
+  not_after_unix: number;
+  days_until_expiry: number;
+}
+
+export interface DNSMetrics {
+  queries_total: number;
+  hits_block: number;
+  hits_direct: number;
+  hits_proxy: number;
+  upstream_errors: number;
+  refused_axfr: number;
+  listeners: DNSListenerStatus;
+  cert: DNSCertStatus | null;
+}
+
+export function getDNSMetrics(): Promise<DNSMetrics> {
+  return api.get<DNSMetrics>('/api/v1/metrics/dns');
+}
+
 export interface BackupImportResult {
   entries: number;
   total_bytes: number;

@@ -164,6 +164,70 @@ func compileRule(t *RuleTable, r rules.Rule) {
 	}
 }
 
+// Entry is one exported, normalized classification entry compiled from a
+// RuleTable: a diffable (kind, pattern, action) triple covering
+// exact-domain, domain-suffix, and domain-keyword rules. CIDR entries are
+// excluded — the DNS layer never classifies on them (AC-R5), so they carry
+// no meaningful action for a query-classification diff.
+type Entry struct {
+	Kind    string // "exact" | "suffix" | "keyword"
+	Pattern string
+	Action  string // normalized to "block" | "direct" | "proxy"
+}
+
+// Entries returns every compiled classification entry keyed by
+// "<kind>:<pattern>", suitable for set-diffing two RuleTable snapshots
+// (see api.handleApplyPreview). A nil table yields an empty map. Actions
+// are normalized via the same three-state mapping Resolve/classify use, so
+// callers comparing two tables never have to reason about raw rule-action
+// casing.
+//
+// Duplicate domain-keyword patterns keep only the first (highest-priority)
+// action, matching classify()'s first-match-wins precedence at query time.
+func (t *RuleTable) Entries() map[string]Entry {
+	out := make(map[string]Entry)
+	if t == nil {
+		return out
+	}
+	for name, action := range t.exact {
+		out["exact:"+name] = Entry{Kind: "exact", Pattern: name, Action: string(toAction(action))}
+	}
+	if t.suffix != nil {
+		t.suffix.walk(nil, func(name, action string) {
+			out["suffix:"+name] = Entry{Kind: "suffix", Pattern: name, Action: string(toAction(action))}
+		})
+	}
+	for _, kw := range t.keywords {
+		key := "keyword:" + kw.keyword
+		if _, exists := out[key]; !exists {
+			out[key] = Entry{Kind: "keyword", Pattern: kw.keyword, Action: string(toAction(kw.action))}
+		}
+	}
+	return out
+}
+
+// walk visits every terminal (hasAction) node reachable from n, invoking
+// visit with the reconstructed FQDN and its raw action. path accumulates
+// labels root-to-node in the order insert() walked them (TLD first, since
+// insert processes labels right-to-left) — it is reversed here to rebuild
+// the natural left-to-right domain name. A fresh slice is allocated per
+// child so sibling recursive calls never alias the same backing array.
+func (n *suffixNode) walk(path []string, visit func(name, action string)) {
+	if n.hasAction {
+		rev := make([]string, len(path))
+		for i, lbl := range path {
+			rev[len(path)-1-i] = lbl
+		}
+		visit(strings.Join(rev, "."), n.action)
+	}
+	for lbl, child := range n.children {
+		next := make([]string, len(path)+1)
+		copy(next, path)
+		next[len(path)] = lbl
+		child.walk(next, visit)
+	}
+}
+
 // Store holds the currently active RuleTable behind an atomic pointer so
 // readers can pin a snapshot for a query's lifetime with zero lock
 // contention, and writers publish a freshly built table with one Store().

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -39,6 +40,101 @@ func TestRenderRejectsMissingDomain(t *testing.T) {
 	_, err := Render(ProfileParams{UUID: "a", PayloadUUID: "b"})
 	if err == nil {
 		t.Fatal("expected error for empty domain")
+	}
+}
+
+// TestRenderOnDemandAndFallback covers plan §4 Phase 8 / AC-I5: the
+// mobileconfig must gain an OnDemandRules array (WiFi + Cellular,
+// Action: Connect) plus a second DNSSettings payload for FallbackDoT so an
+// iPhone can auto-switch upstream if the primary VPS-hosted DoT server
+// goes down.
+func TestRenderOnDemandAndFallback(t *testing.T) {
+	body, err := Render(ProfileParams{
+		Domain:              "dot.example.com",
+		UUID:                "00000000-0000-0000-0000-000000000001",
+		PayloadUUID:         "00000000-0000-0000-0000-000000000002",
+		OnDemand:            true,
+		FallbackDoT:         "1.1.1.1",
+		FallbackPayloadUUID: "00000000-0000-0000-0000-000000000003",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(body)
+	for _, want := range []string{
+		"<key>OnDemandRules</key>",
+		"<string>Connect</string>",
+		"<string>WiFi</string>",
+		"<string>Cellular</string>",
+		"<string>1.1.1.1</string>",
+		"00000000-0000-0000-0000-000000000003",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("rendered profile missing %q\n--- body ---\n%s", want, s)
+		}
+	}
+	// Two DNSSettings payloads: primary + fallback.
+	if got := strings.Count(s, "<key>DNSSettings</key>"); got != 2 {
+		t.Errorf("want 2 DNSSettings dicts, got %d", got)
+	}
+	// Two OnDemandRules blocks (one per DNSSettings payload).
+	if got := strings.Count(s, "<key>OnDemandRules</key>"); got != 2 {
+		t.Errorf("want 2 OnDemandRules blocks, got %d", got)
+	}
+	validatePlistIfPossible(t, body)
+}
+
+func TestRenderWithoutOnDemandOrFallbackOmitsExtras(t *testing.T) {
+	body, err := Render(ProfileParams{
+		Domain:      "dot.example.com",
+		UUID:        "00000000-0000-0000-0000-000000000001",
+		PayloadUUID: "00000000-0000-0000-0000-000000000002",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(body)
+	if strings.Contains(s, "OnDemandRules") {
+		t.Errorf("OnDemandRules should be absent when OnDemand=false:\n%s", s)
+	}
+	if got := strings.Count(s, "<key>DNSSettings</key>"); got != 1 {
+		t.Errorf("want 1 DNSSettings dict, got %d", got)
+	}
+	validatePlistIfPossible(t, body)
+}
+
+func TestRenderRejectsFallbackWithoutUUID(t *testing.T) {
+	_, err := Render(ProfileParams{
+		Domain:      "dot.example.com",
+		UUID:        "a",
+		PayloadUUID: "b",
+		FallbackDoT: "1.1.1.1",
+	})
+	if err == nil {
+		t.Fatal("expected error when FallbackDoT is set without FallbackPayloadUUID")
+	}
+}
+
+// validatePlistIfPossible shells out to macOS's plutil (when available) to
+// confirm the rendered document is well-formed plist XML — the same check
+// called out in the plan's Phase 8 acceptance step. It's a no-op on
+// platforms without plutil (e.g. Linux CI) rather than a hard dependency.
+func validatePlistIfPossible(t *testing.T, body []byte) {
+	t.Helper()
+	if _, err := exec.LookPath("plutil"); err != nil {
+		t.Skip("plutil not available; skipping plist structural validation")
+	}
+	f, err := os.CreateTemp(t.TempDir(), "*.mobileconfig")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	out, err := exec.Command("plutil", "-lint", f.Name()).CombinedOutput()
+	if err != nil {
+		t.Fatalf("plutil -lint failed: %v\n%s", err, out)
 	}
 }
 

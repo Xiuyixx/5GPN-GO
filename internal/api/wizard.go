@@ -49,6 +49,18 @@ type panelSettingsResponse struct {
 	Wizard struct {
 		Complete bool `json:"complete"`
 	} `json:"wizard"`
+	// IOS surfaces the Phase 8 preflight-gated profile toggle state so the
+	// wizard/settings page can render "Enable iOS profile" as disabled
+	// until a preflight has passed, without a second round-trip. The
+	// toggle itself is written via POST /api/v1/settings/ios/profile-enabled
+	// (which enforces the preflight gate server-side), not through this
+	// endpoint's update path.
+	IOS struct {
+		ProfileEnabled     bool   `json:"profile_enabled"`
+		FallbackDoT        string `json:"fallback_dot"`
+		PreflightLastAt    *int64 `json:"preflight_last_at,omitempty"`
+		PreflightLastError string `json:"preflight_last_error,omitempty"`
+	} `json:"ios"`
 }
 
 // panelSettingsUpdate mirrors the response for POST. Every field is a
@@ -340,6 +352,29 @@ func readPanelSettings(ctx context.Context, store *settings.Store) (*panelSettin
 		return nil, err
 	} else {
 		out.Wizard.Complete = v
+	}
+	if v, err := store.GetBool(ctx, settings.KeyFrontdoorIOSProfileEnabled); err != nil {
+		return nil, err
+	} else {
+		out.IOS.ProfileEnabled = v
+	}
+	if v, err := store.GetString(ctx, settings.KeyFrontdoorFallbackDoT); err != nil {
+		return nil, err
+	} else {
+		out.IOS.FallbackDoT = v
+	}
+	var preflightLastAt int64
+	if err := store.GetJSON(ctx, settings.KeyFrontdoorPreflightLastAt, &preflightLastAt); err != nil {
+		if !errors.Is(err, settings.ErrNotFound) {
+			return nil, err
+		}
+	} else {
+		out.IOS.PreflightLastAt = &preflightLastAt
+	}
+	if v, err := store.GetString(ctx, settings.KeyFrontdoorPreflightLastError); err != nil {
+		return nil, err
+	} else {
+		out.IOS.PreflightLastError = v
 	}
 	return out, nil
 }

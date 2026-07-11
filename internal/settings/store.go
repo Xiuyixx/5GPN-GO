@@ -26,20 +26,29 @@ import (
 // Known panel_settings keys. New keys go here so the linter catches
 // typos at the callsite instead of at runtime.
 const (
-	KeyServerDomain     = "server.domain"
-	KeyServerPanelBind  = "server.panel_bind"
-	KeyServerPanelPort  = "server.panel_port"
-	KeyTLSACMEEnabled   = "tls.acme_enabled"
-	KeyTLSACMEEmail     = "tls.acme_email"
-	KeyTGBotToken       = "tgbot.token"
-	KeyTGBotAdminChats  = "tgbot.admin_chat_ids"
-	KeyWAShimEnabled    = "washim.enabled"
-	KeyWAShimListen     = "washim.listen"
-	KeyWAShimPort       = "washim.port"
-	KeyWAShimBackend    = "washim.backend"
-	KeyWAShimWAHost     = "washim.wa_host"
-	KeyWAShimAllowCIDR  = "washim.allow_cidr"
-	KeyWizardComplete   = "wizard.complete"
+	KeyServerDomain    = "server.domain"
+	KeyServerPanelBind = "server.panel_bind"
+	KeyServerPanelPort = "server.panel_port"
+	KeyTLSACMEEnabled  = "tls.acme_enabled"
+	KeyTLSACMEEmail    = "tls.acme_email"
+	KeyTGBotToken      = "tgbot.token"
+	KeyTGBotAdminChats = "tgbot.admin_chat_ids"
+	KeyWAShimEnabled   = "washim.enabled"
+	KeyWAShimListen    = "washim.listen"
+	KeyWAShimPort      = "washim.port"
+	KeyWAShimBackend   = "washim.backend"
+	KeyWAShimWAHost    = "washim.wa_host"
+	KeyWAShimAllowCIDR = "washim.allow_cidr"
+	KeyWizardComplete  = "wizard.complete"
+
+	// iOS preflight + profile-gating keys (plan §4 Phase 8). The mobileconfig
+	// endpoint stays 503 until KeyFrontdoorIOSProfileEnabled is true, and
+	// that flag can only flip to true after a passing preflight — see
+	// internal/api/preflight.go.
+	KeyFrontdoorIOSProfileEnabled  = "frontdoor.ios_profile_enabled"
+	KeyFrontdoorFallbackDoT        = "frontdoor.ios_fallback_dot"
+	KeyFrontdoorPreflightLastAt    = "frontdoor.preflight_last_at"
+	KeyFrontdoorPreflightLastError = "frontdoor.preflight_last_error"
 )
 
 // ErrNotFound is returned by Get when the key is absent.

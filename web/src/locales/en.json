@@ -69,7 +69,17 @@
     "txColumn": "Tx",
     "rxColumn": "Rx",
     "badgeActive": "active",
-    "badgeStandby": "standby"
+    "badgeStandby": "standby",
+    "dnsPlaneTitle": "DNS Plane",
+    "dnsQPS": "QPS",
+    "dnsHitsBlock": "Blocked",
+    "dnsHitsDirect": "Direct",
+    "dnsHitsProxy": "Proxy",
+    "dnsUpstreamErrors": "Upstream errors",
+    "dnsCertExpiry": "TLS cert valid for {{days}} days",
+    "dnsListenerHealthy": "healthy",
+    "dnsListenerDegraded": "degraded",
+    "dnsListenerNotConfigured": "not configured"
   },
   "rules": {
     "tagline": "Edit rules · define test fixtures below · Dry-run must pass before Apply.",

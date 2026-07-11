@@ -69,7 +69,17 @@
     "txColumn": "上行",
     "rxColumn": "下行",
     "badgeActive": "活跃",
-    "badgeStandby": "待命"
+    "badgeStandby": "待命",
+    "dnsPlaneTitle": "DNS 解析平面",
+    "dnsQPS": "查询频率",
+    "dnsHitsBlock": "已拦截",
+    "dnsHitsDirect": "直连",
+    "dnsHitsProxy": "代理",
+    "dnsUpstreamErrors": "上游错误",
+    "dnsCertExpiry": "TLS 证书剩余 {{days}} 天",
+    "dnsListenerHealthy": "健康",
+    "dnsListenerDegraded": "异常",
+    "dnsListenerNotConfigured": "未配置"
   },
   "rules": {
     "tagline": "编辑规则 · 在下方定义测试用例 · Dry-run 通过后才能应用。",
