@@ -101,3 +101,46 @@ func TestImportLegacyStripsModifiers(t *testing.T) {
 		t.Fatalf("modifier not stripped: %v", rules)
 	}
 }
+
+// Regression: text-format Clash rules from blackmatrix7/ios_rule_script
+// (a very common ruleset source) ship WITHOUT a policy field —
+// the policy is applied by the ruleset registration, not the file.
+// v0.2.8 dropped these entirely. This exercises every shape in the
+// NetEaseMusic sample the operator hit.
+func TestImportLegacyBlackmatrix7NoPolicyField(t *testing.T) {
+	input := `# NAME: NetEaseMusic
+# AUTHOR: blackmatrix7
+DOMAIN,netease.ugcvideoss.ourdvs.com
+DOMAIN-SUFFIX,163yun.com
+DOMAIN-SUFFIX,music.163.com
+IP-CIDR,101.71.154.241/32,no-resolve
+IP-CIDR,103.126.92.132/31,no-resolve
+IP-CIDR,115.236.112.0/20,no-resolve
+USER-AGENT,%E7%BD%91%E6%98%93%E4%BA%91%E9%9F%B3%E4%B9%90*
+USER-AGENT,NeteaseMusic*
+`
+	rules, rep := ImportLegacy(input, ImportLegacyOptions{})
+	// 3 DOMAIN* + 3 IP-CIDR = 6 kept; both USER-AGENT lines dropped
+	// (client-only matcher). Comments do not count.
+	if rep.Converted != 6 {
+		t.Fatalf("expected 6 converted, got %d (rules=%v dropped=%d)", rep.Converted, rules, rep.Dropped)
+	}
+	if rep.Dropped != 2 {
+		t.Fatalf("expected 2 dropped (both USER-AGENT), got %d", rep.Dropped)
+	}
+	joined := strings.Join(rules, "\n")
+	// Every kept line should carry the default "Proxy" policy — rulesets.
+	// Expand() rewrites that to the caller-picked action later.
+	for _, want := range []string{
+		"DOMAIN,netease.ugcvideoss.ourdvs.com,Proxy",
+		"DOMAIN-SUFFIX,163yun.com,Proxy",
+		"DOMAIN-SUFFIX,music.163.com,Proxy",
+		"IP-CIDR,101.71.154.241/32,Proxy",
+		"IP-CIDR,103.126.92.132/31,Proxy",
+		"IP-CIDR,115.236.112.0/20,Proxy",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing %q in output; got:\n%s", want, joined)
+		}
+	}
+}

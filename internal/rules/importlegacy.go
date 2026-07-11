@@ -152,7 +152,14 @@ func ImportLegacy(input string, opts ImportLegacyOptions) ([]string, ImportLegac
 			rep.Dropped++
 			continue
 		}
-		if !legacyKeep[typ] || len(parts) < 3 {
+		// Need at least KIND + VALUE. Policy is optional so we can absorb
+		// blackmatrix7 / ios_rule_script style text rules
+		// ("DOMAIN,foo.com" with no policy, "IP-CIDR,1.2.3.4/32,no-resolve"
+		// where the third field is a modifier not a policy). When policy
+		// is missing catFn falls back to "Proxy", which rulesets.Expand()
+		// then rewrites to the ruleset's own Action — so the effective
+		// rule still points at the caller-picked exit.
+		if !legacyKeep[typ] || len(parts) < 2 {
 			rep.Dropped++
 			continue
 		}
@@ -163,11 +170,11 @@ func ImportLegacy(input string, opts ImportLegacyOptions) ([]string, ImportLegac
 				rest = append(rest, p)
 			}
 		}
-		if len(rest) == 0 {
-			rep.Dropped++
-			continue
+		policy := ""
+		if len(rest) > 0 {
+			policy = rest[0]
 		}
-		emit(typ, parts[1], rest[0], &rules)
+		emit(typ, parts[1], policy, &rules)
 	}
 
 	if final != "" {
