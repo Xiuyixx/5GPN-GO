@@ -198,6 +198,12 @@ func (s *Server) Router() http.Handler {
 
 	r.Post("/api/v1/login", s.handleLogin)
 
+	// iOS mobileconfig is served unauthenticated over HTTPS so Apple's OTA
+	// install flow can pull it without a bearer token. Content is public
+	// anyway (only the DoT server hostname). Must be registered BEFORE the
+	// SPA catch-all below or the router serves index.html instead.
+	r.Get("/ios-dot.mobileconfig", s.handleIOSMobileconfig)
+
 	r.Group(func(r chi.Router) {
 		r.Use(s.authMiddleware)
 		r.Post("/api/v1/logout", s.handleLogout)
