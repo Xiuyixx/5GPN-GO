@@ -18,6 +18,11 @@ Wants=network-online.target
 Type=simple
 User={{.User}}
 Group={{.Group}}
+# systemd-journal grants the daemon read access to the system journal so
+# the panel's /api/v1/events/logs SSE can tail journalctl -u <unit>.
+# Without it journalctl refuses with "No journal files were opened due
+# to insufficient permissions." and the Logs page stays disconnected.
+SupplementaryGroups=systemd-journal
 ExecStart={{.BinaryPath}} --config {{.ConfigPath}} --data {{.DataDir}}
 Restart=on-failure
 RestartSec=3s
@@ -38,13 +43,30 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE
 WantedBy=multi-user.target
 `
 
-// DefaultConfigTemplate is what fresh installs get. Values come straight
-// from cfg schema defaults — the interview happens later inside the panel.
+// DefaultConfigTemplate is what fresh installs get. Every required
+// schema field (internal/config/schema.go) is populated with a working
+// default so `config.Load` succeeds on first boot without operator
+// intervention. Operators customize by editing /etc/5gpn/config.yaml
+// or through the panel after bootstrap.
+//
+// Env-var expansion is `${VAR}` only (see internal/config/loader.go's
+// envRe). Bash-style `${VAR:-default}` is NOT supported — the regex
+// only accepts `[A-Z_][A-Z0-9_]*` between the braces, so anything else
+// stays literal and pollutes the config. Hard-coded values below avoid
+// that trap.
 const DefaultConfigTemplate = `# 5GPN panel config — written by 5gpn-installer install.
 # Full schema: internal/config/schema.go
+#
+# All required fields are pre-filled with safe defaults so the daemon
+# validates and boots on first run. Change these before exposing the
+# panel to the internet:
+#   - server.domain: hostname the panel serves under (TLS SAN, iOS profile)
+#   - server.panel_bind: 0.0.0.0 accepts external, 127.0.0.1 tunnel-only
+#   - proxy.wa_shim.*: WA-shim listener; leave localhost-only unless used
+
 server:
-  domain: "${5GPN_DOMAIN:-panel.local}"
-  panel_bind: "127.0.0.1"
+  domain: "panel.local"
+  panel_bind: "0.0.0.0"
   panel_port: 8443
   tls:
     cert: ""
@@ -56,12 +78,26 @@ panel:
     login_per_minute: 5
     lockout_minutes: 15
 
+proxy:
+  # WAShim mirrors 5GPN-X/wa-shim.py. Its fields carry required tags in
+  # the config schema, so we ship working localhost-only defaults; if
+  # you aren't routing WA traffic this listener is harmless (bound to
+  # 127.0.0.1 with a 127.0.0.1/32 allow-list).
+  wa_shim:
+    listen: "127.0.0.1"
+    port: 8447
+    backend: "127.0.0.1:1080"
+    wa_host: "www.apple.com"
+    allow_cidr:
+      - "127.0.0.1/32"
+    max_conn: 100
+
 tgbot:
-  token: "${5GPN_TG_TOKEN:-}"
+  token: ""
   admin_chat_ids: []
 
 ios:
-  profile_port: 8444
+  http_port: 8111
 `
 
 // Render fills UnitTemplate against the target Env.

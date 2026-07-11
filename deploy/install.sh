@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # 5gpn bootstrap installer.
 #
-# Fetches the 5gpn-installer binary from a GitHub Release, verifies its
-# sha256, and hands off to `5gpn-installer install`. All the real logic
-# lives in cmd/5gpn-installer/ (Go); this script exists so operators can
-# `curl … | bash` on a fresh host and stay tiny (~90 lines).
+# Fetches the 5gpn-installer AND the daemon binary from a GitHub Release,
+# verifies both sha256s, and hands off to `5gpn-installer install
+# --source-binary <daemon>`. All the real logic lives in
+# cmd/5gpn-installer/ (Go); this script exists so operators can
+# `curl … | bash` on a fresh host and stay tiny.
 #
 # Env overrides:
 #   GPN_REPO      Github repo (default: Xiuyixx/5GPN-GO)
@@ -49,35 +50,44 @@ fi
 tmpdir="${GPN_TMPDIR:-$(mktemp -d)}"
 trap 'rm -rf "$tmpdir"' EXIT
 
-artefact="5gpn-installer-${os}-${arch}"
+installer_asset="5gpn-installer-${os}-${arch}"
+daemon_asset="5gpn-${os}-${arch}"
 base="https://github.com/${REPO}/releases/download/${tag}"
 
-echo "[5gpn] downloading ${artefact} @ ${tag}"
-curl -fsSL "${base}/${artefact}" -o "${tmpdir}/${artefact}"
-curl -fsSL "${base}/SHA256SUMS" -o "${tmpdir}/SHA256SUMS"
+echo "[5gpn] downloading ${installer_asset} @ ${tag}"
+curl -fsSL "${base}/${installer_asset}" -o "${tmpdir}/${installer_asset}"
+echo "[5gpn] downloading ${daemon_asset} @ ${tag}"
+curl -fsSL "${base}/${daemon_asset}"    -o "${tmpdir}/${daemon_asset}"
+echo "[5gpn] downloading SHA256SUMS @ ${tag}"
+curl -fsSL "${base}/SHA256SUMS"          -o "${tmpdir}/SHA256SUMS"
 
-if command -v sha256sum >/dev/null 2>&1; then
-  ( cd "$tmpdir" && grep " ${artefact}$" SHA256SUMS | sha256sum -c - )
-else
-  # macOS shasum path
-  expected=$(grep " ${artefact}$" "${tmpdir}/SHA256SUMS" | awk '{print $1}')
-  got=$(shasum -a 256 "${tmpdir}/${artefact}" | awk '{print $1}')
-  if [ "$expected" != "$got" ]; then
-    echo "sha256 mismatch: want $expected got $got" >&2
-    exit 1
+verify_sha() {
+  local asset="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    ( cd "$tmpdir" && grep " ${asset}$" SHA256SUMS | sha256sum -c - )
+  else
+    local expected got
+    expected=$(grep " ${asset}$" "${tmpdir}/SHA256SUMS" | awk '{print $1}')
+    got=$(shasum -a 256 "${tmpdir}/${asset}" | awk '{print $1}')
+    if [ "$expected" != "$got" ]; then
+      echo "sha256 mismatch for ${asset}: want $expected got $got" >&2
+      exit 1
+    fi
   fi
-fi
+}
+verify_sha "${installer_asset}"
+verify_sha "${daemon_asset}"
 
-chmod +x "${tmpdir}/${artefact}"
+chmod +x "${tmpdir}/${installer_asset}" "${tmpdir}/${daemon_asset}"
 
-install_flags=()
+install_flags=(--source-binary "${tmpdir}/${daemon_asset}")
 if [ -n "$PREFIX" ]; then
   install_flags+=(--root "$PREFIX")
 fi
 
 if [ "$(id -u)" -ne 0 ] && [ -z "$PREFIX" ]; then
   echo "[5gpn] not root — re-invoking under sudo"
-  exec sudo "${tmpdir}/${artefact}" install "${install_flags[@]}" "$@"
+  exec sudo "${tmpdir}/${installer_asset}" install "${install_flags[@]}" "$@"
 fi
 
-exec "${tmpdir}/${artefact}" install "${install_flags[@]}" "$@"
+exec "${tmpdir}/${installer_asset}" install "${install_flags[@]}" "$@"

@@ -2,6 +2,7 @@ package installer
 
 import (
 	"context"
+	"os"
 	"runtime"
 	"strings"
 	"testing"
@@ -108,6 +109,67 @@ func TestUninstall_NoPurgeKeepsConfig(t *testing.T) {
 			t.Errorf("no-purge should not remove %s", op.Path)
 		}
 	}
+}
+
+// TestInstall_WritesSourceBinary is the regression that guards the
+// install.sh → 5gpn-installer contract: install.sh downloads the daemon
+// binary and passes its path via --source-binary; installer must copy
+// that file to env.BinaryPath so a fresh curl-bash install actually
+// leaves a runnable daemon on disk. Without this the systemd unit
+// would fail with status=203/EXEC (no executable at ExecStart).
+func TestInstall_WritesSourceBinary(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	src := tmp + "/downloaded-daemon"
+	daemonBody := []byte("#!/bin/sh\necho fake 5gpn daemon\n")
+	if err := os.WriteFile(src, daemonBody, 0o755); err != nil {
+		t.Fatalf("prep source: %v", err)
+	}
+
+	env := Defaults().WithRoot(t.TempDir())
+	rec := NewRecorder()
+	rec.Apply = true
+
+	if err := Install(ctx, env, rec, InstallOptions{SourceBinary: src}); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	got, ok := rec.Files[env.BinaryPath()]
+	if !ok {
+		t.Fatalf("expected binary written at %s (got files %v)", env.BinaryPath(), keys(rec.Files))
+	}
+	if string(got) != string(daemonBody) {
+		t.Errorf("binary body mismatch:\n got=%q\nwant=%q", got, daemonBody)
+	}
+}
+
+// TestInstall_ChownsConfigDir asserts the daemon-user chown happens for
+// ConfigDir. Without this the config.yaml written by installer (as root)
+// stays root-owned and the User=5gpn daemon boots with EACCES on read.
+func TestInstall_ChownsConfigDir(t *testing.T) {
+	ctx := context.Background()
+	env := Defaults().WithRoot(t.TempDir())
+	rec := NewRecorder()
+	rec.Apply = true
+
+	if err := Install(ctx, env, rec, InstallOptions{}); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	// RecordingExecutor records chown as Op{Kind:"chown", Path:path,
+	// Cmd:"user:group"} (see recorder.go) — mirrored into Owners when
+	// Apply is true, which the test sets.
+	want := env.User + ":" + env.Group
+	if got := rec.Owners[env.ConfigDir]; got != want {
+		t.Errorf("expected chown %s → %s, got %q (owners=%v)",
+			env.ConfigDir, want, got, rec.Owners)
+	}
+}
+
+func keys(m map[string][]byte) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 func TestUnitRender_HasHardening(t *testing.T) {

@@ -27,6 +27,13 @@ func Install(ctx context.Context, env Env, exec Executor, opts InstallOptions) e
 		func() error { return ensureDirs(env, exec) },
 		func() error { return ensureConfig(env, exec, opts) },
 		func() error { return ensureBinary(env, exec, opts.SourceBinary) },
+		// After the config + any other file writes have landed, take a
+		// final chown pass over ConfigDir so the daemon user can actually
+		// read /etc/5gpn/config.yaml. ensureDirs chowns the empty ConfigDir
+		// before ensureConfig runs — the newly-written config.yaml then
+		// inherits the writer's uid (root), so a second chown after write
+		// is needed. Cheap and idempotent.
+		func() error { return finalizeConfigOwnership(env, exec) },
 		func() error {
 			if opts.SkipUnit {
 				return nil
@@ -169,7 +176,29 @@ func ensureDirs(env Env, ex Executor) error {
 			return fmt.Errorf("mkdir %s: %w", d, err)
 		}
 	}
-	return ex.Chown(env.DataDir, env.User, env.Group)
+	// DataDir hosts the SQLite db, JWT key, iOS profiles — daemon writes
+	// to it at runtime, must be owned by the daemon user.
+	if err := ex.Chown(env.DataDir, env.User, env.Group); err != nil {
+		return fmt.Errorf("chown data: %w", err)
+	}
+	// ConfigDir hosts config.yaml (read-only from the daemon's POV, but
+	// still must be readable). Chown here covers the pre-config-write
+	// case; finalizeConfigOwnership runs again after config.yaml lands.
+	if err := ex.Chown(env.ConfigDir, env.User, env.Group); err != nil {
+		return fmt.Errorf("chown config dir: %w", err)
+	}
+	return nil
+}
+
+// finalizeConfigOwnership re-chowns the ConfigDir tree so the config.yaml
+// written by ensureConfig (as root) ends up owned by the daemon user.
+// Executor.Chown is recursive, so this handles both the dir and any
+// files under it in one call.
+func finalizeConfigOwnership(env Env, ex Executor) error {
+	if err := ex.Chown(env.ConfigDir, env.User, env.Group); err != nil {
+		return fmt.Errorf("chown config tree: %w", err)
+	}
+	return nil
 }
 
 func ensureConfig(env Env, ex Executor, opts InstallOptions) error {
