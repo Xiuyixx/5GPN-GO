@@ -36,6 +36,42 @@ type Config struct {
 	// operator explicitly opts in to public exposure (plan §4 Phase 2,
 	// R13 open-resolver mitigation).
 	PublicPlainDNSEnabled bool
+
+	// TLSConfigs supplies the four protocol-specific *tls.Config values
+	// (see tlsconfigs.go) that DoQEnabled/DoH3Enabled need to bind their
+	// encrypted listeners. Left nil, DoQ/DoH3 never start regardless of
+	// the *Enabled flags — there is no cert material to hand quic-go /
+	// http3.Server. Building it (BuildTLSConfigs against certmagic's
+	// GetCertificate) is Phase 10's job; Frontdoor only consumes it.
+	TLSConfigs *TLSConfigs
+
+	// DoQEnabled toggles the :853/UDP DNS-over-QUIC listener (RFC 9250,
+	// plan §4 Phase 9, AC-Q1/AC-Q2). Default false — DoQ ships gated
+	// behind an explicit opt-in.
+	DoQEnabled bool
+
+	// DoQBind lists the address(es) the DoQ listener binds to; only the
+	// first entry is used today (DoQ owns a single UDP socket, mirroring
+	// DoT's single-Addr design). Empty means defaultDoQAddr ("[::]:853").
+	DoQBind []string
+
+	// DoH3Enabled toggles the [::]:443/UDP HTTP/3 DoH listener (plan §4
+	// Phase 9, AC-Q1/AC-Q3). Default false, same opt-in posture as DoQ.
+	DoH3Enabled bool
+
+	// DoH3Bind mirrors DoQBind for the DoH3 listener. Empty means
+	// defaultDoH3Addr ("[::]:443").
+	DoH3Bind []string
+}
+
+// firstBindOrDefault returns binds[0] when non-empty, else def. DoQ and
+// DoH3 each own a single UDP socket (unlike BindUDP53/BindTCP53's
+// multi-address support), so only the first configured address is used.
+func firstBindOrDefault(binds []string, def string) string {
+	if len(binds) == 0 {
+		return def
+	}
+	return binds[0]
 }
 
 // wireGuardIfacePrefixes lists the interface-name prefixes considered
@@ -147,6 +183,8 @@ type Frontdoor struct {
 	cfg     Config
 	udp     []*udpServer
 	tcp     []*tcpServer
+	doq     *DoQ
+	doh3    *DoH3
 	started bool
 	cancel  context.CancelFunc
 	done    chan struct{}
@@ -248,6 +286,84 @@ func shutdownTCP(servers []*tcpServer) {
 	}
 }
 
+// startDoQLocked builds and starts fd.doq from cfg.TLSConfigs.DoQ when not
+// already running. Caller must hold fd.mu. A nil cfg.TLSConfigs is not an
+// error — DoQ simply doesn't start, since there is no cert material to
+// hand quic-go (Phase 10 is responsible for building TLSConfigs).
+func (fd *Frontdoor) startDoQLocked(ctx context.Context, cfg Config) error {
+	if fd.doq != nil || cfg.TLSConfigs == nil {
+		return nil
+	}
+	addr := firstBindOrDefault(cfg.DoQBind, defaultDoQAddr)
+	d := NewDoQ(addr, cfg.TLSConfigs.DoQ, fd.resolver, fd.logger)
+	if err := d.Start(ctx); err != nil {
+		return fmt.Errorf("doq: %w", err)
+	}
+	fd.doq = d
+	return nil
+}
+
+// startDoH3Locked mirrors startDoQLocked for the HTTP/3 DoH listener. It
+// builds a fresh *DoH handler around fd.resolver — DoH is a stateless
+// wrapper (see doh.go), so a new instance here behaves identically to the
+// one the panel mounts on its own chi router.
+func (fd *Frontdoor) startDoH3Locked(ctx context.Context, cfg Config) error {
+	if fd.doh3 != nil || cfg.TLSConfigs == nil {
+		return nil
+	}
+	addr := firstBindOrDefault(cfg.DoH3Bind, defaultDoH3Addr)
+	doh := NewDoH(fd.resolver, fd.logger)
+	d3 := NewDoH3(addr, cfg.TLSConfigs.DoH3, doh, fd.logger)
+	if err := d3.Start(ctx); err != nil {
+		return fmt.Errorf("doh3: %w", err)
+	}
+	fd.doh3 = d3
+	return nil
+}
+
+// stopDoQLocked shuts down and clears fd.doq, if running. Caller must hold
+// fd.mu.
+func (fd *Frontdoor) stopDoQLocked(ctx context.Context) {
+	if fd.doq == nil {
+		return
+	}
+	if err := fd.doq.Shutdown(ctx); err != nil {
+		fd.logger.Warn("frontdoor: doq shutdown", "error", err)
+	}
+	fd.doq = nil
+}
+
+// stopDoH3Locked mirrors stopDoQLocked for fd.doh3.
+func (fd *Frontdoor) stopDoH3Locked(ctx context.Context) {
+	if fd.doh3 == nil {
+		return
+	}
+	if err := fd.doh3.Shutdown(ctx); err != nil {
+		fd.logger.Warn("frontdoor: doh3 shutdown", "error", err)
+	}
+	fd.doh3 = nil
+}
+
+// startEncryptedLocked starts DoQ/DoH3 per cfg's *Enabled flags. On a
+// bind failure, whichever of DoQ/DoH3 already started is torn back down
+// so Start never leaves a half-started encrypted-listener pair behind —
+// callers see a single clean error and Frontdoor is left as if Start was
+// never called for these two listeners. Caller must hold fd.mu.
+func (fd *Frontdoor) startEncryptedLocked(ctx context.Context, cfg Config) error {
+	if cfg.DoQEnabled {
+		if err := fd.startDoQLocked(ctx, cfg); err != nil {
+			return err
+		}
+	}
+	if cfg.DoH3Enabled {
+		if err := fd.startDoH3Locked(ctx, cfg); err != nil {
+			fd.stopDoQLocked(context.Background())
+			return err
+		}
+	}
+	return nil
+}
+
 // Start binds every configured listener (returning an error
 // immediately on a bind failure, e.g. a port already in use) and hands
 // the running listener tree to the supervisor, which restarts it —
@@ -261,6 +377,11 @@ func (fd *Frontdoor) Start(ctx context.Context) error {
 		return errors.New("frontdoor: already started")
 	}
 	if err := fd.bindLocked(ctx); err != nil {
+		fd.mu.Unlock()
+		return fmt.Errorf("frontdoor: start: %w", err)
+	}
+	if err := fd.startEncryptedLocked(ctx, fd.cfg); err != nil {
+		fd.closeListenersLocked()
 		fd.mu.Unlock()
 		return fmt.Errorf("frontdoor: start: %w", err)
 	}
@@ -340,18 +461,22 @@ func (fd *Frontdoor) enterDegraded() {
 }
 
 // Shutdown stops the supervised listener tree and waits for it to
-// finish, or for ctx to expire first.
+// finish, or for ctx to expire first. DoQ/DoH3 (if running) are also
+// shut down here, independent of whether the udp/tcp supervisor tree was
+// ever started.
 func (fd *Frontdoor) Shutdown(ctx context.Context) error {
 	fd.mu.Lock()
-	if !fd.started {
-		fd.mu.Unlock()
-		return nil
-	}
+	started := fd.started
 	fd.started = false
 	cancel := fd.cancel
 	done := fd.done
+	fd.stopDoQLocked(ctx)
+	fd.stopDoH3Locked(ctx)
 	fd.mu.Unlock()
 
+	if !started {
+		return nil
+	}
 	if cancel != nil {
 		cancel()
 	}
@@ -366,14 +491,42 @@ func (fd *Frontdoor) Shutdown(ctx context.Context) error {
 	}
 }
 
-// Reconcile applies a new Config at runtime. Phase 2 stub: later phases
-// (plan §4 Phase 9) make this start/stop individual listeners without a
-// process restart, wired to a settings-change broadcast. For now it
-// only records cfg for the next Start; it does not touch already-bound
-// listeners.
+// Reconcile applies a new Config at runtime. DoQEnabled/DoH3Enabled
+// transitions start or stop their respective encrypted listeners
+// in-place, without a process restart (plan §4 Phase 9, AC-Q1). Plain
+// :53 UDP/TCP bind changes are still deferred to the next Start (Phase 2
+// stub behavior, unchanged by this phase).
+//
+// On a bind failure for either listener, that listener's *Enabled flag
+// is reverted to false in fd.cfg before returning the error — Reconcile
+// never leaves Frontdoor believing a listener is enabled when it isn't
+// actually bound, and never tears down an already-working listener to
+// make room for a failed one (plan §4 Phase 9 Reconcile failure-path
+// note).
 func (fd *Frontdoor) Reconcile(ctx context.Context, cfg Config) error {
 	fd.mu.Lock()
+	defer fd.mu.Unlock()
+
+	prev := fd.cfg
 	fd.cfg = cfg
-	fd.mu.Unlock()
+
+	if cfg.DoQEnabled && !prev.DoQEnabled {
+		if err := fd.startDoQLocked(ctx, cfg); err != nil {
+			fd.cfg.DoQEnabled = false
+			return fmt.Errorf("frontdoor: reconcile: %w", err)
+		}
+	} else if !cfg.DoQEnabled && prev.DoQEnabled {
+		fd.stopDoQLocked(ctx)
+	}
+
+	if cfg.DoH3Enabled && !prev.DoH3Enabled {
+		if err := fd.startDoH3Locked(ctx, cfg); err != nil {
+			fd.cfg.DoH3Enabled = false
+			return fmt.Errorf("frontdoor: reconcile: %w", err)
+		}
+	} else if !cfg.DoH3Enabled && prev.DoH3Enabled {
+		fd.stopDoH3Locked(ctx)
+	}
+
 	return nil
 }

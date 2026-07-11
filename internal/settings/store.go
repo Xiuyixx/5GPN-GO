@@ -49,6 +49,13 @@ const (
 	KeyFrontdoorFallbackDoT        = "frontdoor.ios_fallback_dot"
 	KeyFrontdoorPreflightLastAt    = "frontdoor.preflight_last_at"
 	KeyFrontdoorPreflightLastError = "frontdoor.preflight_last_error"
+
+	// DoQ / DoH3 opt-in flags (plan §4 Phase 9). Both default false —
+	// Frontdoor.Config.DoQEnabled/DoH3Enabled ship gated behind an
+	// explicit operator opt-in, mirroring the iOS profile-gating pattern
+	// above.
+	KeyFrontdoorDoQEnabled  = "frontdoor.doq_enabled"
+	KeyFrontdoorDoH3Enabled = "frontdoor.doh3_enabled"
 )
 
 // ErrNotFound is returned by Get when the key is absent.
