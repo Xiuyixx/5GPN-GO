@@ -3,6 +3,7 @@ module github.com/Xiuyixx/5GPN-Go
 go 1.25.12
 
 require (
+	github.com/caddyserver/certmagic v0.25.4
 	github.com/coreos/go-systemd/v22 v22.5.0
 	github.com/go-chi/chi/v5 v5.3.1
 	github.com/go-chi/cors v1.2.2
@@ -11,6 +12,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/mattn/go-sqlite3 v1.14.24
+	github.com/miekg/dns v1.1.72
 	github.com/pressly/goose/v3 v3.22.1
 	golang.org/x/crypto v0.54.0
 	golang.org/x/time v0.15.0
@@ -18,7 +20,6 @@ require (
 )
 
 require (
-	github.com/caddyserver/certmagic v0.25.4 // indirect
 	github.com/caddyserver/zerossl v0.1.5 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.3 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
@@ -28,7 +29,6 @@ require (
 	github.com/libdns/libdns v1.1.1 // indirect
 	github.com/mfridman/interpolate v0.0.2 // indirect
 	github.com/mholt/acmez/v3 v3.1.6 // indirect
-	github.com/miekg/dns v1.1.72 // indirect
 	github.com/sethvargo/go-retry v0.3.0 // indirect
 	github.com/zeebo/blake3 v0.2.4 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
