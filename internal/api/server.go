@@ -2,12 +2,15 @@ package api
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -72,6 +75,10 @@ type Server struct {
 	Updater      UpdaterConfig
 	TGBot        *tgbot.Manager
 	Settings     *settings.Store
+	// ACME is optional. When ACME.Domain is non-empty, ListenAndServe
+	// starts certmagic + a second HTTPS listener on :443 in addition to
+	// the primary panel port.
+	ACME ACMEOptions
 }
 
 // Config bundles user-adjustable server knobs.
@@ -253,41 +260,46 @@ func (s *Server) serveIndex(w http.ResponseWriter) {
 	_, _ = io.Copy(w, f)
 }
 
-// ListenAndServe starts the HTTPS server, or plain HTTP if certFile/keyFile
-// are both empty. Blocks until ctx is done.
+// ListenAndServe starts the panel listener(s). Three modes:
+//
+//   1. Plain HTTP  - both certFile/keyFile empty AND s.ACME.Domain empty.
+//   2. Static TLS  - certFile/keyFile non-empty. HTTPS on `addr` only.
+//   3. ACME TLS    - s.ACME.Domain non-empty. HTTPS on `addr` AND :443,
+//                    with certmagic managing the certificate. Same tls
+//                    config feeds both listeners so a fresh renewal is
+//                    picked up on both ports simultaneously.
+//
+// Blocks until ctx is done.
 func (s *Server) ListenAndServe(ctx context.Context, addr, certFile, keyFile string) error {
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           s.Router(),
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      60 * time.Second,
+	lc := listenerConfig{primaryAddr: addr}
+
+	switch {
+	case s.ACME.Domain != "":
+		tlsCfg, err := setupACME(ctx, s.ACME, s.Logger)
+		if err != nil {
+			return fmt.Errorf("acme setup: %w", err)
+		}
+		lc.tlsConfig = tlsCfg
+		// Dual listener: primary on configured panel port, secondary on
+		// standard :443 so browsers can hit https://<domain>/ without
+		// remembering the panel port. Skip the :443 listener when the
+		// operator already put the panel on :443 to avoid EADDRINUSE.
+		if addr != ":443" && !strings.HasSuffix(addr, ":443") {
+			lc.acmeAddr = ":443"
+		}
+	case certFile != "" && keyFile != "":
+		cert, err := tlsLoad(certFile, keyFile)
+		if err != nil {
+			return fmt.Errorf("load tls: %w", err)
+		}
+		lc.tlsConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
 	}
 
-	errCh := make(chan error, 1)
-	go func() {
-		var err error
-		if certFile != "" && keyFile != "" {
-			s.Logger.Info("panel listening HTTPS", "addr", addr)
-			err = srv.ListenAndServeTLS(certFile, keyFile)
-		} else {
-			s.Logger.Info("panel listening HTTP (no TLS)", "addr", addr)
-			err = srv.ListenAndServe()
-		}
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
-			return
-		}
-		errCh <- nil
-	}()
+	return s.runDual(ctx, lc)
+}
 
-	select {
-	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
-		return nil
-	case err := <-errCh:
-		return err
-	}
+// tlsLoad reads certFile + keyFile into a tls.Certificate. Named so the
+// caller ordering is left-to-right consistent with LoadX509KeyPair.
+func tlsLoad(certFile, keyFile string) (tls.Certificate, error) {
+	return tls.LoadX509KeyPair(certFile, keyFile)
 }

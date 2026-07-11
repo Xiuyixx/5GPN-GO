@@ -255,6 +255,23 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 	if insecure {
 		cert, key = "", ""
 	}
+
+	// Auto-TLS via certmagic when the wizard turned it on. The overlay
+	// gave us the effective domain; --insecure short-circuits to plain
+	// HTTP so dev boots stay simple. cert/key files, when supplied, win
+	// over ACME so operators keeping a manual chain (e.g. dnsdist) are
+	// not surprised.
+	if !insecure && cert == "" && key == "" {
+		acmeEnabled, _ := settingsStore.GetBool(context.Background(), settings.KeyTLSACMEEnabled)
+		acmeEmail, _ := settingsStore.GetString(context.Background(), settings.KeyTLSACMEEmail)
+		if acmeEnabled && cfg.Server.Domain != "" && acmeEmail != "" {
+			srv.ACME = api.ACMEOptions{
+				Domain:     cfg.Server.Domain,
+				Email:      acmeEmail,
+				StorageDir: api.ACMEStorageDir(dataDir),
+			}
+		}
+	}
 	// Boot the bot from config. Empty token disables it cleanly (fresh
 	// install path); non-empty starts the Serve loop under the daemon ctx.
 	if err := botMgr.Start(ctx, cfg.TGBot.Token, cfg.TGBot.AdminChatIDs); err != nil {
