@@ -183,6 +183,7 @@ type Frontdoor struct {
 	cfg     Config
 	udp     []*udpServer
 	tcp     []*tcpServer
+	dot     *DoT
 	doq     *DoQ
 	doh3    *DoH3
 	started bool
@@ -267,6 +268,9 @@ func (fd *Frontdoor) closeListenersLocked() {
 	for _, s := range fd.tcp {
 		_ = s.Shutdown(ctx)
 	}
+	fd.stopDoTLocked(ctx)
+	fd.stopDoQLocked(ctx)
+	fd.stopDoH3Locked(ctx)
 	fd.udp, fd.tcp = nil, nil
 }
 
@@ -344,24 +348,58 @@ func (fd *Frontdoor) stopDoH3Locked(ctx context.Context) {
 	fd.doh3 = nil
 }
 
-// startEncryptedLocked starts DoQ/DoH3 per cfg's *Enabled flags. On a
-// bind failure, whichever of DoQ/DoH3 already started is torn back down
-// so Start never leaves a half-started encrypted-listener pair behind —
-// callers see a single clean error and Frontdoor is left as if Start was
-// never called for these two listeners. Caller must hold fd.mu.
+// startEncryptedLocked starts DoT (always, when TLSConfigs is available),
+// plus DoQ/DoH3 per cfg's *Enabled flags. DoT is the core encrypted-DNS
+// entry point (iOS profile depends on it) — treating it as a feature flag
+// like DoQ/DoH3 creates a chicken-and-egg with iOS Preflight, so as long
+// as TLSConfigs.DoT is populated (i.e. certmagic is running) DoT binds
+// unconditionally. On a bind failure, whichever listener already started
+// is torn back down so Start never leaves a half-started encrypted
+// listener trio behind. Caller must hold fd.mu.
 func (fd *Frontdoor) startEncryptedLocked(ctx context.Context, cfg Config) error {
+	if err := fd.startDoTLocked(ctx, cfg); err != nil {
+		return err
+	}
 	if cfg.DoQEnabled {
 		if err := fd.startDoQLocked(ctx, cfg); err != nil {
+			fd.stopDoTLocked(context.Background())
 			return err
 		}
 	}
 	if cfg.DoH3Enabled {
 		if err := fd.startDoH3Locked(ctx, cfg); err != nil {
 			fd.stopDoQLocked(context.Background())
+			fd.stopDoTLocked(context.Background())
 			return err
 		}
 	}
 	return nil
+}
+
+// startDoTLocked builds and starts fd.dot from cfg.TLSConfigs.DoT when not
+// already running. Caller must hold fd.mu. Nil TLSConfigs is a no-op — the
+// panel-only test path never wires certmagic and doesn't need DoT.
+func (fd *Frontdoor) startDoTLocked(ctx context.Context, cfg Config) error {
+	if fd.dot != nil || cfg.TLSConfigs == nil {
+		return nil
+	}
+	d := NewDoT(defaultDoTAddr, cfg.TLSConfigs.DoT, fd.resolver, fd.logger)
+	if err := d.Start(ctx); err != nil {
+		return fmt.Errorf("frontdoor: dot: %w", err)
+	}
+	fd.dot = d
+	return nil
+}
+
+// stopDoTLocked shuts down and clears fd.dot, if running. Caller must hold fd.mu.
+func (fd *Frontdoor) stopDoTLocked(ctx context.Context) {
+	if fd.dot == nil {
+		return
+	}
+	if err := fd.dot.Shutdown(ctx); err != nil {
+		fd.logger.Warn("frontdoor: dot shutdown", "error", err)
+	}
+	fd.dot = nil
 }
 
 // Start binds every configured listener (returning an error
