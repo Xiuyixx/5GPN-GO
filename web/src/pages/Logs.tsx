@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import AppShell from '../layouts/AppShell';
 import { Heading } from '../components/ui/heading';
@@ -10,6 +10,26 @@ import { Input } from '../components/ui/input';
 import { useAuthStore } from '../stores/auth';
 
 const UNITS = ['5gpn', 'dnsdist', 'mihomo', 'sniproxy'];
+
+// PRESETS maps a preset key to the regex-alternation the operator wants
+// the log stream narrowed to. Each value is a case-insensitive regex
+// snippet; the empty string means "no filter". The dropdown just sets
+// the `filter` state var — the client already streams the full unit
+// via SSE and filters locally, so there's zero server-side contract
+// change here.
+//
+// The regexes intentionally use the same substrings the daemon logs
+// use as slog attribute names ("component=frontdoor", "component=acme",
+// "apply:", etc.) so they overlap with journalctl grep patterns.
+const PRESETS: Record<string, string> = {
+  all: '',
+  frontdoor: 'frontdoor|resolver',
+  acme: 'acme|certmagic|obtain|challenge',
+  ios: 'mobileconfig|ios_profile|profile_url|iospreflight',
+  mtproxy: 'mtproxy',
+  pathb: 'sniforward|quicforward|spoof',
+  rulesapply: 'apply:|rebuildAndPublish|resolver.Publish',
+};
 
 interface Line {
   ts: string;
@@ -23,6 +43,7 @@ export default function Logs() {
   const { t } = useTranslation();
   const [unit, setUnit] = useState('5gpn');
   const [filter, setFilter] = useState('');
+  const [preset, setPreset] = useState('all');
   const [lines, setLines] = useState<Line[]>([]);
   const [connected, setConnected] = useState(false);
   const [errDetail, setErrDetail] = useState<string | null>(null);
@@ -66,9 +87,27 @@ export default function Logs() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unit]);
 
-  const filtered = filter
-    ? lines.filter((l) => l.msg.toLowerCase().includes(filter.toLowerCase()))
-    : lines;
+  // Compile the current filter as a case-insensitive regex. If the
+  // user typed something that isn't valid regex syntax (a stray "["
+  // etc.), fall back to plain substring matching so the input keeps
+  // working as it did before this enhancement.
+  const matcher = useMemo(() => {
+    if (!filter) return null;
+    try {
+      const re = new RegExp(filter, 'i');
+      return (s: string) => re.test(s);
+    } catch {
+      const needle = filter.toLowerCase();
+      return (s: string) => s.toLowerCase().includes(needle);
+    }
+  }, [filter]);
+
+  const filtered = matcher ? lines.filter((l) => matcher(l.msg)) : lines;
+
+  function applyPreset(next: string) {
+    setPreset(next);
+    setFilter(PRESETS[next] ?? '');
+  }
 
   return (
     <AppShell>
@@ -95,7 +134,7 @@ export default function Logs() {
               {errDetail}
             </div>
           )}
-          <FieldGroup className="sm:grid sm:grid-cols-2 sm:gap-4">
+          <FieldGroup className="sm:grid sm:grid-cols-3 sm:gap-4">
             <Field>
               <Label>{t('logs.unitLabel')}</Label>
               <Select value={unit} onChange={(e) => setUnit(e.target.value)}>
@@ -103,8 +142,24 @@ export default function Logs() {
               </Select>
             </Field>
             <Field>
+              <Label>{t('logs.presetLabel')}</Label>
+              <Select value={preset} onChange={(e) => applyPreset(e.target.value)}>
+                <option value="all">{t('logs.presetAll')}</option>
+                <option value="frontdoor">{t('logs.presetFrontdoor')}</option>
+                <option value="acme">{t('logs.presetACME')}</option>
+                <option value="ios">{t('logs.presetIOS')}</option>
+                <option value="mtproxy">{t('logs.presetMTProxy')}</option>
+                <option value="pathb">{t('logs.presetPathB')}</option>
+                <option value="rulesapply">{t('logs.presetRulesApply')}</option>
+              </Select>
+            </Field>
+            <Field>
               <Label>{t('logs.filterLabel')}</Label>
-              <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder={t('logs.filterPlaceholder')} />
+              <Input
+                value={filter}
+                onChange={(e) => { setFilter(e.target.value); setPreset('all'); }}
+                placeholder={t('logs.filterPlaceholder')}
+              />
             </Field>
           </FieldGroup>
         </Fieldset>

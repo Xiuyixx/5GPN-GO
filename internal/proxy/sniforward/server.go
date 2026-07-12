@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/Xiuyixx/5GPN-Go/internal/access"
 )
 
 // Config controls a Server instance. Zero values are usable for the
@@ -48,6 +50,12 @@ type Config struct {
 	// per second walks the process into EMFILE and starves real
 	// clients. Default 2048.
 	MaxConcurrent int
+
+	// Gate, when non-nil, is consulted at accept time. Clients whose
+	// source IP is not on the allowlist get their socket closed before
+	// the TLS ClientHello peek — silent close, matching the existing
+	// probe policy for ErrNotTLS. A nil Gate means no restriction.
+	Gate *access.Gate
 }
 
 // Server is a TCP :443 SNI-split forwarder. Zero value is not
@@ -195,6 +203,14 @@ func (s *Server) handleConn(clientConn net.Conn) {
 		}
 		_ = clientConn.Close()
 	}()
+
+	// Internal-only gate: reject non-allowlisted source IPs at accept
+	// time. Silent close matches the existing "no log for scanners"
+	// policy — the peekSNI path already returns without logging on
+	// ErrNotTLS for the same reason.
+	if s.cfg.Gate != nil && !s.cfg.Gate.Allow(clientConn.RemoteAddr()) {
+		return
+	}
 
 	_ = clientConn.SetReadDeadline(time.Now().Add(s.cfg.HandshakePeekTimeout))
 

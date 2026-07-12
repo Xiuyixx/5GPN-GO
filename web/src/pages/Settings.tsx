@@ -634,6 +634,349 @@ function PasswordSection() {
   );
 }
 
+interface MTProxySettings {
+  enabled: boolean;
+  listen: string;
+  secret_configured: boolean;
+  fronting_domain: string;
+  connect_link_hint: string;
+  service_status: string;
+}
+
+interface PanelDomain {
+  server?: { domain?: string };
+}
+
+// MTProxySection wraps the Telegram MTProto proxy settings. This card
+// used to drive the panel's in-tree obfuscated2 relay; that code had a
+// subtle relay bug we couldn't fix in reasonable time, so both VPS now
+// run the externally-installed 9seconds/mtg 2.x service and this card
+// is a thin driver over `systemctl` + `mtg generate-secret` via the
+// backend /api/v1/settings/mtproxy handler surface.
+//
+// The raw secret is still one-shot: the server returns the full
+// base64-url value only from the /generate-secret endpoint, and every
+// subsequent GET only reports the decoded fronting domain. Because of
+// that the "share this link / show QR" panel is available only in the
+// same session tick as a fresh Generate — after navigating away the
+// operator must Rotate to see it again.
+function MTProxySection() {
+  const { t } = useTranslation();
+  const [cfg, setCfg] = useState<MTProxySettings | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [banner, setBanner] = useState<string | null>(null);
+  // draftEnabled / draftDomain hold the pending toggle + text-input
+  // state. Kept separate from cfg so a mid-edit refresh doesn't wipe
+  // the operator's typing.
+  const [draftEnabled, setDraftEnabled] = useState(false);
+  const [draftDomain, setDraftDomain] = useState('www.cloudflare.com');
+  // freshSecret holds the raw base64-url returned by /generate-secret.
+  // Cleared on refresh / navigation — matches the "only shown once"
+  // contract of the previous UX.
+  const [freshSecret, setFreshSecret] = useState<string | null>(null);
+  const [freshLink, setFreshLink] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [domain, setDomain] = useState<string>('');
+
+  async function refresh() {
+    setErr(null);
+    try {
+      const c = await api.get<MTProxySettings>('/api/v1/settings/mtproxy');
+      setCfg(c);
+      setDraftEnabled(c.enabled);
+      // Prefer the mtg-decoded domain; fall back to the sane default.
+      setDraftDomain(c.fronting_domain || 'www.cloudflare.com');
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function loadDomain() {
+    try {
+      const p = await api.get<PanelDomain>('/api/v1/settings/panel');
+      setDomain(p.server?.domain?.trim() || '');
+    } catch {
+      // Domain is only used to render the tg:// link nicely; a missing
+      // value degrades to "<server-address>" placeholder text rather
+      // than blocking the whole card.
+    }
+  }
+
+  useEffect(() => {
+    refresh();
+    loadDomain();
+  }, []);
+
+  async function save() {
+    if (!cfg) return;
+    setSaving(true);
+    setErr(null);
+    setBanner(null);
+    try {
+      const body: { enabled: boolean; fronting_domain?: string } = {
+        enabled: draftEnabled,
+      };
+      // Only send fronting_domain when it actually changed — an
+      // unchanged POST should not rotate the secret.
+      if (draftDomain.trim() && draftDomain.trim() !== (cfg.fronting_domain || '').trim()) {
+        body.fronting_domain = draftDomain.trim();
+      }
+      const r = await api.post<MTProxySettings>('/api/v1/settings/mtproxy', body);
+      setCfg(r);
+      setDraftEnabled(r.enabled);
+      setDraftDomain(r.fronting_domain || 'www.cloudflare.com');
+      setBanner(t('settings.mtproxySaved'));
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function generateSecret() {
+    setGenerating(true);
+    setErr(null);
+    setBanner(null);
+    try {
+      const r = await api.post<{ ok: boolean; secret: string; connect_link: string }>(
+        '/api/v1/settings/mtproxy/generate-secret',
+        { fronting_domain: draftDomain.trim() || 'www.cloudflare.com' },
+      );
+      if (!r.ok || !r.secret) {
+        throw new Error(t('settings.operationFailed'));
+      }
+      setFreshSecret(r.secret);
+      setFreshLink(r.connect_link || null);
+      await refresh();
+      setBanner(t('settings.mtproxyRestartHint'));
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  function dirty(): boolean {
+    if (!cfg) return false;
+    if (cfg.enabled !== draftEnabled) return true;
+    if (draftDomain.trim() && draftDomain.trim() !== (cfg.fronting_domain || '').trim()) return true;
+    return false;
+  }
+
+  // Build the tg:// link and Telegram-web deep link. Only meaningful
+  // when we hold a freshly-generated secret in memory.
+  function buildLinks(): { tg: string; https: string; portDisplay: string } | null {
+    if (!freshSecret) return null;
+    const listen = cfg?.listen || '';
+    const idx = listen.lastIndexOf(':');
+    const port = idx >= 0 ? listen.slice(idx + 1) : '';
+    const host = domain || (idx > 0 ? listen.slice(0, idx) : '') || 'YOUR_SERVER';
+    const server = encodeURIComponent(host);
+    const portDisplay = port || '?';
+    // Telegram clients accept the base64-url ee-prefix secret in the
+    // `secret` slot. The tg:// scheme and https://t.me/proxy landing
+    // page share the same querystring.
+    const params = `server=${server}&port=${port}&secret=${freshSecret}`;
+    return {
+      tg: freshLink || `tg://proxy?${params}`,
+      https: `https://t.me/proxy?${params}`,
+      portDisplay,
+    };
+  }
+
+  async function copyToClipboard(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Non-secure contexts (http://) can't reach clipboard API. The
+      // "Copied" flash won't fire, but the text is still selectable
+      // from the UI.
+    }
+  }
+
+  const links = buildLinks();
+  const notInstalled = cfg?.service_status === 'not-installed';
+
+  return (
+    <Section
+      tint="rgb(56 189 248 / 0.35)"
+      title={t('settings.mtproxyTitle')}
+      description={t('settings.mtproxyDescription')}
+    >
+      {loading && <Text>{t('common.loading')}</Text>}
+      {err && (
+        <div className="mb-3">
+          <Alert open onClose={() => setErr(null)}>
+            <AlertTitle>{t('settings.operationFailed')}</AlertTitle>
+            <AlertBody>{err}</AlertBody>
+          </Alert>
+        </div>
+      )}
+      {banner && (
+        <div className="mb-3 rounded-lg border border-sky-500/40 bg-sky-500/10 px-3 py-2 text-sm text-sky-900 dark:text-sky-200">
+          {banner}
+        </div>
+      )}
+      {!loading && cfg && (
+        <div className="mb-3 rounded-lg border border-zinc-300/60 bg-zinc-50/70 px-3 py-2 text-xs text-zinc-600 dark:border-white/10 dark:bg-white/5 dark:text-zinc-300">
+          {t('settings.mtproxyExternalNote')}
+        </div>
+      )}
+      {notInstalled && (
+        <div className="mb-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-900 dark:text-amber-200">
+          {t('settings.mtproxyLoopbackFallback')}
+        </div>
+      )}
+
+      {!loading && cfg && (
+        <div className="space-y-4">
+          {/* Service status */}
+          <div className="text-xs text-zinc-500">
+            {t('settings.mtproxyServiceStatus', { status: cfg.service_status || 'unknown' })}
+          </div>
+
+          {/* Enable toggle */}
+          <div className="rounded-xl border border-zinc-200 bg-white/60 p-4 dark:border-white/10 dark:bg-white/5">
+            <label className="flex items-center gap-3">
+              <input
+                type="checkbox"
+                checked={draftEnabled}
+                disabled={!cfg.secret_configured}
+                onChange={(e) => setDraftEnabled(e.target.checked)}
+                className="h-4 w-4"
+              />
+              <div>
+                <div className="text-sm font-medium">
+                  {t('settings.mtproxyEnabledLabel')}
+                </div>
+                <div className="text-xs text-zinc-500">
+                  {t('settings.mtproxyEnabledHint')}
+                </div>
+              </div>
+            </label>
+          </div>
+
+          {/* Listen address — read-only, managed by mtg unit */}
+          <Field>
+            <Label>{t('settings.mtproxyListenLabel')}</Label>
+            <Input value={cfg.listen} readOnly />
+            <div className="mt-1 text-xs text-zinc-500">
+              {t('settings.mtproxyListenHint')}
+            </div>
+          </Field>
+
+          {/* Fronting domain — replaces the manually-typed secret. */}
+          <Field>
+            <Label>{t('settings.mtproxyFrontingDomainLabel')}</Label>
+            <Input
+              value={draftDomain}
+              placeholder="www.cloudflare.com"
+              onChange={(e) => setDraftDomain(e.target.value)}
+            />
+            <div className="mt-1 text-xs text-zinc-500">
+              {t('settings.mtproxyFrontingDomainHint')}
+            </div>
+          </Field>
+
+          {/* Secret block */}
+          <div className="rounded-xl border border-zinc-200 bg-white/60 p-4 dark:border-white/10 dark:bg-white/5">
+            <div className="text-sm font-medium">{t('settings.mtproxySecretLabel')}</div>
+            <div className="mt-2 flex items-center gap-3">
+              <span className="font-mono text-sm">
+                {cfg.secret_configured
+                  ? t('settings.mtproxySecretConfigured', {
+                      domain: cfg.fronting_domain || 'unknown',
+                    })
+                  : t('settings.mtproxySecretNotConfigured')}
+              </span>
+              <Button plain onClick={generateSecret} disabled={generating || notInstalled}>
+                {generating
+                  ? t('settings.saving')
+                  : cfg.secret_configured
+                    ? t('settings.mtproxyRotateSecret')
+                    : t('settings.mtproxyGenerateSecret')}
+              </Button>
+            </div>
+
+            {freshSecret && (
+              <div className="mt-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-900 dark:text-amber-200">
+                <div className="mb-2 font-medium">
+                  {t('settings.mtproxySecretRevealWarning')}
+                </div>
+                <div className="flex items-center gap-2">
+                  <code className="break-all rounded bg-white/60 px-2 py-1 font-mono text-[11px] text-amber-950 dark:bg-white/10 dark:text-amber-100">
+                    {freshSecret}
+                  </code>
+                  <Button plain onClick={() => copyToClipboard(freshSecret)}>
+                    {copied ? t('settings.mtproxyCopied') : t('settings.mtproxyCopyLink')}
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Client link + QR (only after fresh generate) */}
+          {links && (
+            <div className="rounded-xl border border-zinc-200 bg-white/60 p-4 dark:border-white/10 dark:bg-white/5">
+              <div className="text-sm font-medium">
+                {t('settings.mtproxyClientLinkTitle')}
+              </div>
+              <div className="mt-2 text-xs text-zinc-500">
+                {t('settings.mtproxyQRHint')}
+              </div>
+              <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-start">
+                <div className="rounded-lg bg-white p-2">
+                  <QRCodeSVG value={links.https} size={160} />
+                </div>
+                <div className="flex-1 space-y-2 text-xs">
+                  <div>
+                    <div className="text-zinc-500">tg://</div>
+                    <div className="flex items-center gap-2">
+                      <code className="flex-1 break-all rounded bg-zinc-100 px-2 py-1 font-mono text-[11px] dark:bg-zinc-800">
+                        {links.tg}
+                      </code>
+                      <Button plain onClick={() => copyToClipboard(links.tg)}>
+                        {copied ? t('settings.mtproxyCopied') : t('settings.mtproxyCopyLink')}
+                      </Button>
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-zinc-500">https://t.me/proxy</div>
+                    <div className="flex items-center gap-2">
+                      <code className="flex-1 break-all rounded bg-zinc-100 px-2 py-1 font-mono text-[11px] dark:bg-zinc-800">
+                        {links.https}
+                      </code>
+                      <Button plain onClick={() => copyToClipboard(links.https)}>
+                        {copied ? t('settings.mtproxyCopied') : t('settings.mtproxyCopyLink')}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="flex gap-2 pt-1">
+            <Button color="indigo" onClick={save} disabled={saving || !dirty() || notInstalled}>
+              {saving ? t('settings.saving') : t('settings.mtproxySave')}
+            </Button>
+            <Button plain onClick={refresh} disabled={saving}>
+              {t('settings.refresh')}
+            </Button>
+          </div>
+        </div>
+      )}
+    </Section>
+  );
+}
+
 interface ProxySettings {
   spoof_enabled: boolean;
   spoof_scope: string;
@@ -646,6 +989,156 @@ interface ProxySettings {
   server_ip_effective: string;
   server_ip_autodetected: string;
   restart_required?: boolean;
+}
+
+interface InternalOnlySettings {
+  enabled: boolean;
+  cidrs: string;
+}
+
+// InternalOnlySection wraps the "restrict panel + proxies to internal
+// network clients" toggle. When enabled, the panel API + mtproxy +
+// sniforward + quicforward all drop connections whose source IP is
+// outside the configured CIDR list (default: RFC1918 + loopback +
+// v6 ULA). Business rule: paying customers all come in through the
+// 联通 5G APN slice, so any request from a public IP is prima facie
+// non-customer scanner traffic.
+//
+// The change applies live — no daemon restart — because the middleware
+// and every proxy share a single *access.Gate whose snapshot is
+// swapped atomically on Gate.Refresh().
+function InternalOnlySection() {
+  const { t } = useTranslation();
+  const [cfg, setCfg] = useState<InternalOnlySettings | null>(null);
+  const [draft, setDraft] = useState<InternalOnlySettings | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+  const [banner, setBanner] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  async function refresh() {
+    try {
+      const c = await api.get<InternalOnlySettings>('/api/v1/settings/frontdoor/internal-only');
+      setCfg(c);
+      setDraft(c);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  async function save() {
+    if (!draft) return;
+    setSaving(true);
+    setErr(null);
+    setBanner(null);
+    try {
+      const r = await api.post<InternalOnlySettings>('/api/v1/settings/frontdoor/internal-only', {
+        enabled: draft.enabled,
+        cidrs: draft.cidrs,
+      });
+      setCfg(r);
+      setDraft(r);
+      setBanner(t('settings.internalOnlySaved', {
+        defaultValue: 'Saved. Allowlist applied live to the panel and every proxy listener.',
+      }));
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function dirty(): boolean {
+    if (!cfg || !draft) return false;
+    return cfg.enabled !== draft.enabled || cfg.cidrs !== draft.cidrs;
+  }
+
+  return (
+    <Section
+      tint="rgb(16 185 129 / 0.35)"
+      title={t('settings.internalOnlyTitle', { defaultValue: '内网限制访问' })}
+      description={t('settings.internalOnlyDescription', {
+        defaultValue:
+          'Restrict the panel, MTProxy, and the transparent forwarders to clients whose source IP is inside the internal (private) CIDR list. Public-IP scanners are dropped at accept time.',
+      })}
+    >
+      {loading && <Text>{t('common.loading')}</Text>}
+      {err && (
+        <div className="mb-3">
+          <Alert open onClose={() => setErr(null)}>
+            <AlertTitle>{t('settings.operationFailed')}</AlertTitle>
+            <AlertBody>{err}</AlertBody>
+          </Alert>
+        </div>
+      )}
+      {banner && (
+        <div className="mb-3 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-900 dark:text-emerald-200">
+          {banner}
+        </div>
+      )}
+
+      {!loading && draft && (
+        <div className="space-y-4">
+          <div className="rounded-xl border border-zinc-200 bg-white/60 p-4 dark:border-white/10 dark:bg-white/5">
+            <label className="flex items-center gap-3">
+              <input
+                type="checkbox"
+                checked={draft.enabled}
+                onChange={(e) => setDraft({ ...draft, enabled: e.target.checked })}
+                className="h-4 w-4"
+              />
+              <div>
+                <div className="text-sm font-medium">
+                  {t('settings.internalOnlyEnabledLabel', { defaultValue: '启用内网限制' })}
+                </div>
+                <div className="text-xs text-zinc-500">
+                  {t('settings.internalOnlyEnabledHint', {
+                    defaultValue:
+                      'When on, only source IPs inside the CIDR list below can reach the panel and the proxies. Loopback is always allowed.',
+                  })}
+                </div>
+              </div>
+            </label>
+          </div>
+
+          <Field>
+            <Label>
+              {t('settings.internalOnlyCIDRLabel', { defaultValue: '允许的 CIDR（逗号分隔）' })}
+            </Label>
+            <textarea
+              value={draft.cidrs}
+              placeholder={t('settings.internalOnlyCIDRPlaceholder', {
+                defaultValue: '172.16.0.0/12,10.0.0.0/8,192.168.0.0/16,127.0.0.0/8,::1/128,fd00::/8',
+              })}
+              onChange={(e) => setDraft({ ...draft, cidrs: e.target.value })}
+              rows={3}
+              className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 font-mono text-xs dark:border-white/10 dark:bg-white/5"
+            />
+            <div className="mt-1 text-xs text-zinc-500">
+              {t('settings.internalOnlyCIDRHint', {
+                defaultValue:
+                  'Comma-separated CIDR blocks. Empty falls back to private-only defaults (RFC1918 + loopback + v6 ULA).',
+              })}
+            </div>
+          </Field>
+
+          <div>
+            <Button color="indigo" disabled={saving || !dirty()} onClick={save}>
+              {saving
+                ? t('settings.submitting')
+                : t('settings.internalOnlySave', { defaultValue: 'Save internal-only settings' })}
+            </Button>
+          </div>
+        </div>
+      )}
+    </Section>
+  );
 }
 
 function TransparentProxySection() {
@@ -1026,6 +1519,8 @@ export default function Settings() {
         <UpgradeSection />
         <TgbotSection />
         <IOSSection />
+        <MTProxySection />
+        <InternalOnlySection />
         <TransparentProxySection />
         <PasswordSection />
         <RestartSection />

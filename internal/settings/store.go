@@ -85,6 +85,64 @@ const (
 	KeyFrontdoorQUICForwardEnabled = "frontdoor.quic_forward_enabled"
 	KeyFrontdoorPanelBackendTCP    = "frontdoor.panel_backend_tcp"
 	KeyFrontdoorPanelBackendUDP    = "frontdoor.panel_backend_udp"
+
+	// Internal-only access gate. When enabled, panel + mtproxy +
+	// sniforward + quicforward accept traffic only from clients whose
+	// source IP falls inside KeyFrontdoorInternalCIDRs. This mirrors
+	// the operator's 5G APN slice business rule: paying customers all
+	// come in via 联通 5G APN with a private RFC1918 assignment
+	// (172.22.0.0/16 or similar), so any request from a public IP is
+	// prima facie non-customer scanner traffic and can be dropped at
+	// accept time. Default off; loopback is always allowed regardless
+	// of the CIDR list so local health probes never lock themselves
+	// out. See internal/access/gate.go for the runtime.
+	KeyFrontdoorInternalOnlyEnabled = "frontdoor.internal_only_enabled"
+	KeyFrontdoorInternalCIDRs       = "frontdoor.internal_cidrs"
+
+	// MTProto Proxy — the panel used to store enabled/listen/secret
+	// keys here for an in-tree obfuscated2 relay under internal/proxy/
+	// mtproxy. The panel now drives an externally-installed
+	// 9seconds/mtg systemd service via internal/mtgctl, so listen +
+	// secret live in the unit file (/etc/systemd/system/mtg.service)
+	// and are no longer stored in panel_settings. Existing DB rows
+	// under mtproxy.* are left untouched on upgrade — they are simply
+	// ignored by the new controller.
+
+	// v0.4.0 WG plane — kernel WireGuard split-tunnel settings.
+	//
+	// The enabled flag is the blue-green feature flag: the WG plane
+	// ships fully inert (wg0 never brought up, no mobileconfig payload
+	// emitted) until the operator flips it on. Rollback is just
+	// flipping it back off.
+	//
+	// The listen-port / server-address / DNS-address keys configure
+	// the wg0 interface itself — the UDP listen port, the server's
+	// tunnel-side CIDR, and the DNS address pushed to peers.
+	//
+	// The public-key setting is populated on first bringup once the
+	// server keypair is generated/unsealed; it is not user-settable.
+	//
+	// The last-reconcile-at / allowed-ips-hash settings cache the
+	// reconciler's last-run timestamp and the SHA-256 of the
+	// last-derived AllowedIPs set, so an unchanged RuleTable is a
+	// cheap no-op (Phase 6).
+	//
+	// The allowedips-cap setting bounds how many CIDRs the derivation
+	// will emit before aggregating /24s into /16 supernets (Phase 4).
+	//
+	// The fwmark setting is the packet-mark value used by the
+	// mangle_fwd nftables chain to steer wg0-sourced forward traffic
+	// into routing table 100 (Phase 8); exposed as a setting so an
+	// operator can override it if 0x100 collides with another daemon.
+	KeyFrontdoorWGEnabled         = "frontdoor.wg.enabled"           // default false
+	KeyFrontdoorWGListenPort      = "frontdoor.wg.listen_port"       // default 51820
+	KeyFrontdoorWGServerAddress   = "frontdoor.wg.server_address"    // default 10.66.66.1/24
+	KeyFrontdoorWGDNSAddress      = "frontdoor.wg.dns_address"       // default 10.66.66.1
+	KeyFrontdoorWGPublicKey       = "frontdoor.wg.public_key"        // populated on first bringup
+	KeyFrontdoorWGLastReconcileAt = "frontdoor.wg.last_reconcile_at"
+	KeyFrontdoorWGAllowedIPsHash  = "frontdoor.wg.allowed_ips_hash"
+	KeyFrontdoorWGAllowedIPsCap   = "frontdoor.wg.allowedips_cap" // default 8000
+	KeyFrontdoorWGFwmark          = "frontdoor.wg.fwmark"         // default 0x100
 )
 
 // ErrNotFound is returned by Get when the key is absent.

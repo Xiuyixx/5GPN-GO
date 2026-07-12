@@ -272,10 +272,37 @@ func readTCPConns() (int64, error) {
 	if runtime.GOOS != "linux" {
 		return 0, errors.New("not linux")
 	}
-	raw, err := os.ReadFile("/proc/net/tcp")
-	if err != nil {
-		return 0, err
+	// Sum ESTABLISHED-state sockets from /proc/net/tcp + /proc/net/tcp6.
+	// Older behavior counted every line in /proc/net/tcp — that swept
+	// in TIME_WAIT, CLOSE_WAIT, FIN_WAIT_2 and every listening socket
+	// on the host, producing "5058 live connections" on a box with a
+	// couple hundred actual streams and thousands of teardown-tail
+	// sockets. The Dashboard label is "实时数量" — only ESTABLISHED
+	// carries that meaning.
+	total := int64(0)
+	for _, path := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			// tcp6 may be missing on IPv6-disabled kernels; ignore.
+			if path == "/proc/net/tcp" {
+				return 0, err
+			}
+			continue
+		}
+		for i, line := range strings.Split(string(raw), "\n") {
+			if i == 0 || line == "" {
+				continue
+			}
+			// Field 3 (0-indexed) is state as a two-hex-char string;
+			// 01 = TCP_ESTABLISHED. Header line skipped above.
+			fields := strings.Fields(line)
+			if len(fields) < 4 {
+				continue
+			}
+			if fields[3] == "01" {
+				total++
+			}
+		}
 	}
-	// Subtract 1 for the header line; each remaining line is one socket.
-	return int64(strings.Count(string(raw), "\n") - 1), nil
+	return total, nil
 }

@@ -23,6 +23,7 @@ import (
 	"database/sql"
 	"strings"
 
+	"github.com/Xiuyixx/5GPN-Go/internal/access"
 	"github.com/Xiuyixx/5GPN-Go/internal/api"
 	"github.com/Xiuyixx/5GPN-Go/internal/config"
 	"github.com/Xiuyixx/5GPN-Go/internal/core"
@@ -30,6 +31,7 @@ import (
 	xexit "github.com/Xiuyixx/5GPN-Go/internal/exit"
 	"github.com/Xiuyixx/5GPN-Go/internal/frontdoor"
 	"github.com/Xiuyixx/5GPN-Go/internal/metrics"
+	"github.com/Xiuyixx/5GPN-Go/internal/mtgctl"
 	"github.com/Xiuyixx/5GPN-Go/internal/orchestrator"
 	"github.com/Xiuyixx/5GPN-Go/internal/proxy/quicforward"
 	"github.com/Xiuyixx/5GPN-Go/internal/proxy/sniforward"
@@ -131,6 +133,15 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 	settingsStore := settings.New(dbHandle)
 	if err := settings.OverlayConfig(context.Background(), settingsStore, cfg); err != nil {
 		logger.Warn("settings overlay skipped", "err", err)
+	}
+
+	// Internal-only access gate: shared instance between the panel
+	// HTTP middleware and the three proxy accept sites, so a single
+	// POST /api/v1/settings/frontdoor/internal-only + Gate.Refresh
+	// picks up on every listener without a daemon restart.
+	accessGate, err := access.NewGate(settingsStore)
+	if err != nil {
+		return fmt.Errorf("access gate: %w", err)
 	}
 
 	setupToken := ""
@@ -281,6 +292,8 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 		RulesetSyncer: rulesetSyncer,
 		Resolver:      resolverStore,
 		Metrics:       resolverMetrics,
+		Gate:          accessGate,
+		MTG:           mtgctl.New("", "", "", logger),
 	}, logger)
 
 	addr := listenOverride
@@ -383,7 +396,7 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 	// the plan's public_plain_dns_enabled toggle is off (default), because
 	// the loopback + WG interface binds don't need any cert.
 	if !insecure && srv.ACME.Domain != "" {
-		if err := startFrontdoor(ctx, srv, resolverStore, resolverMetrics, settingsStore, dataDir, logger); err != nil {
+		if err := startFrontdoor(ctx, srv, resolverStore, resolverMetrics, settingsStore, dataDir, accessGate, logger); err != nil {
 			logger.Warn("frontdoor start failed — panel still serves", "err", err)
 		}
 	}
@@ -421,9 +434,12 @@ func startFrontdoor(
 	metrics *resolver.Metrics,
 	sset *settings.Store,
 	dataDir string,
+	accessGate *access.Gate,
 	logger *slog.Logger,
 ) error {
-	res := resolver.NewResolver(store, resolver.NewUpstream(), metrics)
+	up := resolver.NewUpstream()
+	up.Logger = logger
+	res := resolver.NewResolver(store, up, metrics)
 	// Expose the live resolver + DoH handler on the api.Server so the
 	// panel's /dns-query route actually resolves DNS (v0.3.x had a
 	// silent bug where /dns-query returned the SPA HTML because no
@@ -479,7 +495,7 @@ func startFrontdoor(
 	logger.Info("frontdoor: started",
 		"public_plain_dns", publicPlain, "doq", doqEnabled, "doh3", doh3Enabled)
 
-	if err := startProxyForwarders(ctx, sset, srv.ACME.Domain, panelBackendUDP, logger); err != nil {
+	if err := startProxyForwarders(ctx, sset, srv.ACME.Domain, panelBackendUDP, accessGate, logger); err != nil {
 		logger.Warn("frontdoor: proxy forwarders skipped", "err", err)
 	}
 	return nil
@@ -535,7 +551,7 @@ func applySpoofSettings(ctx context.Context, res *resolver.Resolver, sset *setti
 
 // startProxyForwarders spins up sniforward + quicforward per settings.
 // Both are independent; either can be off without affecting the other.
-func startProxyForwarders(ctx context.Context, sset *settings.Store, panelDomain, panelBackendUDP string, logger *slog.Logger) error {
+func startProxyForwarders(ctx context.Context, sset *settings.Store, panelDomain, panelBackendUDP string, accessGate *access.Gate, logger *slog.Logger) error {
 	sniOn, _ := sset.GetBool(ctx, settings.KeyFrontdoorSNIForwardEnabled)
 	quicOn, _ := sset.GetBool(ctx, settings.KeyFrontdoorQUICForwardEnabled)
 
@@ -548,6 +564,7 @@ func startProxyForwarders(ctx context.Context, sset *settings.Store, panelDomain
 			Listen:       ":443",
 			PanelDomain:  panelDomain,
 			PanelBackend: panelBackendTCP,
+			Gate:         accessGate,
 		}, logger)
 		if err := sni.Start(ctx); err != nil {
 			return fmt.Errorf("sniforward: %w", err)
@@ -558,6 +575,7 @@ func startProxyForwarders(ctx context.Context, sset *settings.Store, panelDomain
 			Listen:       ":443",
 			PanelDomain:  panelDomain,
 			PanelBackend: panelBackendUDP,
+			Gate:         accessGate,
 		}, logger)
 		if err := qf.Start(ctx); err != nil {
 			return fmt.Errorf("quicforward: %w", err)
@@ -565,6 +583,16 @@ func startProxyForwarders(ctx context.Context, sset *settings.Store, panelDomain
 	}
 	return nil
 }
+
+// startMTProxy USED to spin up the in-tree MTProto proxy per settings.
+// That code path is dead — both VPS now run the externally-installed
+// 9seconds/mtg systemd service, and the panel drives it via
+// internal/mtgctl + internal/api/mtproxy_settings.go. The internal
+// proxy/mtproxy package is left on disk pending a follow-up cleanup
+// but is no longer wired into the daemon. See task rewire spec.
+//
+// Kept here (function removed, doc-only stub) so the removal is
+// explicit in git blame rather than a silent vanish.
 
 // discoverEgressIP returns the local IPv4 the kernel would pick to
 // reach a public destination. UDP "dial" performs a routing-table

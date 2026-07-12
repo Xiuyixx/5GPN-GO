@@ -165,7 +165,18 @@ func journalctlStream(ctx context.Context, unit string, out chan<- string) {
 			"msg":   asString(raw["MESSAGE"]),
 		}
 		body, _ := json.Marshal(payload)
-		out <- string(body)
+		// Guard the send with ctx.Done() — a bare `out <- ...` blocks
+		// when the SSE client has disconnected (nobody's receiving),
+		// which leaves this goroutine wedged forever and the deferred
+		// cmd.Process.Kill() / cmd.Wait() never runs — so the child
+		// journalctl process (and its stdout/stderr pipe FDs held by
+		// this daemon) leak. Under repeated Logs-tab open/close this
+		// consumed thousands of pipe FDs on VPS in the wild.
+		select {
+		case out <- string(body):
+		case <-ctx.Done():
+			return
+		}
 		seq++
 	}
 	// If journalctl exits without producing entries — the common

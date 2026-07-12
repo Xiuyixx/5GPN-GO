@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/Xiuyixx/5GPN-Go/internal/access"
 )
 
 // Config controls a Server instance. Zero values are safe: Listen
@@ -31,6 +33,16 @@ type Config struct {
 	// IdleTimeout retires a session whose last activity is older
 	// than this. Defaults to 5 minutes.
 	IdleTimeout time.Duration
+
+	// Gate, when non-nil, is consulted for the first datagram of a
+	// new 4-tuple. Established sessions (already-registered
+	// clientAddr) are NOT re-checked on every packet, because a
+	// scanner would never reach that codepath and re-checking would
+	// noticeably regress the hot-path fanout in readLoop. Existing
+	// sessions from allowed IPs continue to flow even if the operator
+	// tightens the allowlist mid-flight — new sessions from the newly
+	// disallowed range get rejected on their first datagram.
+	Gate *access.Gate
 }
 
 // Server is a UDP :443 QUIC SNI-split forwarder.
@@ -190,6 +202,13 @@ func (s *Server) readLoop() {
 // registers the session. Only called for the first datagram of a
 // new 4-tuple.
 func (s *Server) setupSession(first []byte, clientAddr *net.UDPAddr) {
+	// Internal-only gate: reject the new-session cold path only.
+	// Existing 4-tuples were admitted when their first datagram
+	// arrived, so they keep flowing; scanners hitting a fresh UDP
+	// 4-tuple from a public IP get dropped here before the SNI peek.
+	if s.cfg.Gate != nil && clientAddr != nil && !s.cfg.Gate.Allow(clientAddr) {
+		return
+	}
 	sni, ok := extractSNI(first)
 	if !ok || sni == "" {
 		return

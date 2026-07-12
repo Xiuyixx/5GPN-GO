@@ -356,7 +356,7 @@ func TestRaceOfTwoUpstream(t *testing.T) {
 		return client, nil
 	}
 
-	resp, err := up.Query(context.Background(), makeQuery("example.com", dns.TypeA), "direct")
+	resp, _, err := up.Query(context.Background(), makeQuery("example.com", dns.TypeA), "direct")
 	if err != nil {
 		t.Fatal(err)
 	}

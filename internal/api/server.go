@@ -17,6 +17,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 
+	"github.com/Xiuyixx/5GPN-Go/internal/access"
 	"github.com/Xiuyixx/5GPN-Go/internal/config"
 	"github.com/Xiuyixx/5GPN-Go/internal/core"
 	xexit "github.com/Xiuyixx/5GPN-Go/internal/exit"
@@ -114,6 +115,18 @@ type Server struct {
 	// panel to move out of the way. Empty string keeps the historical
 	// default (:443).
 	ACMEListenAddr string
+	// Gate, when non-nil, filters incoming requests by source IP.
+	// Used to implement the "internal-only access" business rule
+	// where the panel is restricted to the 5G APN private slice.
+	// The middleware is only invoked when Gate.Enabled() reports true,
+	// so a disabled gate costs one atomic load per request. See
+	// internal/access/gate.go and internal/api/internal_only.go.
+	Gate *access.Gate
+	// MTG drives the externally-installed 9seconds/mtg systemd
+	// service. nil-safe: the mtproxy handlers return 503 with
+	// mtg_not_wired when this field is nil, which is the correct
+	// state on hosts that never installed 9seconds/mtg.
+	MTG MTG
 }
 
 // Config bundles user-adjustable server knobs.
@@ -138,6 +151,16 @@ type Config struct {
 	Resolver *resolver.Store
 	// Metrics is optional; see Server.Metrics doc comment.
 	Metrics *resolver.Metrics
+	// Gate is optional. When wired, the internal-only middleware and
+	// the /api/v1/settings/frontdoor/internal-only handler both use
+	// the same instance so Refresh() calls from POST take effect
+	// live in the middleware without a daemon restart.
+	Gate *access.Gate
+	// MTG is optional. When nil the mtproxy handlers return 503
+	// mtg_not_wired; that's the desired state on hosts that don't
+	// run 9seconds/mtg. Populated in cmd/5gpn/main.go with an
+	// mtgctl.Controller.
+	MTG MTG
 }
 
 // New builds a Server from its dependencies.
@@ -203,6 +226,8 @@ func New(db *sql.DB, cfg Config, logger *slog.Logger) *Server {
 		RulesetSyncer: cfg.RulesetSyncer,
 		Resolver:      cfg.Resolver,
 		Metrics:       cfg.Metrics,
+		Gate:          cfg.Gate,
+		MTG:           cfg.MTG,
 		applyStore:    newApplyStore(),
 	}
 }
@@ -219,6 +244,16 @@ func (s *Server) Router() http.Handler {
 		AllowCredentials: false,
 		MaxAge:           300,
 	}))
+	// Internal-only access gate. Ordered AFTER cors so browser
+	// preflight OPTIONS from disallowed IPs still get a proper CORS
+	// response and the browser surfaces "internal_only_access" 403
+	// instead of a generic CORS error. The middleware itself no-ops
+	// when the gate is nil or disabled and skips gating the four
+	// public-by-design endpoints (health probe from any monitor,
+	// bootstrap claim before first login, iOS OTA mobileconfig pull,
+	// public DoH /dns-query) — everything else is restricted to
+	// clients whose source IP is on the allowlist.
+	r.Use(s.internalOnlyMiddleware)
 
 	r.Get("/api/v1/health", func(w http.ResponseWriter, req *http.Request) {
 		// version is exposed here (not just on the authenticated /me path)
@@ -311,6 +346,13 @@ func (s *Server) Router() http.Handler {
 		r.Get("/api/v1/settings/frontdoor/proxy", s.handleGetFrontdoorProxy)
 		r.Post("/api/v1/settings/frontdoor/proxy", s.handleUpdateFrontdoorProxy)
 		r.Post("/api/v1/settings/frontdoor/proxy/preflight", s.handleFrontdoorProxyPreflight)
+
+		r.Get("/api/v1/settings/frontdoor/internal-only", s.handleGetInternalOnly)
+		r.Post("/api/v1/settings/frontdoor/internal-only", s.handleUpdateInternalOnly)
+
+		r.Get("/api/v1/settings/mtproxy", s.handleGetMTProxySettings)
+		r.Post("/api/v1/settings/mtproxy", s.handleUpdateMTProxySettings)
+		r.Post("/api/v1/settings/mtproxy/generate-secret", s.handleGenerateMTProxySecret)
 	})
 
 	// Static SPA fallback: any GET that isn't /api/* serves the panel bundle,

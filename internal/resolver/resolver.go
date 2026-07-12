@@ -118,13 +118,16 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, client net.IP) (*d
 
 func (r *Resolver) forward(ctx context.Context, req *dns.Msg, category string) (*dns.Msg, error) {
 	q := sanitizeForUpstream(req)
-	resp, err := r.Upstream.Query(ctx, q, category)
+	resp, tier, err := r.Upstream.Query(ctx, q, category)
 	if err != nil {
 		r.Metrics.IncUpstreamError()
 		// Return a SERVFAIL to the client rather than dropping — clients
 		// then know to fall back to a cached / secondary resolver
 		// instead of hanging on their own timeout.
 		return servFailReply(req), fmt.Errorf("resolver: forward %s: %w", category, err)
+	}
+	if tier == TierFallback {
+		r.Metrics.IncUpstreamFallback()
 	}
 	resp.Id = req.Id
 	return resp, nil
