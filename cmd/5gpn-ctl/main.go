@@ -117,3 +117,12 @@ type request struct {
 	Cmd  string         `json:"cmd"`
 	Args map[string]any `json:"args,omitempty"`
 }
+
+// response mirrors cmd/5gpn/ctl_socket_linux.go's daemon-side type.
+// Kept in main.go for the same reason as request: the darwin stub
+// references it too, so it must live outside the linux-only file.
+type response struct {
+	OK    bool           `json:"ok"`
+	Error string         `json:"error,omitempty"`
+	Data  map[string]any `json:"data,omitempty"`
+}
