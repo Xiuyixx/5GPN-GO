@@ -6,7 +6,6 @@ package core
 
 import (
 	"fmt"
-	"log/slog"
 
 	"github.com/Xiuyixx/5GPN-Go/internal/config"
 	"github.com/Xiuyixx/5GPN-Go/internal/rules"
@@ -45,9 +44,9 @@ func (NoStore) ActiveRulesYAML() (string, bool, error) { return "", false, nil }
 func (NoStore) ListExits() ([]ExitRecord, error)       { return nil, nil }
 
 // Assemble builds the effective config by deep-copying base and layering DB
-// state onto it. base is NEVER mutated (Principle 2 keystone). Empty DB,
-// missing table, or malformed YAML never fail Assemble — they log a warning
-// and fall back to whatever the base config carried.
+// state onto it. base is NEVER mutated. An absent active rules row or nil
+// exits slice is a valid empty state; DB errors and malformed persisted state
+// fail closed so an Apply cannot silently drop policy.
 //
 // The returned *Config has EffectiveRules populated (yaml:"-" so it is
 // nowhere near disk) and Exits potentially rewritten from DB.
@@ -62,19 +61,22 @@ func Assemble(base *config.Config, s Store) (*config.Config, error) {
 	}
 
 	if yaml, ok, err := s.ActiveRulesYAML(); err != nil {
-		slog.Warn("core.Assemble: read active rule_version failed — using empty ruleset", "err", err)
+		return nil, fmt.Errorf("core.Assemble: read active rule_version: %w", err)
 	} else if ok {
 		set, err := rules.ParseYAML([]byte(yaml))
 		if err != nil {
-			slog.Warn("core.Assemble: active rule_version YAML parse failed — using empty ruleset", "err", err)
+			return nil, fmt.Errorf("core.Assemble: parse active rule_version: %w", err)
 		} else if set != nil {
+			if err := set.Validate(); err != nil {
+				return nil, fmt.Errorf("core.Assemble: validate active rule_version: %w", err)
+			}
 			cfg.EffectiveRules = append([]rules.Rule(nil), set.Rules...)
 		}
 	}
 
 	exits, err := s.ListExits()
 	if err != nil {
-		slog.Warn("core.Assemble: list exits failed — keeping base config exits", "err", err)
+		return nil, fmt.Errorf("core.Assemble: list exits: %w", err)
 	} else if exits != nil {
 		cfg.Exits = make([]config.ExitConfig, 0, len(exits))
 		for _, e := range exits {

@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/Xiuyixx/5GPN-Go/internal/db"
+	"github.com/Xiuyixx/5GPN-Go/internal/netguard"
 )
 
 // Sync downloads the chinalist from url and atomically writes it to path.
@@ -19,6 +21,13 @@ import (
 // The store parameter may be nil — in that case ETag caching is skipped and
 // every call performs a full download.
 func Sync(ctx context.Context, store *sql.DB, url, path string) error {
+	return syncWithClient(ctx, store, url, path, netguard.NewHTTPClient(30*time.Second))
+}
+
+func syncWithClient(ctx context.Context, store *sql.DB, url, path string, client *http.Client) error {
+	if _, err := netguard.ValidateHTTPURL(url); err != nil {
+		return fmt.Errorf("chinalist: %w", err)
+	}
 	var prevETag string
 	if store != nil {
 		var err error
@@ -37,11 +46,11 @@ func Sync(ctx context.Context, store *sql.DB, url, path string) error {
 		req.Header.Set("If-None-Match", prevETag)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("chinalist: fetch %s: %w", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNotModified {
 		return nil
@@ -61,8 +70,8 @@ func Sync(ctx context.Context, store *sql.DB, url, path string) error {
 	}
 	tmpName := tmp.Name()
 	defer func() {
-		tmp.Close()
-		os.Remove(tmpName) // no-op if rename succeeded
+		_ = tmp.Close()
+		_ = os.Remove(tmpName) // no-op if rename succeeded
 	}()
 
 	const maxChinaListBytes = 50 << 20 // 50MB cap

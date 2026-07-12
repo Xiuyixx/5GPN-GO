@@ -1,9 +1,0 @@
-[Unit]
-Description=5GPN iOS DoT Profile HTTP (on-demand)
-
-[Socket]
-ListenStream=8111
-Accept=no
-
-[Install]
-WantedBy=sockets.target

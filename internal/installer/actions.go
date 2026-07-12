@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 )
 
@@ -27,13 +28,10 @@ func Install(ctx context.Context, env Env, exec Executor, opts InstallOptions) e
 		func() error { return ensureDirs(env, exec) },
 		func() error { return ensureConfig(env, exec, opts) },
 		func() error { return ensureBinary(env, exec, opts.SourceBinary) },
-		// After the config + any other file writes have landed, take a
-		// final chown pass over ConfigDir so the daemon user can actually
-		// read /etc/5gpn/config.yaml. ensureDirs chowns the empty ConfigDir
-		// before ensureConfig runs — the newly-written config.yaml then
-		// inherits the writer's uid (root), so a second chown after write
-		// is needed. Cheap and idempotent.
+		// Config remains installer-owned and group-readable by the daemon.
+		// Runtime state belongs to the daemon and is private to that user.
 		func() error { return finalizeConfigOwnership(env, exec) },
+		func() error { return finalizeStatePermissions(env, exec) },
 		func() error {
 			if opts.SkipUnit {
 				return nil
@@ -116,13 +114,13 @@ func Upgrade(ctx context.Context, env Env, ex Executor, opts UpgradeOptions) err
 // systemctl calls so we can assert they were made.
 func Status(ctx context.Context, env Env, ex Executor, out io.Writer) error {
 	if runtime.GOOS != "linux" {
-		fmt.Fprintln(out, "status: not linux — nothing to report")
+		_, _ = fmt.Fprintln(out, "status: not linux — nothing to report")
 		return nil
 	}
 	if err := ex.Run(ctx, "systemctl", "is-active", env.Unit); err != nil {
-		fmt.Fprintln(out, "unit: inactive")
+		_, _ = fmt.Fprintln(out, "unit: inactive")
 	} else {
-		fmt.Fprintln(out, "unit: active")
+		_, _ = fmt.Fprintln(out, "unit: active")
 	}
 	return nil
 }
@@ -134,9 +132,9 @@ type DoctorReport struct {
 
 // DoctorCheck is one boolean assertion about the host.
 type DoctorCheck struct {
-	Name    string
-	OK      bool
-	Detail  string
+	Name   string
+	OK     bool
+	Detail string
 }
 
 // Doctor inspects the host for the pieces install would need. Read-only.
@@ -151,6 +149,7 @@ func Doctor(_ context.Context, env Env, ex Executor, distro Distro) DoctorReport
 	add("data dir present or creatable", ex.Exists(env.DataDir) || writable(parent(env.DataDir)), env.DataDir)
 	if runtime.GOOS == "linux" {
 		add("systemctl on PATH", onPath("systemctl"), "")
+		add("groupadd on PATH", onPath("groupadd"), "")
 		add("useradd on PATH", onPath("useradd"), "")
 	}
 	if distro.ID != "" {
@@ -164,39 +163,81 @@ func ensureUser(ctx context.Context, env Env, ex Executor) error {
 	if runtime.GOOS != "linux" {
 		return nil
 	}
-	// useradd is idempotent-ish: -r creates a system user, we ignore
-	// "already exists" via the exit code the shell would swallow.
-	_ = ex.Run(ctx, "useradd", "--system", "--no-create-home", "--shell", "/usr/sbin/nologin", env.User)
+	// Create a stable primary group first. Existing-account errors are ignored;
+	// the ownership pass below remains the authoritative verification.
+	_ = ex.Run(ctx, "groupadd", "--system", "--force", env.Group)
+	_ = ex.Run(ctx, "useradd", "--system", "--no-create-home", "--gid", env.Group,
+		"--shell", "/usr/sbin/nologin", env.User)
 	return nil
 }
 
 func ensureDirs(env Env, ex Executor) error {
-	for _, d := range []string{env.BinDir, env.ConfigDir, env.DataDir, env.UnitDir} {
-		if err := ex.MkdirAll(d, 0o755); err != nil {
-			return fmt.Errorf("mkdir %s: %w", d, err)
+	dirs := []struct {
+		path string
+		mode os.FileMode
+	}{
+		{env.BinDir, 0o755},
+		{env.ConfigDir, 0o750},
+		{env.DataDir, 0o700},
+		{env.UnitDir, 0o755},
+	}
+	for _, d := range dirs {
+		if err := ex.MkdirAll(d.path, d.mode); err != nil {
+			return fmt.Errorf("mkdir %s: %w", d.path, err)
 		}
+	}
+	// MkdirAll leaves an existing directory's mode untouched. Tighten the two
+	// sensitive trees on reinstall as well as on a fresh install.
+	if err := ex.Chmod(env.ConfigDir, 0o750); err != nil {
+		return fmt.Errorf("chmod config dir: %w", err)
+	}
+	if err := ex.Chmod(env.DataDir, 0o700); err != nil {
+		return fmt.Errorf("chmod data dir: %w", err)
 	}
 	// DataDir hosts the SQLite db, JWT key, iOS profiles — daemon writes
 	// to it at runtime, must be owned by the daemon user.
 	if err := ex.Chown(env.DataDir, env.User, env.Group); err != nil {
 		return fmt.Errorf("chown data: %w", err)
 	}
-	// ConfigDir hosts config.yaml (read-only from the daemon's POV, but
-	// still must be readable). Chown here covers the pre-config-write
-	// case; finalizeConfigOwnership runs again after config.yaml lands.
-	if err := ex.Chown(env.ConfigDir, env.User, env.Group); err != nil {
+	// ConfigDir is deliberately root-owned. The daemon's primary group gets
+	// read/traverse access, but a daemon compromise cannot rewrite boot config.
+	if err := ex.Chown(env.ConfigDir, "root", env.Group); err != nil {
 		return fmt.Errorf("chown config dir: %w", err)
 	}
 	return nil
 }
 
-// finalizeConfigOwnership re-chowns the ConfigDir tree so the config.yaml
-// written by ensureConfig (as root) ends up owned by the daemon user.
-// Executor.Chown is recursive, so this handles both the dir and any
-// files under it in one call.
+// finalizeConfigOwnership keeps config installer-owned and daemon-readable.
 func finalizeConfigOwnership(env Env, ex Executor) error {
-	if err := ex.Chown(env.ConfigDir, env.User, env.Group); err != nil {
+	if err := ex.Chown(env.ConfigDir, "root", env.Group); err != nil {
 		return fmt.Errorf("chown config tree: %w", err)
+	}
+	if err := ex.Chmod(env.ConfigDir, 0o750); err != nil {
+		return fmt.Errorf("chmod config tree: %w", err)
+	}
+	if ex.Exists(env.ConfigPath()) {
+		if err := ex.Chmod(env.ConfigPath(), 0o640); err != nil {
+			return fmt.Errorf("chmod config: %w", err)
+		}
+	}
+	return nil
+}
+
+// finalizeStatePermissions repairs sensitive files left by older installs.
+// UMask=0077 in the unit covers new SQLite sidecars and keys; these explicit
+// chmods cover a reinstall over files created before that unit hardening.
+func finalizeStatePermissions(env Env, ex Executor) error {
+	if err := ex.Chmod(env.DataDir, 0o700); err != nil {
+		return fmt.Errorf("chmod data tree: %w", err)
+	}
+	for _, name := range []string{"5gpn.db", "5gpn.db-wal", "5gpn.db-shm", "jwt.key"} {
+		path := filepath.Join(env.DataDir, name)
+		if !ex.Exists(path) {
+			continue
+		}
+		if err := ex.Chmod(path, 0o600); err != nil {
+			return fmt.Errorf("chmod state file %s: %w", path, err)
+		}
 	}
 	return nil
 }

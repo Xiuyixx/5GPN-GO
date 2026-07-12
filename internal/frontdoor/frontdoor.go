@@ -168,15 +168,17 @@ func sanitizeBinds(binds []string, publicEnabled bool, logger *slog.Logger) []st
 	return out
 }
 
-// Frontdoor owns the DNS plane's plain :53 UDP/TCP listeners plus the
-// supervisor that restarts them on crash. DoH (see doh.go) is handled
-// separately since it rides the panel's existing HTTP/chi listener
-// rather than owning a socket of its own; DoT/DoQ/DoH3 land in later
-// phases alongside these.
+// Frontdoor owns the DNS plane's plain :53 UDP/TCP, DoT, DoQ, and DoH3
+// listeners. The supervisor restarts only the plain listeners; encrypted
+// listeners have independent accept loops. DoH rides the panel's HTTP/chi
+// listener and is mounted separately.
 type Frontdoor struct {
 	resolver *resolver.Resolver
 	logger   *slog.Logger
 
+	// supervisor belongs to one successful Start lifecycle. A later Start
+	// replaces it so a prior give-up cannot carry its terminal state or
+	// consumed restart budget across Shutdown -> Start.
 	supervisor *Supervisor
 
 	mu      sync.Mutex
@@ -197,6 +199,38 @@ type Frontdoor struct {
 	degraded atomic.Bool
 }
 
+// ListenerState distinguishes an intentionally-disabled transport from a
+// configured transport whose runtime listener is absent.
+type ListenerState struct {
+	Configured bool
+	Running    bool
+}
+
+// Status is a lock-consistent snapshot used by the panel metrics endpoint.
+type Status struct {
+	UDP53    ListenerState
+	TCP53    ListenerState
+	DoT      ListenerState
+	DoQ      ListenerState
+	DoH3     ListenerState
+	Degraded bool
+}
+
+func (fd *Frontdoor) Status() Status {
+	fd.mu.Lock()
+	defer fd.mu.Unlock()
+	udpBinds, tcpBinds := fd.effectiveBinds()
+	tlsConfigured := fd.cfg.TLSConfigs != nil
+	return Status{
+		UDP53:    ListenerState{Configured: len(udpBinds) > 0, Running: len(fd.udp) > 0},
+		TCP53:    ListenerState{Configured: len(tcpBinds) > 0, Running: len(fd.tcp) > 0},
+		DoT:      ListenerState{Configured: tlsConfigured, Running: fd.dot != nil},
+		DoQ:      ListenerState{Configured: tlsConfigured && fd.cfg.DoQEnabled, Running: fd.doq != nil},
+		DoH3:     ListenerState{Configured: tlsConfigured && fd.cfg.DoH3Enabled, Running: fd.doh3 != nil},
+		Degraded: fd.degraded.Load(),
+	}
+}
+
 // New wires a Frontdoor around an existing resolver. logger may be nil
 // (slog.Default() is used). cfg is not validated or bound to sockets
 // until Start.
@@ -205,10 +239,9 @@ func New(cfg Config, resolver *resolver.Resolver, logger *slog.Logger) *Frontdoo
 		logger = slog.Default()
 	}
 	return &Frontdoor{
-		cfg:        cfg,
-		resolver:   resolver,
-		logger:     logger,
-		supervisor: NewSupervisor(logger),
+		cfg:      cfg,
+		resolver: resolver,
+		logger:   logger,
 	}
 }
 
@@ -257,9 +290,11 @@ func (fd *Frontdoor) bindLocked(ctx context.Context) error {
 	return nil
 }
 
-// closeListenersLocked shuts down and clears every currently-bound
-// listener. Caller must hold fd.mu.
-func (fd *Frontdoor) closeListenersLocked() {
+// closePlainListenersLocked shuts down and clears the supervised UDP/TCP
+// listeners. Encrypted DNS listeners have independent accept loops and must
+// not be torn down when an unrelated plain listener crashes.
+// Caller must hold fd.mu.
+func (fd *Frontdoor) closePlainListenersLocked() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	for _, s := range fd.udp {
@@ -268,10 +303,19 @@ func (fd *Frontdoor) closeListenersLocked() {
 	for _, s := range fd.tcp {
 		_ = s.Shutdown(ctx)
 	}
+	fd.udp, fd.tcp = nil, nil
+}
+
+// closeListenersLocked shuts down and clears every currently-bound listener.
+// It is reserved for full Frontdoor teardown and initial-start rollback.
+// Caller must hold fd.mu.
+func (fd *Frontdoor) closeListenersLocked() {
+	fd.closePlainListenersLocked()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	fd.stopDoTLocked(ctx)
 	fd.stopDoQLocked(ctx)
 	fd.stopDoH3Locked(ctx)
-	fd.udp, fd.tcp = nil, nil
 }
 
 func shutdownUDP(servers []*udpServer) {
@@ -402,12 +446,9 @@ func (fd *Frontdoor) stopDoTLocked(ctx context.Context) {
 	fd.dot = nil
 }
 
-// Start binds every configured listener (returning an error
-// immediately on a bind failure, e.g. a port already in use) and hands
-// the running listener tree to the supervisor, which restarts it —
-// bounded, see supervisor.go — if it ever crashes. Start returns once
-// the initial bind succeeds; it does not block for the server's
-// lifetime.
+// Start binds every configured listener and returns immediately after the
+// initial bind succeeds. Plain UDP/TCP listeners are handed to the bounded
+// supervisor in supervisor.go; encrypted listeners run independently.
 func (fd *Frontdoor) Start(ctx context.Context) error {
 	fd.mu.Lock()
 	if fd.started {
@@ -423,6 +464,12 @@ func (fd *Frontdoor) Start(ctx context.Context) error {
 		fd.mu.Unlock()
 		return fmt.Errorf("frontdoor: start: %w", err)
 	}
+	// A supervisor's give-up state is intentionally terminal for that
+	// supervisor instance. Starting Frontdoor again is a new lifecycle, so it
+	// must receive a fresh restart window and leave the prior degraded state.
+	supervisor := NewSupervisor(fd.logger)
+	fd.supervisor = supervisor
+	fd.degraded.Store(false)
 	fd.started = true
 	runCtx, cancel := context.WithCancel(context.Background())
 	fd.cancel = cancel
@@ -432,7 +479,7 @@ func (fd *Frontdoor) Start(ctx context.Context) error {
 
 	go func() {
 		defer close(done)
-		_ = fd.supervisor.Run(runCtx, fd.serveAll, fd.enterDegraded)
+		_ = supervisor.Run(runCtx, fd.serveAll, fd.enterDegraded)
 	}()
 	return nil
 }
@@ -473,41 +520,41 @@ func (fd *Frontdoor) serveAll(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		fd.mu.Lock()
-		fd.closeListenersLocked()
+		fd.closePlainListenersLocked()
 		fd.mu.Unlock()
 		<-allDone
 		return nil
 	case err := <-errCh:
 		// Treat this as a crash: tear down whatever else is still
 		// running so the next supervised attempt starts from a clean
-		// slate and rebinds everything.
+		// slate and rebinds the plain listener set. Encrypted DNS listeners
+		// own independent accept loops and remain available.
 		fd.mu.Lock()
-		fd.closeListenersLocked()
+		fd.closePlainListenersLocked()
 		fd.mu.Unlock()
 		<-allDone
 		return err
 	}
 }
 
-// enterDegraded is the supervisor's give-up callback: it flips the
-// degraded flag so ServeDNS answers SERVFAIL directly, without ever
-// touching the resolver, on every still-bound listener until an
-// operator intervenes (plan: restart the daemon, or a settings flip
-// that resets the supervisor budget — out of scope for this phase).
+// enterDegraded is the plain-listener supervisor's give-up callback. The
+// crashed plain sockets have already been closed, so this flag records the
+// degraded state and protects any later direct ServeDNS call from reaching
+// the resolver; it does not keep the failed sockets available.
 func (fd *Frontdoor) enterDegraded() {
 	fd.degraded.Store(true)
 }
 
-// Shutdown stops the supervised listener tree and waits for it to
-// finish, or for ctx to expire first. DoQ/DoH3 (if running) are also
-// shut down here, independent of whether the udp/tcp supervisor tree was
-// ever started.
+// Shutdown stops the supervised plain listener tree and waits for it to
+// finish, or for ctx to expire first. DoT/DoQ/DoH3 are also shut down,
+// independent of whether the plain supervisor tree was ever started.
 func (fd *Frontdoor) Shutdown(ctx context.Context) error {
 	fd.mu.Lock()
 	started := fd.started
 	fd.started = false
 	cancel := fd.cancel
 	done := fd.done
+	fd.stopDoTLocked(ctx)
 	fd.stopDoQLocked(ctx)
 	fd.stopDoH3Locked(ctx)
 	fd.mu.Unlock()

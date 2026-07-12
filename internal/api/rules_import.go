@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Xiuyixx/5GPN-Go/internal/netguard"
 	"github.com/Xiuyixx/5GPN-Go/internal/rules"
 )
 
@@ -19,12 +20,12 @@ import (
 // applied — the frontend merges them into the draft and runs dry-run
 // before Apply.
 type importRequest struct {
-	URL          string   `json:"url"`             // optional
-	Text         string   `json:"text"`            // optional; used when URL is empty
-	Action       string   `json:"action"`          // rewrite non-final rules to this action; default: "PROXY"
-	IDPrefix     string   `json:"id_prefix"`       // rule id prefix; default: "imp-"
+	URL          string   `json:"url"`               // optional
+	Text         string   `json:"text"`              // optional; used when URL is empty
+	Action       string   `json:"action"`            // rewrite non-final rules to this action; default: "PROXY"
+	IDPrefix     string   `json:"id_prefix"`         // rule id prefix; default: "imp-"
 	StartingPrio int      `json:"starting_priority"` // default: 200 (leaves headroom for manual rules)
-	Keep         []string `json:"keep_categories"` // matches PGW_KEEP_CATEGORIES
+	Keep         []string `json:"keep_categories"`   // matches PGW_KEEP_CATEGORIES
 	DirectCats   []string `json:"direct_categories"` // matches PGW_DIRECT_CATEGORIES
 }
 
@@ -35,10 +36,10 @@ type importResponse struct {
 	Categories []string     `json:"categories"`
 	SourceURL  string       `json:"source_url,omitempty"`
 	SourceKind string       `json:"source_kind"` // "url" | "text"
-	// GroupID is the shared UI-only marker every rule in this batch
-	// carries. The frontend renders one collapsible card per group so
-	// 500-rule imports don't flood the Rules page.
-	GroupID string `json:"group_id"`
+	// GroupID is retained in the response schema for older clients. One-shot
+	// imports are manual rules, so it is always empty; non-empty GroupID is
+	// reserved for registered ruleset expansions.
+	GroupID string `json:"group_id,omitempty"`
 	// SourceFormat is set to "gfwlist" when the auto-detector fell into
 	// the gfwlist / AutoProxy path so the UI can show a badge.
 	SourceFormat string `json:"source_format,omitempty"`
@@ -71,8 +72,8 @@ func (s *Server) handleImportRules(w http.ResponseWriter, r *http.Request) {
 	var body string
 	var sourceURL, sourceKind string
 	if url := strings.TrimSpace(req.URL); url != "" {
-		if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-			writeError(w, http.StatusBadRequest, "bad_url", "url must start with http:// or https://")
+		if _, err := netguard.ValidateHTTPURL(url); err != nil {
+			writeError(w, http.StatusBadRequest, "bad_url", err.Error())
 			return
 		}
 		fetched, err := fetchRuleset(r.Context(), url, 8*time.Second, 2*1024*1024)
@@ -106,11 +107,6 @@ func (s *Server) handleImportRules(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-
-	// One GroupID per import batch so the panel can collapse the whole
-	// batch into a single card. Format: imp-<sourceKind>-<hex>. Random
-	// suffix keeps repeated imports distinguishable.
-	groupID := "imp-" + sourceKind + "-" + randomHexShort(6)
 
 	// Convert CSV lines into Rule structs so the frontend can merge them.
 	out := make([]rules.Rule, 0, len(csvLines))
@@ -147,7 +143,6 @@ func (s *Server) handleImportRules(w http.ResponseWriter, r *http.Request) {
 			Action:   ruleAction,
 			Priority: prio,
 			Enabled:  true,
-			GroupID:  groupID,
 		})
 		prio += 10
 	}
@@ -159,17 +154,15 @@ func (s *Server) handleImportRules(w http.ResponseWriter, r *http.Request) {
 		Categories:   rep.Categories,
 		SourceURL:    sourceURL,
 		SourceKind:   sourceKind,
-		GroupID:      groupID,
 		SourceFormat: sourceFormat,
 	})
 }
 
-// randomHexShort returns n random hex bytes for use in unique IDs.
-// Errors from rand.Read are ignored (very rare) — an empty string still
-// keeps the caller working, just without the collision guard.
 func randomHexShort(n int) string {
 	buf := make([]byte, n)
-	_, _ = rand.Read(buf)
+	if _, err := rand.Read(buf); err != nil {
+		return ""
+	}
 	return hex.EncodeToString(buf)
 }
 
@@ -181,12 +174,12 @@ func fetchRuleset(ctx context.Context, url string, timeout time.Duration, maxByt
 		return "", err
 	}
 	req.Header.Set("User-Agent", "5gpn-panel/import")
-	client := &http.Client{Timeout: timeout}
+	client := netguard.NewHTTPClient(timeout)
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
 		return "", fmt.Errorf("upstream returned HTTP %d", resp.StatusCode)
 	}

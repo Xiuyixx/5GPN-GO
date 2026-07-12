@@ -75,6 +75,7 @@ type Executor interface {
 	MkdirAll(path string, mode os.FileMode) error
 	Remove(path string) error
 	Chown(path, user, group string) error
+	Chmod(path string, mode os.FileMode) error
 	Exists(path string) bool
 }
 
@@ -114,6 +115,10 @@ func (r *RealExecutor) Chown(path, user, group string) error {
 		return nil
 	}
 	return exec.Command("chown", "-R", fmt.Sprintf("%s:%s", user, group), path).Run()
+}
+
+func (r *RealExecutor) Chmod(path string, mode os.FileMode) error {
+	return os.Chmod(path, mode)
 }
 
 func (r *RealExecutor) Exists(path string) bool {

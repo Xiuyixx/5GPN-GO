@@ -74,7 +74,7 @@ func TestDoQServesQueryOverQUIC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("quic.DialAddr: %v", err)
 	}
-	defer conn.CloseWithError(0, "")
+	defer func() { _ = conn.CloseWithError(0, "") }()
 
 	if got := conn.ConnectionState().TLS.NegotiatedProtocol; got != "doq" {
 		t.Fatalf("ALPN negotiated protocol = %q, want %q", got, "doq")

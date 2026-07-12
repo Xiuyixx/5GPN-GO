@@ -235,10 +235,10 @@ func newReleaseServer(t *testing.T, tag string, payload []byte, includeSums bool
 	})
 	mux.HandleFunc("/dl/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/SHA256SUMS") {
-			fmt.Fprintf(w, "%s  %s\n", sumHex, rs.asset)
+			_, _ = fmt.Fprintf(w, "%s  %s\n", sumHex, rs.asset)
 			return
 		}
-		w.Write(payload)
+		_, _ = w.Write(payload)
 	})
 	rs.Server = httptest.NewServer(mux)
 	return rs
@@ -248,8 +248,7 @@ func newReleaseServer(t *testing.T, tag string, payload []byte, includeSums bool
 // updater package hardcodes api.github.com so we swap its HTTPClient
 // against a transport that rewrites the outbound URL.
 func stubUpdaterClient(rs *releaseServer) *updater.Client {
-	c := updater.New(updater.Config{Owner: "x", Repo: "y"})
-	c = updater.New(updater.Config{
+	c := updater.New(updater.Config{
 		Owner: "x", Repo: "y",
 		HTTPClient: &http.Client{
 			Transport: rewriteTransport{target: rs.URL},
@@ -301,11 +300,7 @@ func TestUpdateCheck_DisabledWhenNoClient(t *testing.T) {
 	}
 }
 
-func TestUpdateApply_SwapsBinary(t *testing.T) {
-	payload := []byte("new-binary-bytes-v9")
-	rs := newReleaseServer(t, "v9.9.9", payload, false)
-	defer rs.Close()
-
+func TestUpdateApply_RequiresExternalSupervisor(t *testing.T) {
 	dir := t.TempDir()
 	binPath := filepath.Join(dir, "5gpn")
 	if err := os.WriteFile(binPath, []byte("old-bytes"), 0o755); err != nil {
@@ -315,56 +310,33 @@ func TestUpdateApply_SwapsBinary(t *testing.T) {
 	srv, token := bootstrapAndLogin(t, Config{
 		Updater: UpdaterConfig{
 			Owner: "x", Repo: "y", Version: "v0.0.1", BinaryPath: binPath,
-			Client: stubUpdaterClient(rs),
+			Client: updater.New(updater.Config{Owner: "x", Repo: "y"}),
 		},
 	})
 	rr := authPost(t, srv, "/api/v1/update/apply", token, nil)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("code: %d %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("code: %d, want 503: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "updater_requires_supervisor") {
+		t.Fatalf("unexpected error: %s", rr.Body.String())
 	}
 	got, err := os.ReadFile(binPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != string(payload) {
-		t.Fatalf("binary not swapped: %q", string(got))
+	if string(got) != "old-bytes" {
+		t.Fatalf("refused update modified binary: %q", string(got))
 	}
-	// audit log records ok
-	if !auditContains(t, srv, "update.apply", "ok") {
-		t.Fatal("expected audit update.apply=ok")
+	if !auditContains(t, srv, "update.apply.refused", "external_supervisor_required") {
+		t.Fatal("expected refusal audit")
 	}
 }
 
-func TestUpdateApply_RejectsWhenNoChecksum(t *testing.T) {
-	rs := newReleaseServer(t, "v9.9.9", []byte("payload"), false)
-	// Strip checksums from body by overriding handler.
-	mux := http.NewServeMux()
-	mux.HandleFunc("/latest", func(w http.ResponseWriter, r *http.Request) {
-		rel := map[string]any{
-			"tag_name": "v9.9.9", "name": "v9.9.9",
-			"body": "no hex here",
-			"assets": []map[string]any{
-				{"name": rs.asset, "size": 7, "browser_download_url": rs.URL + "/dl/" + rs.asset},
-			},
-		}
-		_ = json.NewEncoder(w).Encode(rel)
-	})
-	rs.Server.Config.Handler = mux
-	defer rs.Close()
-
-	dir := t.TempDir()
-	binPath := filepath.Join(dir, "5gpn")
-	_ = os.WriteFile(binPath, []byte("old"), 0o755)
-
-	srv, token := bootstrapAndLogin(t, Config{
-		Updater: UpdaterConfig{
-			Owner: "x", Repo: "y", Version: "v0.0.1", BinaryPath: binPath,
-			Client: stubUpdaterClient(rs),
-		},
-	})
+func TestUpdateApply_DisabledWithoutClient(t *testing.T) {
+	srv, token := bootstrapAndLogin(t, Config{})
 	rr := authPost(t, srv, "/api/v1/update/apply", token, nil)
-	if rr.Code != http.StatusFailedDependency {
-		t.Fatalf("expected 424, got %d %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusServiceUnavailable || !strings.Contains(rr.Body.String(), "updater_disabled") {
+		t.Fatalf("expected updater_disabled 503, got %d %s", rr.Code, rr.Body.String())
 	}
 }
 
@@ -374,6 +346,6 @@ func auditContains(t *testing.T, srv *Server, action, result string) bool {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return rows.Next()
 }

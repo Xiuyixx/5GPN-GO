@@ -65,29 +65,19 @@ func TestAssembleEmptyStore(t *testing.T) {
 
 func TestAssembleBadYAML(t *testing.T) {
 	base := baseCfg()
-	got, err := Assemble(base, &fakeStore{yaml: "::: not yaml :::", yamlOK: true})
-	if err != nil {
-		t.Fatalf("bad YAML must not error, got %v", err)
-	}
-	if got.EffectiveRules != nil {
-		t.Fatalf("bad YAML must leave EffectiveRules nil, got %v", got.EffectiveRules)
+	if _, err := Assemble(base, &fakeStore{yaml: "::: not yaml :::", yamlOK: true}); err == nil {
+		t.Fatal("bad persisted YAML must fail closed")
 	}
 }
 
-func TestAssembleStoreErrorsNonFatal(t *testing.T) {
+func TestAssembleStoreErrorsFailClosed(t *testing.T) {
 	base := baseCfg()
-	got, err := Assemble(base, &fakeStore{
+	_, err := Assemble(base, &fakeStore{
 		yamlErr:  errors.New("db down"),
 		exitsErr: errors.New("db down"),
 	})
-	if err != nil {
-		t.Fatalf("store errors must not fail Assemble, got %v", err)
-	}
-	if len(got.Exits) != 1 || got.Exits[0].ID != "seed" {
-		t.Fatalf("exits err must fall back to base, got %+v", got.Exits)
-	}
-	if got.EffectiveRules != nil {
-		t.Fatalf("rules err must leave EffectiveRules nil, got %v", got.EffectiveRules)
+	if err == nil {
+		t.Fatal("store errors must fail Assemble")
 	}
 }
 
@@ -249,7 +239,7 @@ func TestAssembleBootParity(t *testing.T) {
 		t.Fatalf("Assemble returned aliased EffectiveRules slices across calls")
 	}
 	first.Exits[0].Config["note"] = "poisoned"
-	if v, _ := second.Exits[0].Config["note"]; v == "poisoned" {
+	if v := second.Exits[0].Config["note"]; v == "poisoned" {
 		t.Fatalf("Assemble returned aliased Exits[].Config maps across calls")
 	}
 }

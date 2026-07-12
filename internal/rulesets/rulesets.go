@@ -120,7 +120,7 @@ func (s *Store) List(ctx context.Context) ([]Ruleset, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []Ruleset
 	for rows.Next() {
 		r, err := scanRow(rows.Scan)
@@ -177,8 +177,8 @@ func (s *Store) TouchSyncedAt(ctx context.Context, name string) error {
 // sync attempt failed so the operator sees the reason in the UI.
 func (s *Store) RecordError(ctx context.Context, name, reason string) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE rulesets SET last_error = ?, last_synced_at = ? WHERE name = ?`,
-		reason, time.Now().Unix(), name)
+		`UPDATE rulesets SET last_error = ? WHERE name = ?`,
+		reason, name)
 	return err
 }
 
@@ -189,10 +189,27 @@ func (s *Store) RecordError(ctx context.Context, name, reason string) error {
 // keep the ruleset's Priority and get sequential ID suffixes so the
 // snapshot stays deterministic.
 func (s *Store) Expand(ctx context.Context) ([]rules.Rule, error) {
+	expanded, _, err := s.ExpandWithGroups(ctx)
+	return expanded, err
+}
+
+// ExpandWithGroups expands the same registry snapshot that supplies the
+// managed GroupID set. This lets callers preserve historical manual imports
+// that used a non-empty GroupID while replacing current ruleset expansions.
+func (s *Store) ExpandWithGroups(ctx context.Context) ([]rules.Rule, map[string]struct{}, error) {
 	list, err := s.List(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	groups := make(map[string]struct{}, len(list))
+	for _, rs := range list {
+		groups[rs.Name] = struct{}{}
+	}
+	expanded, err := expandList(list)
+	return expanded, groups, err
+}
+
+func expandList(list []Ruleset) ([]rules.Rule, error) {
 	var out []rules.Rule
 	for _, rs := range list {
 		if !rs.Enabled {
@@ -201,11 +218,12 @@ func (s *Store) Expand(ctx context.Context) ([]rules.Rule, error) {
 		if len(rs.Content) == 0 {
 			continue
 		}
-		expanded, _ := rules.Import(string(rs.Content), rules.ImportLegacyOptions{})
+		expanded, report := rules.Import(string(rs.Content), rules.ImportLegacyOptions{})
+		valid := 0
 		for i, line := range expanded {
 			parts := splitCSV3(line)
 			if len(parts) < 2 {
-				continue
+				return nil, fmt.Errorf("rulesets: %q produced malformed rule %d", rs.Name, i+1)
 			}
 			kind := parts[0]
 			var pattern, action string
@@ -214,7 +232,7 @@ func (s *Store) Expand(ctx context.Context) ([]rules.Rule, error) {
 				action = parts[1]
 			} else {
 				if len(parts) < 3 {
-					continue
+					return nil, fmt.Errorf("rulesets: %q produced malformed rule %d", rs.Name, i+1)
 				}
 				pattern = parts[1]
 				action = parts[2]
@@ -223,7 +241,7 @@ func (s *Store) Expand(ctx context.Context) ([]rules.Rule, error) {
 			if low != "direct" && low != "block" {
 				action = rs.Action
 			}
-			out = append(out, rules.Rule{
+			rule := rules.Rule{
 				ID:       fmt.Sprintf("%s-%d", rs.Name, i+1),
 				Kind:     rules.Kind(kind),
 				Pattern:  pattern,
@@ -231,7 +249,15 @@ func (s *Store) Expand(ctx context.Context) ([]rules.Rule, error) {
 				Priority: rs.Priority,
 				Enabled:  true,
 				GroupID:  rs.Name,
-			})
+			}
+			if err := rule.Validate(); err != nil {
+				return nil, fmt.Errorf("rulesets: %q produced invalid rule %d: %w", rs.Name, i+1, err)
+			}
+			out = append(out, rule)
+			valid++
+		}
+		if valid == 0 {
+			return nil, fmt.Errorf("rulesets: enabled ruleset %q has non-empty content but produced no valid rules (dropped %d)", rs.Name, report.Dropped)
 		}
 	}
 	return out, nil

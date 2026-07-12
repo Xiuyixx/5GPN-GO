@@ -45,3 +45,6 @@ catalyst-ui-kit/
 
 # Local dev binary build target — release goes to dist/
 /5gpn
+
+# Local audit / analysis reports (not part of source tree)
+/report.md

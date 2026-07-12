@@ -49,13 +49,6 @@ type Exit struct {
 	Active   bool
 }
 
-func (d *DefaultHandlers) log() *slog.Logger {
-	if d.Logger == nil {
-		return slog.Default()
-	}
-	return d.Logger
-}
-
 func (d *DefaultHandlers) Start(_ context.Context, _ int64) (string, error) {
 	return `*5gpn bot*
 send /menu for the interactive dashboard, or /status for one-shot health.`, nil
@@ -258,12 +251,13 @@ func (d *DefaultHandlers) Route(_ context.Context) (string, error) {
 }
 
 func (d *DefaultHandlers) ExitIP(_ context.Context) (string, error) {
-	// Best-effort; a real deployment would proxy through the active exit.
+	// This probes the daemon host's direct egress. It does not prove the
+	// selected mihomo exit path.
 	out, err := runShort("curl", "-sf", "--max-time", "6", "https://ipinfo.io/ip")
 	if err != nil {
 		return "", err
 	}
-	return "exit ip: `" + strings.TrimSpace(out) + "`", nil
+	return "host egress ip (not active-exit probe): `" + strings.TrimSpace(out) + "`", nil
 }
 
 func (d *DefaultHandlers) WireGuard(_ context.Context) (string, error) {
@@ -284,12 +278,10 @@ func (d *DefaultHandlers) Dev(_ context.Context) (string, error) {
 
 func (d *DefaultHandlers) WWW(_ context.Context) (string, error) {
 	port := d.IOSPort
-	suffix := ""
 	if port <= 0 {
-		port = 8111
-		suffix = " (using default 8111)"
+		return "iOS encrypted DNS profile: `/ios-dot.mobileconfig` on the panel HTTPS endpoint", nil
 	}
-	return fmt.Sprintf("iOS DoT profile: `/opt/proxy-gateway/www/ios-dot.mobileconfig` served on :%d%s", port, suffix), nil
+	return fmt.Sprintf("legacy iOS asset listener: `/ios-dot.mobileconfig` on :%d", port), nil
 }
 
 func (d *DefaultHandlers) JSON(_ context.Context) (string, error) {

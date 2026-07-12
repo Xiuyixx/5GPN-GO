@@ -21,7 +21,9 @@ jobs:
           go-version: ${{ matrix.go }}
           cache: true
       - name: tidy
-        run: go mod tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
       - name: vet
         run: go vet ./...
       - name: build
@@ -47,13 +49,16 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - name: install
         working-directory: web
-        run: npm ci --ignore-scripts || true
+        run: npm ci --ignore-scripts
+      - name: test
+        working-directory: web
+        run: npm test
       - name: lint
         working-directory: web
-        run: npm run lint || true
+        run: npm run lint
       - name: build
         working-directory: web
-        run: npm run build || true
+        run: npm run build
 
   lint:
     runs-on: ubuntu-24.04
@@ -62,12 +67,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
-      - uses: golangci/golangci-lint-action@v6
+      - uses: golangci/golangci-lint-action@v9
         with:
-          version: v1.61
-        continue-on-error: true
+          version: v2.12
 
-  # M4 file-size guard. Any non-test .go file under internal/ over
+  # M4 file-size guard. Any first-party non-test Go/TS source over
   # 800 lines fails the pipeline; see scripts/check-file-size.sh and
   # docs/tech-debt.md.
   size-check:
@@ -147,6 +151,13 @@ jobs:
       - name: doctor for ${{ matrix.fixture }}
         run: |
           set -euo pipefail
+          doctor_root=/tmp/5gpn-doctor
+          mkdir -p \
+            "$doctor_root/usr/local/bin" \
+            "$doctor_root/etc" \
+            "$doctor_root/var/lib"
           go run ./cmd/5gpn-installer doctor \
+            --root "$doctor_root" \
             --os-fixture internal/installer/testdata/os-release/${{ matrix.fixture }} \
-            || true # doctor may FAIL bin-dir-writable in the GH runner sandbox; we only need the distro check
+            | tee /tmp/doctor.log
+          grep -q '^  \[ok\] distro recognized' /tmp/doctor.log

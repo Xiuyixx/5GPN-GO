@@ -1,24 +1,27 @@
 // Path-B transparent-forwarder settings surface.
 //
 // GET /api/v1/settings/frontdoor/proxy
-//   Return the current values of all path-B keys plus a computed
-//   "server_ip_effective" (the value the daemon would actually use for
-//   spoofed answers on next boot: explicit override wins, else the
-//   auto-discovered egress IP).
+//
+//	Return the current values of all path-B keys plus a computed
+//	"server_ip_effective" (the value the daemon would actually use for
+//	spoofed answers on next boot: explicit override wins, else the
+//	auto-discovered egress IP).
 //
 // POST /api/v1/settings/frontdoor/proxy
-//   Write the whole config in one shot. All fields are optional; a
-//   missing field leaves the existing value untouched. A single write
-//   never crosses the "port re-shuffle" boundary silently — enabling
-//   SNI/QUIC forward requires a daemon restart to move the panel
-//   secondary bind off :443, and the response includes
-//   restart_required=true so the UI can show the operator a banner.
+//
+//	Write the whole config in one shot. All fields are optional; a
+//	missing field leaves the existing value untouched. A single write
+//	never crosses the "port re-shuffle" boundary silently — enabling
+//	SNI/QUIC forward requires a daemon restart to move the panel
+//	secondary bind off :443, and the response includes
+//	restart_required=true so the UI can show the operator a banner.
 //
 // POST /api/v1/settings/frontdoor/proxy/preflight
-//   Non-mutating probe: verifies the egress IP is discoverable and
-//   returns what the daemon would use. Useful to run before enabling
-//   the toggle so the operator learns "server_ip could not be
-//   auto-discovered" without first flipping the switch.
+//
+//	Non-mutating probe: verifies the egress IP is discoverable and
+//	returns what the daemon would use. Useful to run before enabling
+//	the toggle so the operator learns "server_ip could not be
+//	auto-discovered" without first flipping the switch.
 package api
 
 import (
@@ -90,7 +93,11 @@ func (s *Server) handleGetFrontdoorProxy(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusServiceUnavailable, "settings_unavailable", "settings store not wired")
 		return
 	}
-	resp := s.readProxySettings(r.Context())
+	resp, err := s.readProxySettings(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "read_failed", err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -110,46 +117,61 @@ func (s *Server) handleUpdateFrontdoorProxy(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "invalid_settings", err.Error())
 		return
 	}
+	s.settingsMu.Lock()
+	defer s.settingsMu.Unlock()
 
 	actor := actorFromCtx(r)
 	ctx := r.Context()
 
-	prev := s.readProxySettings(ctx)
-
-	if req.SpoofEnabled != nil {
-		_ = s.Settings.SetBool(ctx, settings.KeyFrontdoorSpoofEnabled, *req.SpoofEnabled, actor)
+	prev, err := s.readProxySettings(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "read_failed", err.Error())
+		return
 	}
+	resp := prev
+	values := map[string]any{}
+	applyBool := func(field *bool, key string, dst *bool) {
+		if field != nil {
+			*dst = *field
+			values[key] = *field
+		}
+	}
+	applyString := func(field *string, key string, dst *string) {
+		if field != nil {
+			*dst = *field
+			values[key] = *field
+		}
+	}
+	applyBool(req.SpoofEnabled, settings.KeyFrontdoorSpoofEnabled, &resp.SpoofEnabled)
 	if req.SpoofScope != nil {
-		_ = s.Settings.SetString(ctx, settings.KeyFrontdoorSpoofScope, *req.SpoofScope, actor)
+		// validateProxySettings already proved this succeeds. Persist the
+		// canonical value so every later reader observes the same semantics.
+		canonical, _ := canonicalSpoofScope(*req.SpoofScope)
+		resp.SpoofScope = canonical
+		values[settings.KeyFrontdoorSpoofScope] = canonical
 	}
-	if req.SpoofServerIP != nil {
-		_ = s.Settings.SetString(ctx, settings.KeyFrontdoorSpoofServerIP, *req.SpoofServerIP, actor)
+	applyString(req.SpoofServerIP, settings.KeyFrontdoorSpoofServerIP, &resp.SpoofServerIP)
+	applyString(req.SpoofAllowCIDR, settings.KeyFrontdoorSpoofAllowCIDR, &resp.SpoofAllowCIDR)
+	applyBool(req.SNIForwardEnabled, settings.KeyFrontdoorSNIForwardEnabled, &resp.SNIForwardEnabled)
+	applyBool(req.QUICForwardEnabled, settings.KeyFrontdoorQUICForwardEnabled, &resp.QUICForwardEnabled)
+	applyString(req.PanelBackendTCP, settings.KeyFrontdoorPanelBackendTCP, &resp.PanelBackendTCP)
+	applyString(req.PanelBackendUDP, settings.KeyFrontdoorPanelBackendUDP, &resp.PanelBackendUDP)
+	resp.ServerIPEffective = resp.SpoofServerIP
+	if resp.ServerIPEffective == "" {
+		resp.ServerIPEffective = resp.ServerIPAutodetected
 	}
-	if req.SpoofAllowCIDR != nil {
-		_ = s.Settings.SetString(ctx, settings.KeyFrontdoorSpoofAllowCIDR, *req.SpoofAllowCIDR, actor)
+	policy, err := spoofPolicyFromSettings(resp)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_settings", err.Error())
+		return
 	}
-	if req.SNIForwardEnabled != nil {
-		_ = s.Settings.SetBool(ctx, settings.KeyFrontdoorSNIForwardEnabled, *req.SNIForwardEnabled, actor)
+	if err := s.Settings.SetMany(ctx, values, actor); err != nil {
+		writeError(w, http.StatusInternalServerError, "write_failed", err.Error())
+		return
 	}
-	if req.QUICForwardEnabled != nil {
-		_ = s.Settings.SetBool(ctx, settings.KeyFrontdoorQUICForwardEnabled, *req.QUICForwardEnabled, actor)
-	}
-	if req.PanelBackendTCP != nil {
-		_ = s.Settings.SetString(ctx, settings.KeyFrontdoorPanelBackendTCP, *req.PanelBackendTCP, actor)
-	}
-	if req.PanelBackendUDP != nil {
-		_ = s.Settings.SetString(ctx, settings.KeyFrontdoorPanelBackendUDP, *req.PanelBackendUDP, actor)
-	}
-
-	// Hot-apply spoof to the running resolver so operators don't have
-	// to restart to change spoof toggle / scope / IP. sni_forward and
-	// quic_forward flags require a restart (they own :443 sockets
-	// that are decided at boot) — flag that in the response.
 	if s.LiveResolver != nil {
-		_ = applyLiveSpoofPolicy(ctx, s.Settings, s.LiveResolver)
+		s.LiveResolver.SetSpoofPolicy(policy)
 	}
-
-	resp := s.readProxySettings(ctx)
 	if (req.SNIForwardEnabled != nil && *req.SNIForwardEnabled != prev.SNIForwardEnabled) ||
 		(req.QUICForwardEnabled != nil && *req.QUICForwardEnabled != prev.QUICForwardEnabled) ||
 		(req.PanelBackendTCP != nil && *req.PanelBackendTCP != prev.PanelBackendTCP) ||
@@ -175,21 +197,49 @@ func (s *Server) handleFrontdoorProxyPreflight(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, res)
 }
 
-func (s *Server) readProxySettings(ctx context.Context) proxySettingsResponse {
-	spoofOn, _ := s.Settings.GetBool(ctx, settings.KeyFrontdoorSpoofEnabled)
-	scope, _ := s.Settings.GetString(ctx, settings.KeyFrontdoorSpoofScope)
+func (s *Server) readProxySettings(ctx context.Context) (proxySettingsResponse, error) {
+	spoofOn, err := s.Settings.GetBool(ctx, settings.KeyFrontdoorSpoofEnabled)
+	if err != nil {
+		return proxySettingsResponse{}, err
+	}
+	scope, err := s.Settings.GetString(ctx, settings.KeyFrontdoorSpoofScope)
+	if err != nil {
+		return proxySettingsResponse{}, err
+	}
 	if scope == "" {
 		scope = string(resolver.SpoofScopeAll)
 	}
-	serverIP, _ := s.Settings.GetString(ctx, settings.KeyFrontdoorSpoofServerIP)
-	allowCIDR, _ := s.Settings.GetString(ctx, settings.KeyFrontdoorSpoofAllowCIDR)
-	sniOn, _ := s.Settings.GetBool(ctx, settings.KeyFrontdoorSNIForwardEnabled)
-	quicOn, _ := s.Settings.GetBool(ctx, settings.KeyFrontdoorQUICForwardEnabled)
-	tcpBackend, _ := s.Settings.GetString(ctx, settings.KeyFrontdoorPanelBackendTCP)
+	scope, err = canonicalSpoofScope(scope)
+	if err != nil {
+		return proxySettingsResponse{}, fmt.Errorf("stored spoof_scope: %w", err)
+	}
+	serverIP, err := s.Settings.GetString(ctx, settings.KeyFrontdoorSpoofServerIP)
+	if err != nil {
+		return proxySettingsResponse{}, err
+	}
+	allowCIDR, err := s.Settings.GetString(ctx, settings.KeyFrontdoorSpoofAllowCIDR)
+	if err != nil {
+		return proxySettingsResponse{}, err
+	}
+	sniOn, err := s.Settings.GetBool(ctx, settings.KeyFrontdoorSNIForwardEnabled)
+	if err != nil {
+		return proxySettingsResponse{}, err
+	}
+	quicOn, err := s.Settings.GetBool(ctx, settings.KeyFrontdoorQUICForwardEnabled)
+	if err != nil {
+		return proxySettingsResponse{}, err
+	}
+	tcpBackend, err := s.Settings.GetString(ctx, settings.KeyFrontdoorPanelBackendTCP)
+	if err != nil {
+		return proxySettingsResponse{}, err
+	}
 	if tcpBackend == "" {
 		tcpBackend = "127.0.0.1:8444"
 	}
-	udpBackend, _ := s.Settings.GetString(ctx, settings.KeyFrontdoorPanelBackendUDP)
+	udpBackend, err := s.Settings.GetString(ctx, settings.KeyFrontdoorPanelBackendUDP)
+	if err != nil {
+		return proxySettingsResponse{}, err
+	}
 	if udpBackend == "" {
 		udpBackend = "127.0.0.1:8445"
 	}
@@ -210,16 +260,15 @@ func (s *Server) readProxySettings(ctx context.Context) proxySettingsResponse {
 		PanelBackendUDP:      udpBackend,
 		ServerIPEffective:    effective,
 		ServerIPAutodetected: auto,
-	}
+	}, nil
 }
 
 // validateProxySettings enforces field-level constraints before any
 // setting is written. Failing here means no partial writes happen.
 func validateProxySettings(req proxySettingsDoc) error {
 	if req.SpoofScope != nil {
-		s := strings.ToLower(strings.TrimSpace(*req.SpoofScope))
-		if s != string(resolver.SpoofScopeAll) && s != string(resolver.SpoofScopePrivateOnly) {
-			return fmt.Errorf("spoof_scope must be %q or %q", resolver.SpoofScopeAll, resolver.SpoofScopePrivateOnly)
+		if _, err := canonicalSpoofScope(*req.SpoofScope); err != nil {
+			return err
 		}
 	}
 	if req.SpoofServerIP != nil && *req.SpoofServerIP != "" {
@@ -251,34 +300,45 @@ func validateProxySettings(req proxySettingsDoc) error {
 	return nil
 }
 
-// applyLiveSpoofPolicy reads the current spoof settings and publishes
-// them to the running resolver via SetSpoofPolicy. Called on every
-// POST so operators can flip spoof scope / IP / CIDR without a
-// restart. Errors are returned but callers typically log-and-continue
-// since the write to the DB is what persists across boots.
-func applyLiveSpoofPolicy(ctx context.Context, sset *settings.Store, res *resolver.Resolver) error {
-	on, _ := sset.GetBool(ctx, settings.KeyFrontdoorSpoofEnabled)
-	if !on {
-		res.SetSpoofPolicy(nil)
-		return nil
+// canonicalSpoofScope is the single API-side normalization boundary for the
+// setting. Accepted casing and surrounding whitespace never reach SQLite or
+// the live resolver; invalid values fail closed instead of widening to "all".
+func canonicalSpoofScope(raw string) (string, error) {
+	scope := strings.ToLower(strings.TrimSpace(raw))
+	switch scope {
+	case string(resolver.SpoofScopeAll), string(resolver.SpoofScopePrivateOnly):
+		return scope, nil
+	default:
+		return "", fmt.Errorf("spoof_scope must be %q or %q", resolver.SpoofScopeAll, resolver.SpoofScopePrivateOnly)
 	}
-	ipStr, _ := sset.GetString(ctx, settings.KeyFrontdoorSpoofServerIP)
-	if ipStr == "" {
-		ipStr = discoverEgressIPForAPI()
+}
+
+func spoofPolicyFromSettings(cfg proxySettingsResponse) (*resolver.SpoofPolicy, error) {
+	if !cfg.SpoofEnabled {
+		return nil, nil
 	}
-	ip := net.ParseIP(strings.TrimSpace(ipStr))
+	ip := net.ParseIP(strings.TrimSpace(cfg.ServerIPEffective))
 	if ip == nil {
-		return errors.New("spoof: server_ip not set and autodetect failed")
+		return nil, errors.New("spoof: server_ip not set and autodetect failed")
 	}
-	scopeStr, _ := sset.GetString(ctx, settings.KeyFrontdoorSpoofScope)
-	scope := resolver.SpoofScopeAll
-	if strings.EqualFold(scopeStr, string(resolver.SpoofScopePrivateOnly)) {
-		scope = resolver.SpoofScopePrivateOnly
+	rawScope := cfg.SpoofScope
+	if strings.TrimSpace(rawScope) == "" {
+		rawScope = string(resolver.SpoofScopeAll)
 	}
-	cidrStr, _ := sset.GetString(ctx, settings.KeyFrontdoorSpoofAllowCIDR)
+	canonical, err := canonicalSpoofScope(rawScope)
+	if err != nil {
+		return nil, err
+	}
+	scope := resolver.SpoofScope(canonical)
 	var cidrs []*net.IPNet
-	if cidrStr != "" {
-		cidrs = resolver.ParseCIDRs(strings.Split(cidrStr, ","))
+	if cfg.SpoofAllowCIDR != "" {
+		for _, raw := range strings.Split(cfg.SpoofAllowCIDR, ",") {
+			_, cidr, err := net.ParseCIDR(strings.TrimSpace(raw))
+			if err != nil {
+				return nil, fmt.Errorf("spoof_allow_cidr %q: %w", raw, err)
+			}
+			cidrs = append(cidrs, cidr)
+		}
 	}
 	policy := &resolver.SpoofPolicy{
 		Scope:     scope,
@@ -290,8 +350,7 @@ func applyLiveSpoofPolicy(ctx context.Context, sset *settings.Store, res *resolv
 	} else {
 		policy.ServerIP6 = ip
 	}
-	res.SetSpoofPolicy(policy)
-	return nil
+	return policy, nil
 }
 
 // discoverEgressIPForAPI is the api-package's clone of the cmd/5gpn
@@ -303,7 +362,7 @@ func discoverEgressIPForAPI() string {
 	if err != nil {
 		return ""
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	la, ok := conn.LocalAddr().(*net.UDPAddr)
 	if !ok || la.IP == nil || la.IP.IsUnspecified() {
 		return ""

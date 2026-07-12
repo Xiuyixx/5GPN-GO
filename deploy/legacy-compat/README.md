@@ -1,5 +1,5 @@
-# Legacy compat rescue scripts
+# Legacy Compatibility Placeholder
 
-Populated in M3. `5gpn-installer rollback --to-legacy` restores files from this directory to reproduce the pre-refactor install.sh path when the new stack has to be abandoned.
-
-Empty in M0.
+This directory is intentionally empty. The current installer has no
+`rollback --to-legacy` command and does not restore a legacy installation.
+Use an independently verified host backup for rollback.

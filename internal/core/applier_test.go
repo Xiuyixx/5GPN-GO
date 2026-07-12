@@ -15,6 +15,8 @@ import (
 	"github.com/Xiuyixx/5GPN-Go/internal/config"
 	"github.com/Xiuyixx/5GPN-Go/internal/db"
 	"github.com/Xiuyixx/5GPN-Go/internal/orchestrator"
+	"github.com/Xiuyixx/5GPN-Go/internal/resolver"
+	"github.com/Xiuyixx/5GPN-Go/internal/rules"
 )
 
 func newApplierTestDB(t *testing.T) *sql.DB {
@@ -23,7 +25,7 @@ func newApplierTestDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
-	t.Cleanup(func() { handle.Close() })
+	t.Cleanup(func() { _ = handle.Close() })
 	if err := db.Migrate(handle); err != nil {
 		t.Fatalf("db.Migrate: %v", err)
 	}
@@ -33,11 +35,11 @@ func newApplierTestDB(t *testing.T) *sql.DB {
 // recordingOrch is an orchestrator that lets tests choose the returned
 // ApplyResult / error and inspect the ApplyRequest it saw.
 type recordingOrch struct {
-	mu      sync.Mutex
-	seen    []orchestrator.ApplyRequest
-	res     orchestrator.ApplyResult
-	err     error
-	rbErr   error
+	mu    sync.Mutex
+	seen  []orchestrator.ApplyRequest
+	res   orchestrator.ApplyResult
+	err   error
+	rbErr error
 }
 
 func (r *recordingOrch) Apply(_ context.Context, req orchestrator.ApplyRequest) (orchestrator.ApplyResult, error) {
@@ -49,14 +51,6 @@ func (r *recordingOrch) Apply(_ context.Context, req orchestrator.ApplyRequest) 
 
 func (r *recordingOrch) Rollback(_ context.Context, snapshotID int64) error {
 	return r.rbErr
-}
-
-func (r *recordingOrch) requests() []orchestrator.ApplyRequest {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := make([]orchestrator.ApplyRequest, len(r.seen))
-	copy(out, r.seen)
-	return out
 }
 
 // insertSnapshotForTest writes a snapshots row so apply_status.snapshot_id
@@ -72,6 +66,21 @@ func insertSnapshotForTest(t *testing.T, handle *sql.DB) int64 {
 	})
 	if err != nil {
 		t.Fatalf("InsertSnapshot: %v", err)
+	}
+	return id
+}
+
+func insertRuleVersionForTest(t *testing.T, handle *sql.DB, snapID int64) int64 {
+	t.Helper()
+	yaml := "rules:\n" +
+		"  - id: target\n" +
+		"    kind: MATCH\n" +
+		"    action: direct\n" +
+		"    priority: 100\n" +
+		"    enabled: true\n"
+	id, err := db.InsertRuleVersion(handle, snapID, yaml, false)
+	if err != nil {
+		t.Fatalf("InsertRuleVersion: %v", err)
 	}
 	return id
 }
@@ -92,12 +101,13 @@ func TestApplierApplyRulesNoOpConfirmed(t *testing.T) {
 	orch := &orchestrator.NoOp{}
 	a, handle := newApplier(t, orch)
 	snapID := insertSnapshotForTest(t, handle)
+	ruleID := insertRuleVersionForTest(t, handle, snapID)
 
-	res, err := a.ApplyRules(context.Background(), snapID, 42, 0)
+	res, err := a.ApplyRules(context.Background(), snapID, ruleID, 0)
 	if err != nil {
 		t.Fatalf("ApplyRules: %v", err)
 	}
-	if res.SnapshotID != snapID || res.RuleVersionID != 42 {
+	if res.SnapshotID != snapID || res.RuleVersionID != ruleID {
 		t.Fatalf("result echoes wrong ids: %+v", res)
 	}
 
@@ -113,12 +123,13 @@ func TestApplierApplyRulesNoOpConfirmed(t *testing.T) {
 	}
 }
 
-func TestApplierApplyRulesSyncErrorRollsBack(t *testing.T) {
+func TestApplierApplyRulesSyncErrorWithoutRollbackIsFailed(t *testing.T) {
 	orch := &recordingOrch{err: errors.New("boom")}
 	a, handle := newApplier(t, orch)
 	snapID := insertSnapshotForTest(t, handle)
+	ruleID := insertRuleVersionForTest(t, handle, snapID)
 
-	_, err := a.ApplyRules(context.Background(), snapID, 1, 0)
+	_, err := a.ApplyRules(context.Background(), snapID, ruleID, 0)
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
@@ -126,8 +137,8 @@ func TestApplierApplyRulesSyncErrorRollsBack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LatestApplyStatus: %v", err)
 	}
-	if status.State != "rolled_back" {
-		t.Fatalf("expected rolled_back, got %q", status.State)
+	if status.State != "failed" {
+		t.Fatalf("expected failed, got %q", status.State)
 	}
 	if status.Reason != "boom" {
 		t.Fatalf("expected reason 'boom', got %q", status.Reason)
@@ -138,8 +149,9 @@ func TestApplierApplyRulesObservingLeavesSubmitted(t *testing.T) {
 	orch := &recordingOrch{res: orchestrator.ApplyResult{Health: "observing"}}
 	a, handle := newApplier(t, orch)
 	snapID := insertSnapshotForTest(t, handle)
+	ruleID := insertRuleVersionForTest(t, handle, snapID)
 
-	_, err := a.ApplyRules(context.Background(), snapID, 1, 0)
+	_, err := a.ApplyRules(context.Background(), snapID, ruleID, 0)
 	if err != nil {
 		t.Fatalf("ApplyRules: %v", err)
 	}
@@ -165,8 +177,9 @@ func TestApplierApplyRulesObservingRolledBackViaObserver(t *testing.T) {
 	orch := &recordingOrch{res: orchestrator.ApplyResult{Health: "observing"}}
 	a, handle := newApplier(t, orch)
 	snapID := insertSnapshotForTest(t, handle)
+	ruleID := insertRuleVersionForTest(t, handle, snapID)
 
-	if _, err := a.ApplyRules(context.Background(), snapID, 1, 0); err != nil {
+	if _, err := a.ApplyRules(context.Background(), snapID, ruleID, 0); err != nil {
 		t.Fatalf("ApplyRules: %v", err)
 	}
 	a.OnHealth(context.Background(),
@@ -183,8 +196,9 @@ func TestApplierApplyInFlight(t *testing.T) {
 	orch := &recordingOrch{err: orchestrator.ErrApplyInFlight}
 	a, handle := newApplier(t, orch)
 	snapID := insertSnapshotForTest(t, handle)
+	ruleID := insertRuleVersionForTest(t, handle, snapID)
 
-	_, err := a.ApplyRules(context.Background(), snapID, 1, 0)
+	_, err := a.ApplyRules(context.Background(), snapID, ruleID, 0)
 	if !errors.Is(err, orchestrator.ErrApplyInFlight) {
 		t.Fatalf("expected ErrApplyInFlight, got %v", err)
 	}
@@ -270,11 +284,128 @@ func TestApplierConcurrentRegisterInflight(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			snapID := insertSnapshotForTest(t, handle)
-			_, _ = a.ApplyRules(context.Background(), snapID, 1, 0)
+			ruleID := insertRuleVersionForTest(t, handle, snapID)
+			_, _ = a.ApplyRules(context.Background(), snapID, ruleID, 0)
 			a.OnHealth(context.Background(),
 				orchestrator.ApplyRequest{SnapshotID: snapID},
 				orchestrator.ApplyResult{Health: "ok"})
 		}()
 	}
 	wg.Wait()
+}
+
+func TestApplyRulesCommitsDBAndResolverOnlyAfterHealthConfirmation(t *testing.T) {
+	orch := &recordingOrch{res: orchestrator.ApplyResult{Health: "observing"}}
+	a, handle := newApplier(t, orch)
+	a.Resolver = &resolver.Store{}
+
+	priorSnap := insertSnapshotForTest(t, handle)
+	priorYAML := "rules:\n  - id: old\n    kind: DOMAIN\n    pattern: old.example\n    action: direct\n    priority: 10\n    enabled: true\n"
+	priorID, err := db.InsertRuleVersion(handle, priorSnap, priorYAML, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	priorSet, _ := rules.ParseYAML([]byte(priorYAML))
+	priorTable, _ := resolver.BuildTable(priorSet.Rules)
+	a.Resolver.Publish(priorTable)
+
+	targetSnap := insertSnapshotForTest(t, handle)
+	targetYAML := "rules:\n  - id: new\n    kind: DOMAIN\n    pattern: new.example\n    action: block\n    priority: 10\n    enabled: true\n"
+	targetID, err := db.InsertRuleVersion(handle, targetSnap, targetYAML, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := a.ApplyRules(context.Background(), targetSnap, targetID, priorSnap); err != nil {
+		t.Fatal(err)
+	}
+	active, _ := db.GetActiveRuleVersion(handle)
+	if active.ID != priorID {
+		t.Fatalf("observing apply activated %d, want prior %d", active.ID, priorID)
+	}
+	if _, ok := a.Resolver.Load().Entries()["exact:new.example"]; ok {
+		t.Fatal("observing apply published target resolver table")
+	}
+
+	a.OnHealth(context.Background(), orchestrator.ApplyRequest{SnapshotID: targetSnap}, orchestrator.ApplyResult{Health: "ok"})
+	active, _ = db.GetActiveRuleVersion(handle)
+	if active.ID != targetID {
+		t.Fatalf("confirmed apply active=%d, want target %d", active.ID, targetID)
+	}
+	if _, ok := a.Resolver.Load().Entries()["exact:new.example"]; !ok {
+		t.Fatal("confirmed apply did not publish target resolver table")
+	}
+}
+
+func TestApplyRulesHealthFailureKeepsPriorDBAndResolver(t *testing.T) {
+	orch := &recordingOrch{res: orchestrator.ApplyResult{Health: "observing"}}
+	a, handle := newApplier(t, orch)
+	a.Resolver = &resolver.Store{}
+
+	priorSnap := insertSnapshotForTest(t, handle)
+	priorYAML := "rules:\n  - id: old\n    kind: DOMAIN\n    pattern: old.example\n    action: direct\n    priority: 10\n    enabled: true\n"
+	priorID, _ := db.InsertRuleVersion(handle, priorSnap, priorYAML, true)
+	priorSet, _ := rules.ParseYAML([]byte(priorYAML))
+	priorTable, _ := resolver.BuildTable(priorSet.Rules)
+	a.Resolver.Publish(priorTable)
+
+	targetSnap := insertSnapshotForTest(t, handle)
+	targetID := insertRuleVersionForTest(t, handle, targetSnap)
+	if _, err := a.ApplyRules(context.Background(), targetSnap, targetID, priorSnap); err != nil {
+		t.Fatal(err)
+	}
+	a.OnHealth(context.Background(), orchestrator.ApplyRequest{SnapshotID: targetSnap}, orchestrator.ApplyResult{
+		RolledBack: true, Health: "failed", Reason: "probe failed",
+	})
+	active, _ := db.GetActiveRuleVersion(handle)
+	if active.ID != priorID {
+		t.Fatalf("failed apply active=%d, want prior %d", active.ID, priorID)
+	}
+	entries := a.Resolver.Load().Entries()
+	if _, ok := entries["exact:old.example"]; !ok {
+		t.Fatal("failed apply changed prior resolver table")
+	}
+}
+
+func TestApplyRulesUnrecoveredHealthFailureDoesNotCommitCandidate(t *testing.T) {
+	orch := &recordingOrch{res: orchestrator.ApplyResult{Health: "observing"}}
+	a, handle := newApplier(t, orch)
+	a.Resolver = &resolver.Store{}
+
+	priorSnap := insertSnapshotForTest(t, handle)
+	priorYAML := "rules:\n  - id: old\n    kind: DOMAIN\n    pattern: old.example\n    action: direct\n    priority: 10\n    enabled: true\n"
+	priorID, err := db.InsertRuleVersion(handle, priorSnap, priorYAML, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	priorSet, _ := rules.ParseYAML([]byte(priorYAML))
+	priorTable, _ := resolver.BuildTable(priorSet.Rules)
+	a.Resolver.Publish(priorTable)
+
+	targetSnap := insertSnapshotForTest(t, handle)
+	targetID := insertRuleVersionForTest(t, handle, targetSnap)
+	if _, err := a.ApplyRules(context.Background(), targetSnap, targetID, priorSnap); err != nil {
+		t.Fatal(err)
+	}
+	a.OnHealth(context.Background(), orchestrator.ApplyRequest{SnapshotID: targetSnap}, orchestrator.ApplyResult{
+		Health: "failed", Reason: "probe failed; restore failed",
+	})
+
+	status, err := db.LatestApplyStatus(handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != "failed" {
+		t.Fatalf("status=%+v, want failed", status)
+	}
+	active, err := db.GetActiveRuleVersion(handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active.ID != priorID {
+		t.Fatalf("unrecovered failure activated %d, want prior %d", active.ID, priorID)
+	}
+	if _, ok := a.Resolver.Load().Entries()["exact:old.example"]; !ok {
+		t.Fatal("unrecovered failure changed prior resolver table")
+	}
 }

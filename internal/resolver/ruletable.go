@@ -18,10 +18,10 @@ type RuleTable struct {
 	Generation int64
 	Hash       [32]byte
 
-	exact         map[string]string // normalized fqdn -> action
-	suffix        *suffixNode       // domain-suffix trie, keyed by reversed labels
-	keywords      []keywordRule     // domain-keyword, priority order
-	defaultAction string            // MATCH rule's action, or "" (classify falls back to proxy)
+	exact         map[string]rankedAction // normalized fqdn -> action + global rule order
+	suffix        *suffixNode             // domain-suffix trie, keyed by reversed labels
+	keywords      []keywordRule           // domain-keyword, priority order
+	defaultAction string                  // MATCH rule's action, or "" (classify falls back to proxy)
 
 	// CIDRs is compiled from IP-CIDR / GEOIP rules for future response-IP
 	// filtering. classify() never consults it — IP-based rules are
@@ -32,6 +32,12 @@ type RuleTable struct {
 type keywordRule struct {
 	keyword string
 	action  string
+	rank    int
+}
+
+type rankedAction struct {
+	action string
+	rank   int
 }
 
 type cidrEntry struct {
@@ -42,6 +48,7 @@ type cidrEntry struct {
 type suffixNode struct {
 	children  map[string]*suffixNode
 	action    string
+	rank      int
 	hasAction bool
 }
 
@@ -52,7 +59,7 @@ func newSuffixNode() *suffixNode {
 // insert adds a domain-suffix rule. Only the first (highest-priority,
 // since callers insert in priority order) rule for a given suffix wins;
 // later duplicates targeting the same suffix are no-ops.
-func (n *suffixNode) insert(labels []string, action string) {
+func (n *suffixNode) insert(labels []string, action string, rank int) {
 	cur := n
 	for i := len(labels) - 1; i >= 0; i-- {
 		lbl := labels[i]
@@ -65,28 +72,31 @@ func (n *suffixNode) insert(labels []string, action string) {
 	}
 	if !cur.hasAction {
 		cur.action = action
+		cur.rank = rank
 		cur.hasAction = true
 	}
 }
 
-// lookup returns the most specific (deepest) suffix match for name, e.g.
-// a rule on "sub.example.com" outranks one on "example.com" for the
-// query "www.sub.example.com".
-func (n *suffixNode) lookup(name string) (string, bool) {
+// lookup returns the earliest matching suffix in global priority order. A
+// broader suffix can therefore beat a more-specific one when it appears
+// first in the emitted mihomo rule list.
+func (n *suffixNode) lookup(name string) (rankedAction, bool) {
 	labels := splitLabels(name)
 	cur := n
-	action, ok := "", false
+	var best rankedAction
+	ok := false
 	for i := len(labels) - 1; i >= 0; i-- {
 		child, exists := cur.children[labels[i]]
 		if !exists {
 			break
 		}
 		cur = child
-		if cur.hasAction {
-			action, ok = cur.action, true
+		if cur.hasAction && (!ok || cur.rank < best.rank) {
+			best = rankedAction{action: cur.action, rank: cur.rank}
+			ok = true
 		}
 	}
-	return action, ok
+	return best, ok
 }
 
 func normalizeName(s string) string {
@@ -114,7 +124,7 @@ func splitLabels(name string) []string {
 // here; any that slip through are skipped the same way.
 func BuildTable(rs []rules.Rule) (*RuleTable, error) {
 	t := &RuleTable{
-		exact:  make(map[string]string),
+		exact:  make(map[string]rankedAction),
 		suffix: newSuffixNode(),
 	}
 
@@ -126,8 +136,8 @@ func BuildTable(rs []rules.Rule) (*RuleTable, error) {
 	}
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Priority < sorted[j].Priority })
 
-	for _, r := range sorted {
-		compileRule(t, r)
+	for rank, r := range sorted {
+		compileRule(t, r, rank)
 	}
 
 	sum := rules.HashRules(&rules.RuleSet{Rules: rs})
@@ -138,17 +148,17 @@ func BuildTable(rs []rules.Rule) (*RuleTable, error) {
 	return t, nil
 }
 
-func compileRule(t *RuleTable, r rules.Rule) {
+func compileRule(t *RuleTable, r rules.Rule, rank int) {
 	switch r.Kind {
 	case rules.KindDomain:
 		name := normalizeName(r.Pattern)
 		if _, exists := t.exact[name]; !exists {
-			t.exact[name] = r.Action
+			t.exact[name] = rankedAction{action: r.Action, rank: rank}
 		}
 	case rules.KindDomainSuffix:
-		t.suffix.insert(splitLabels(normalizeName(r.Pattern)), r.Action)
+		t.suffix.insert(splitLabels(normalizeName(r.Pattern)), r.Action, rank)
 	case rules.KindDomainKeyword:
-		t.keywords = append(t.keywords, keywordRule{keyword: strings.ToLower(r.Pattern), action: r.Action})
+		t.keywords = append(t.keywords, keywordRule{keyword: strings.ToLower(r.Pattern), action: r.Action, rank: rank})
 	case rules.KindMatch:
 		if t.defaultAction == "" {
 			t.defaultAction = r.Action
@@ -189,8 +199,8 @@ func (t *RuleTable) Entries() map[string]Entry {
 	if t == nil {
 		return out
 	}
-	for name, action := range t.exact {
-		out["exact:"+name] = Entry{Kind: "exact", Pattern: name, Action: string(toAction(action))}
+	for name, match := range t.exact {
+		out["exact:"+name] = Entry{Kind: "exact", Pattern: name, Action: string(toAction(match.action))}
 	}
 	if t.suffix != nil {
 		t.suffix.walk(nil, func(name, action string) {

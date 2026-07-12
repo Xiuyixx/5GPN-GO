@@ -3,7 +3,7 @@ GO := go
 NPM := npm
 VERSION ?= 0.0.0-dev
 
-.PHONY: build build-embed dev test lint tidy release clean web-install web-build stage-web size-check install-hooks coverage release-matrix dep-cycle-check
+.PHONY: build build-embed dev test lint tidy release clean web-install web-test web-build stage-web size-check install-hooks coverage release-matrix dep-cycle-check
 
 build:
 	$(GO) build ./cmd/5gpn ./cmd/5gpn-installer ./cmd/5gpn-ctl
@@ -25,14 +25,17 @@ test:
 	$(GO) test -race ./...
 
 lint:
-	@command -v golangci-lint >/dev/null 2>&1 && golangci-lint run || echo "golangci-lint not installed; skipping"
-	@cd web && $(NPM) run lint || echo "web lint failed"
+	golangci-lint run
+	cd web && $(NPM) run lint
 
 tidy:
 	$(GO) mod tidy
 
 web-install:
 	cd web && $(NPM) ci --no-audit --no-fund
+
+web-test:
+	cd web && $(NPM) test
 
 web-build:
 	cd web && $(NPM) run build
@@ -59,7 +62,8 @@ install-hooks:
 	@ln -sfn ../../scripts/pre-commit .git/hooks/pre-commit
 	@echo "pre-commit hook linked to scripts/pre-commit"
 
-# Emit per-package coverage; used by CI to compare against thresholds.
+# Emit local per-package coverage. CI uploads a coverage profile but does not
+# currently enforce a numeric threshold.
 coverage:
 	$(GO) test -race -coverprofile=cover.out ./internal/... 2>&1 | tee coverage.log
 	@$(GO) tool cover -func=cover.out | tail -1

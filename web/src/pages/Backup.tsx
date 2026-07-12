@@ -7,9 +7,49 @@ import { Button } from '../components/ui/button';
 import { Alert, AlertBody, AlertTitle } from '../components/ui/alert';
 import { Badge } from '../components/ui/badge';
 import { Dialog, DialogActions, DialogBody, DialogDescription, DialogTitle } from '../components/ui/dialog';
-import { api } from '../api/client';
+import { api, clearSession } from '../api/client';
+import { settleBackupImport } from '../api/apply';
 import { useAuthStore } from '../stores/auth';
 import type { BackupImportResult, Rule } from '../api/client';
+
+export const MAX_BACKUP_BYTES = 32 * 1024 * 1024;
+export const MAX_BACKUP_EXPANDED_BYTES = 128 * 1024 * 1024;
+
+export function backupFileSizeAllowed(size: number): boolean {
+  return size > 0 && size <= MAX_BACKUP_BYTES;
+}
+
+export async function readStreamWithLimit(
+  stream: ReadableStream<Uint8Array>,
+  maxBytes = MAX_BACKUP_EXPANDED_BYTES,
+): Promise<Uint8Array> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value?.byteLength) continue;
+      if (value.byteLength > maxBytes - total) {
+        await reader.cancel('expanded backup preview exceeds size limit').catch(() => undefined);
+        throw new Error(`expanded backup preview exceeds ${maxBytes} bytes`);
+      }
+      chunks.push(value);
+      total += value.byteLength;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
 
 function healthColor(health: string): 'lime' | 'amber' | 'red' | 'zinc' {
   switch (health) {
@@ -31,11 +71,9 @@ function healthLabel(health: string, t: (key: string) => string): string {
 
 async function countRulesInFile(file: File): Promise<number | null> {
   try {
-    const buf = await file.arrayBuffer();
     const ds = new DecompressionStream('gzip');
-    const stream = new Response(buf).body?.pipeThrough(ds);
-    if (!stream) return null;
-    const bytes = new Uint8Array(await new Response(stream).arrayBuffer());
+    const stream = file.stream().pipeThrough(ds);
+    const bytes = await readStreamWithLimit(stream);
     // tar: find "rules/active.yaml" header, then read the next 512-aligned block.
     const dec = new TextDecoder();
     for (let off = 0; off + 512 <= bytes.length; off += 512) {
@@ -83,6 +121,7 @@ export default function Backup() {
       const res = await fetch('/api/v1/backup/export', {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
+      if (res.status === 401) clearSession();
       if (!res.ok) {
         throw new Error(`export failed: ${res.status}`);
       }
@@ -103,6 +142,11 @@ export default function Backup() {
   async function stagedFile(file: File) {
     setErr(null);
     setImportResult(null);
+    if (!backupFileSizeAllowed(file.size)) {
+      setErr(t('backup.fileTooLarge', { max: MAX_BACKUP_BYTES / 1024 / 1024 }));
+      if (fileRef.current) fileRef.current.value = '';
+      return;
+    }
     const targetCount = await countRulesInFile(file);
     setPending({ file, targetCount });
   }
@@ -121,10 +165,12 @@ export default function Backup() {
         },
         body: file,
       });
+      if (res.status === 401) clearSession();
       if (!res.ok) throw new Error(`import failed: ${res.status} ${await res.text()}`);
-      const body: BackupImportResult = await res.json();
-      setImportResult(body);
-      if (body.applied) {
+      const response: BackupImportResult = await res.json();
+      const result = await settleBackupImport(response);
+      setImportResult(result);
+      if (result.applied) {
         try {
           const { rules } = await api.get<{ rules: Rule[] }>('/api/v1/rules');
           setCurrentCount(rules.length);

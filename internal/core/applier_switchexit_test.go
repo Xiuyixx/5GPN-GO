@@ -52,16 +52,20 @@ func (f *fakeExitStore) Switch(_ context.Context, exitID string) error {
 	return nil
 }
 
+func (f *fakeExitStore) Delete(_ context.Context, exitID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.known[exitID] {
+		return errors.New("unknown exit id")
+	}
+	delete(f.known, exitID)
+	return nil
+}
+
 func (f *fakeExitStore) currentActive() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.active
-}
-
-func (f *fakeExitStore) callCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return len(f.switchCall)
 }
 
 func newSwitchApplier(t *testing.T, orch orchestrator.Orchestrator, exitStore *fakeExitStore) (*Applier, *sql.DB) {
@@ -132,10 +136,9 @@ func TestSwitchExitHappyPath(t *testing.T) {
 	}
 }
 
-// TestSwitchExitRollsBackOnSyncFailure: mock orch returns error → active
-// reverts to prior, apply_status rolled_back, audit_log has rolled_back
-// entry.
-func TestSwitchExitRollsBackOnSyncFailure(t *testing.T) {
+// A bare orchestrator error does not prove that the external data plane was
+// restored, even though the control-plane exit pointer is compensated.
+func TestSwitchExitSyncFailureWithoutRollbackIsFailed(t *testing.T) {
 	orch := &recordingOrch{err: errors.New("boom")}
 	es := newFakeExitStore("direct", "wg1")
 	a, handle := newSwitchApplier(t, orch, es)
@@ -151,18 +154,18 @@ func TestSwitchExitRollsBackOnSyncFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LatestApplyStatus: %v", err)
 	}
-	if status == nil || status.State != "rolled_back" {
-		t.Fatalf("expected rolled_back apply_status, got %+v", status)
+	if status == nil || status.State != "failed" {
+		t.Fatalf("expected failed apply_status, got %+v", status)
 	}
 	if status.Reason != "boom" {
 		t.Fatalf("reason = %q, want 'boom'", status.Reason)
 	}
-	if got := countAuditRowsWithAction(t, handle, "exits.switch.rolled_back"); got != 1 {
-		t.Fatalf("expected 1 rolled_back audit row, got %d", got)
+	if got := countAuditRowsWithAction(t, handle, "exits.switch.failed"); got != 1 {
+		t.Fatalf("expected 1 failed audit row, got %d", got)
 	}
 	action, _, result := lastAuditAction(t, handle)
-	if action != "exits.switch.rolled_back" || result != "boom" {
-		t.Fatalf("last audit = %q/%q, want exits.switch.rolled_back/boom", action, result)
+	if action != "exits.switch.failed" || result != "boom" {
+		t.Fatalf("last audit = %q/%q, want exits.switch.failed/boom", action, result)
 	}
 }
 
@@ -243,6 +246,75 @@ func TestSwitchExitObservingRolledBackViaObserver(t *testing.T) {
 	}
 	if got := countAuditRowsWithAction(t, handle, "exits.switch.rolled_back"); got != 1 {
 		t.Fatalf("expected 1 rolled_back audit row, got %d", got)
+	}
+}
+
+func TestSwitchExitObservingUnrecoveredFailureIsFailed(t *testing.T) {
+	orch := &recordingOrch{res: orchestrator.ApplyResult{Health: "observing"}}
+	es := newFakeExitStore("direct", "wg1")
+	a, handle := newSwitchApplier(t, orch, es)
+
+	res, err := a.SwitchExit(context.Background(), "wg1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.OnHealth(context.Background(), orchestrator.ApplyRequest{SnapshotID: res.SnapshotID},
+		orchestrator.ApplyResult{Health: "failed", Reason: "probe and restore failed"})
+	if got := es.currentActive(); got != "direct" {
+		t.Fatalf("control-plane active=%q, want direct", got)
+	}
+	status, err := db.LatestApplyStatus(handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != "failed" {
+		t.Fatalf("status=%+v, want failed", status)
+	}
+	if got := countAuditRowsWithAction(t, handle, "exits.switch.failed"); got != 1 {
+		t.Fatalf("failed audit rows=%d, want 1", got)
+	}
+}
+
+func TestSwitchExitTerminalStatusFallsBackWhenDBUpdateFails(t *testing.T) {
+	orch := &recordingOrch{res: orchestrator.ApplyResult{Health: "observing"}}
+	es := newFakeExitStore("direct", "wg1")
+	a, handle := newSwitchApplier(t, orch, es)
+
+	res, err := a.SwitchExit(context.Background(), "wg1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handle.Exec(`
+		CREATE TRIGGER fail_apply_status_update
+		BEFORE UPDATE ON apply_status
+		BEGIN
+			SELECT RAISE(FAIL, 'forced apply_status update failure');
+		END`); err != nil {
+		t.Fatalf("create failure trigger: %v", err)
+	}
+	a.OnHealth(context.Background(), orchestrator.ApplyRequest{SnapshotID: res.SnapshotID},
+		orchestrator.ApplyResult{Health: "confirmed"})
+
+	row, err := db.ApplyStatusBySnapshot(handle, res.SnapshotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row == nil || row.State != "submitted" {
+		t.Fatalf("persisted row = %+v, want submitted after forced UPDATE failure", row)
+	}
+	terminal, ok := a.TerminalStatus(res.SnapshotID)
+	if !ok || terminal.State != "confirmed" {
+		t.Fatalf("terminal fallback = %+v, %v; want confirmed", terminal, ok)
+	}
+	status, err := a.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != "confirmed" {
+		t.Fatalf("Status state = %q, want confirmed fallback", status.State)
+	}
+	if err := a.DeleteExit(context.Background(), "direct"); err != nil {
+		t.Fatalf("terminal observer did not release exit protection: %v", err)
 	}
 }
 

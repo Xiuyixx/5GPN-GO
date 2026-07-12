@@ -90,7 +90,7 @@ func (r *ctlRouter) serve(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("ctl socket: listen %s: %w", path, err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	defer os.Remove(path)
 
 	// 0700 keeps other users off even if the runtime dir permissions
@@ -142,7 +142,7 @@ func prepareSocketPath(logger *slog.Logger) (string, error) {
 // handleConn runs one request/response cycle then closes the conn.
 // The connection is a UnixConn — assert to reach SO_PEERCRED.
 func (r *ctlRouter) handleConn(ctx context.Context, conn net.Conn) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	uc, ok := conn.(*net.UnixConn)
 	if !ok {
@@ -315,7 +315,7 @@ func (r *ctlRouter) cmdExitsSwitch(ctx context.Context, exitID string) response 
 // but selects the target snapshot itself (most recent that is NOT the
 // currently-active rule version's snapshot).
 func (r *ctlRouter) cmdRulesRollback(ctx context.Context) response {
-	if r.db == nil {
+	if r.db == nil || r.applier == nil {
 		return errResp("db unavailable")
 	}
 	active, err := db.GetActiveRuleVersion(r.db)
@@ -338,18 +338,22 @@ func (r *ctlRouter) cmdRulesRollback(ctx context.Context) response {
 	if target == nil {
 		return errResp("no prior rule_version to roll back to")
 	}
-	if err := db.SetActiveRuleVersion(r.db, target.ID); err != nil {
+	res, err := r.applier.ApplyRules(ctx, target.SnapshotID, target.ID, active.SnapshotID)
+	if err != nil {
 		return errResp(err.Error())
 	}
 	_ = db.AppendAudit(r.db, db.AuditEntry{
 		Actor:  "ctl",
 		Action: "rules.rollback",
 		Target: fmt.Sprintf("rule_version=%d snapshot=%d", target.ID, target.SnapshotID),
-		Result: "ok",
+		Result: res.Health,
 	})
 	return okResp(map[string]any{
 		"rule_version_id": target.ID,
 		"snapshot_id":     target.SnapshotID,
+		"health":          res.Health,
+		"rolled_back":     res.RolledBack,
+		"reason":          res.Reason,
 	})
 }
 
@@ -382,4 +386,4 @@ func (r *ctlRouter) cmdChinalistSync(ctx context.Context) response {
 }
 
 func okResp(data map[string]any) response { return response{OK: true, Data: data} }
-func errResp(msg string) response          { return response{OK: false, Error: msg} }
+func errResp(msg string) response         { return response{OK: false, Error: msg} }

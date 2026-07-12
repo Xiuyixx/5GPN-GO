@@ -40,8 +40,6 @@ import (
 	"github.com/Xiuyixx/5GPN-Go/internal/settings"
 	"github.com/Xiuyixx/5GPN-Go/internal/tgbot"
 	"github.com/Xiuyixx/5GPN-Go/internal/web"
-
-	"net"
 )
 
 // Default loopback backends used when the operator enables the
@@ -77,7 +75,7 @@ func (b *bootStore) ListExits() ([]core.ExitRecord, error) {
 	return b.exits.Records(context.Background())
 }
 
-var version = "0.3.2"
+var version = "0.4.0"
 
 func main() {
 	configPath := flag.String("config", "/etc/5gpn/config.yaml", "path to config.yaml")
@@ -108,15 +106,18 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 		return fmt.Errorf("config: %w", err)
 	}
 
-	if err := os.MkdirAll(dataDir, 0o750); err != nil {
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return fmt.Errorf("data dir: %w", err)
+	}
+	if err := os.Chmod(dataDir, 0o700); err != nil {
+		return fmt.Errorf("data dir permissions: %w", err)
 	}
 
 	dbHandle, err := db.Open(db.Config{Path: filepath.Join(dataDir, "5gpn.db")})
 	if err != nil {
 		return err
 	}
-	defer dbHandle.Close()
+	defer func() { _ = dbHandle.Close() }()
 	if err := db.Migrate(dbHandle); err != nil {
 		return err
 	}
@@ -132,7 +133,7 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 	// anything the wizard has not touched.
 	settingsStore := settings.New(dbHandle)
 	if err := settings.OverlayConfig(context.Background(), settingsStore, cfg); err != nil {
-		logger.Warn("settings overlay skipped", "err", err)
+		return fmt.Errorf("settings overlay: %w", err)
 	}
 
 	// Internal-only access gate: shared instance between the panel
@@ -145,8 +146,15 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 	}
 
 	setupToken := ""
-	if n, _ := db.CountPanelUsers(dbHandle); n == 0 {
-		setupToken = randomHex(32)
+	n, err := db.CountPanelUsers(dbHandle)
+	if err != nil {
+		return fmt.Errorf("count panel users: %w", err)
+	}
+	if n == 0 {
+		setupToken, err = randomHex(32)
+		if err != nil {
+			return fmt.Errorf("generate setup token: %w", err)
+		}
 		logger.Warn("no panel user found — one-time setup token below")
 		fmt.Printf("\n===============================================================\n")
 		fmt.Printf("5GPN SETUP TOKEN (valid until first successful bootstrap):\n\n  %s\n\n", setupToken)
@@ -163,7 +171,7 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 	// import them once. Idempotent on subsequent boots.
 	exitStore := xexit.NewStore(dbHandle)
 	if err := seedExitsFromYAML(ctx, exitStore, cfg.Exits, logger); err != nil {
-		logger.Warn("exit seed skipped", "err", err)
+		return fmt.Errorf("exit seed: %w", err)
 	}
 
 	// Assemble the effective config once at boot so orchestrator + Applier
@@ -235,7 +243,10 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 		Logger:   logger,
 	}).Run(ctx)
 
-	binPath, _ := os.Executable()
+	binPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve executable path: %w", err)
+	}
 
 	// TG bot Manager. Owned by the daemon lifecycle; wired into the
 	// panel so /api/v1/settings/tgbot can hot-reload the bot without
@@ -259,13 +270,17 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 	// stays honest without hitting the network at every apply.
 	go rulesetSyncer.Run(ctx, 6*time.Hour)
 
-	// DNS-plane wiring — v0.3.0. resolverStore holds the currently
-	// active RuleTable; Publish is called from api.handleApply (and
-	// handleRollbackSnapshot) after a snapshot lands, so the DNS
-	// listeners see fresh rules without a daemon restart. resolverMetrics
-	// is the counter set the panel's Dashboard renders.
+	// resolverStore holds the active in-memory RuleTable. The Applier publishes
+	// a candidate only after the orchestrator and DB commit succeed, so DNS
+	// listeners update without a daemon restart. resolverMetrics is the
+	// counter set rendered by the panel Dashboard.
 	resolverStore := &resolver.Store{}
 	resolverMetrics := resolver.NewMetrics()
+	initialTable, err := resolver.BuildTable(effectiveCfg.EffectiveRules)
+	if err != nil {
+		return fmt.Errorf("resolver: compile active rules: %w", err)
+	}
+	resolverStore.Publish(initialTable)
 
 	srv := api.New(dbHandle, api.Config{
 		SessionTTL:     cfg.Panel.SessionTTL,
@@ -312,8 +327,14 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 	// over ACME so operators keeping a manual chain (e.g. dnsdist) are
 	// not surprised.
 	if !insecure && cert == "" && key == "" {
-		acmeEnabled, _ := settingsStore.GetBool(context.Background(), settings.KeyTLSACMEEnabled)
-		acmeEmail, _ := settingsStore.GetString(context.Background(), settings.KeyTLSACMEEmail)
+		acmeEnabled, err := settingsStore.GetBool(context.Background(), settings.KeyTLSACMEEnabled)
+		if err != nil {
+			return fmt.Errorf("read ACME enabled setting: %w", err)
+		}
+		acmeEmail, err := settingsStore.GetString(context.Background(), settings.KeyTLSACMEEmail)
+		if err != nil {
+			return fmt.Errorf("read ACME email setting: %w", err)
+		}
 		if acmeEnabled && cfg.Server.Domain != "" && acmeEmail != "" {
 			srv.ACME = api.ACMEOptions{
 				Domain:     cfg.Server.Domain,
@@ -329,12 +350,18 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 	// secondary on :443) must vacate :443 entirely and bind the
 	// loopback panelBackendTCP instead. This must happen BEFORE
 	// srv.ListenAndServe so both listeners pick up the move.
-	sniForwardOn, _ := settingsStore.GetBool(context.Background(), settings.KeyFrontdoorSNIForwardEnabled)
+	sniForwardOn, err := settingsStore.GetBool(context.Background(), settings.KeyFrontdoorSNIForwardEnabled)
+	if err != nil {
+		return fmt.Errorf("read SNI forward setting: %w", err)
+	}
 	panelBackendTCP := defaultPanelBackendTCP
-	if v, _ := settingsStore.GetString(context.Background(), settings.KeyFrontdoorPanelBackendTCP); v != "" {
+	if v, readErr := settingsStore.GetString(context.Background(), settings.KeyFrontdoorPanelBackendTCP); readErr != nil {
+		return fmt.Errorf("read panel TCP backend setting: %w", readErr)
+	} else if v != "" {
 		panelBackendTCP = v
 	}
-	if sniForwardOn && srv.ACME.Domain != "" {
+	panelTLSConfigured := srv.ACME.Domain != "" || (cert != "" && key != "")
+	if sniForwardOn && panelTLSConfigured {
 		srv.ACMEListenAddr = panelBackendTCP
 		if strings.HasSuffix(addr, ":443") || strings.HasSuffix(addr, ":443/") {
 			logger.Info("path-b: primary panel listener relocated off :443",
@@ -389,14 +416,13 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 	logger.Info("5gpn daemon starting",
 		"version", version, "addr", addr, "data", dataDir, "insecure", insecure)
 
-	// DNS front-door (v0.3.0). Only starts when ACME is active, because
-	// DoT/DoH/DoQ/DoH3 all need the LE cert. In --insecure dev boots the
-	// front-door is silently skipped — a dev daemon without a real domain
-	// has nothing to encrypt with. Plain :53 UDP/TCP is fine as-is when
-	// the plan's public_plain_dns_enabled toggle is off (default), because
-	// the loopback + WG interface binds don't need any cert.
-	if !insecure && srv.ACME.Domain != "" {
-		if err := startFrontdoor(ctx, srv, resolverStore, resolverMetrics, settingsStore, dataDir, accessGate, logger); err != nil {
+	// DNS front-door (v0.3.0). The current boot wiring starts the entire
+	// front-door only when either ACME or a static TLS certificate is
+	// configured. In --insecure boots, or without panel TLS, plain and
+	// encrypted DNS listeners are all skipped.
+	if !insecure && panelTLSConfigured {
+		if err := startFrontdoor(ctx, srv, resolverStore, resolverMetrics, settingsStore, dataDir,
+			cfg.Server.Domain, cert, key, accessGate, logger); err != nil {
 			logger.Warn("frontdoor start failed — panel still serves", "err", err)
 		}
 	}
@@ -409,11 +435,9 @@ func run(logger *slog.Logger, configPath, dataDir, listenOverride string, insecu
 // operators can flip them without editing config.yaml; the initial reads
 // happen here and Frontdoor.Reconcile takes over for runtime flips.
 //
-// The four TLS listeners (DoT / DoH / DoQ / DoH3) share the panel's LE
-// cert by asking certmagic — the panel already started managing the
-// domain via api.setupACME, so this call is idempotent and just returns
-// a wrapper over the same on-disk cert. When certmagic later rotates the
-// cert both the panel and the front-door pick it up on the next handshake.
+// The four TLS listeners (DoT / DoH / DoQ / DoH3) share the panel's TLS
+// certificate. ACME mode obtains it through certmagic; static mode reads
+// the configured certificate and key paths.
 //
 // Path-B additions (v0.4.x):
 //   - When frontdoor.spoof_enabled is on, a SpoofPolicy is published to
@@ -434,6 +458,9 @@ func startFrontdoor(
 	metrics *resolver.Metrics,
 	sset *settings.Store,
 	dataDir string,
+	panelDomain string,
+	certFile string,
+	keyFile string,
 	accessGate *access.Gate,
 	logger *slog.Logger,
 ) error {
@@ -451,16 +478,13 @@ func startFrontdoor(
 	// Path-B: publish a SpoofPolicy so proxy-classified A/AAAA answers
 	// point at the gateway IP. Read before wiring transports so a
 	// misconfiguration surfaces at boot rather than mid-request.
-	if err := applySpoofSettings(ctx, res, sset, srv.ACME.Domain, logger); err != nil {
-		logger.Warn("frontdoor: spoof configuration skipped", "err", err)
+	if err := applySpoofSettings(ctx, res, sset, panelDomain, logger); err != nil {
+		return fmt.Errorf("frontdoor: spoof configuration: %w", err)
 	}
 
-	panelTLS, err := api.FrontdoorTLSConfig(ctx, srv.ACME.Domain, srv.ACME.Email, api.ACMEStorageDir(dataDir), logger)
+	getCert, err := frontdoorCertificate(ctx, srv, dataDir, panelDomain, certFile, keyFile, logger)
 	if err != nil {
-		return fmt.Errorf("frontdoor: certmagic: %w", err)
-	}
-	getCert := func() (*tls.Certificate, error) {
-		return panelTLS.GetCertificate(&tls.ClientHelloInfo{ServerName: srv.ACME.Domain})
+		return err
 	}
 	tlsConfigs, err := frontdoor.BuildTLSConfigs(getCert)
 	if err != nil {
@@ -469,13 +493,27 @@ func startFrontdoor(
 
 	// Public plain :53 stays OFF by default (open-resolver amplification
 	// mitigation, plan R13). Operators opt in via panel_settings.
-	publicPlain, _ := sset.GetBool(ctx, "frontdoor.public_plain_dns_enabled")
-	doqEnabled, _ := sset.GetBool(ctx, settings.KeyFrontdoorDoQEnabled)
-	doh3Enabled, _ := sset.GetBool(ctx, settings.KeyFrontdoorDoH3Enabled)
-	quicForwardOn, _ := sset.GetBool(ctx, settings.KeyFrontdoorQUICForwardEnabled)
+	publicPlain, err := sset.GetBool(ctx, "frontdoor.public_plain_dns_enabled")
+	if err != nil {
+		return fmt.Errorf("frontdoor: read public plain DNS setting: %w", err)
+	}
+	doqEnabled, err := sset.GetBool(ctx, settings.KeyFrontdoorDoQEnabled)
+	if err != nil {
+		return fmt.Errorf("frontdoor: read DoQ setting: %w", err)
+	}
+	doh3Enabled, err := sset.GetBool(ctx, settings.KeyFrontdoorDoH3Enabled)
+	if err != nil {
+		return fmt.Errorf("frontdoor: read DoH3 setting: %w", err)
+	}
+	quicForwardOn, err := sset.GetBool(ctx, settings.KeyFrontdoorQUICForwardEnabled)
+	if err != nil {
+		return fmt.Errorf("frontdoor: read QUIC forward setting: %w", err)
+	}
 
 	panelBackendUDP := defaultPanelBackendUDP
-	if v, _ := sset.GetString(ctx, settings.KeyFrontdoorPanelBackendUDP); v != "" {
+	if v, readErr := sset.GetString(ctx, settings.KeyFrontdoorPanelBackendUDP); readErr != nil {
+		return fmt.Errorf("frontdoor: read panel UDP backend: %w", readErr)
+	} else if v != "" {
 		panelBackendUDP = v
 	}
 
@@ -492,75 +530,89 @@ func startFrontdoor(
 	if err := fd.Start(ctx); err != nil {
 		return fmt.Errorf("frontdoor: start: %w", err)
 	}
+	srv.DNSListeners = func() api.DNSListenerStatus {
+		status := fd.Status()
+		toAPI := func(state frontdoor.ListenerState, degraded bool) string {
+			if !state.Configured {
+				return "not_configured"
+			}
+			if state.Running && !degraded {
+				return "healthy"
+			}
+			return "degraded"
+		}
+		return api.DNSListenerStatus{
+			UDP53: toAPI(status.UDP53, status.Degraded),
+			TCP53: toAPI(status.TCP53, status.Degraded),
+			DoT:   toAPI(status.DoT, false),
+			DoH:   "healthy",
+			DoQ:   toAPI(status.DoQ, false),
+			DoH3:  toAPI(status.DoH3, false),
+		}
+	}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := fd.Shutdown(shutdownCtx); err != nil {
+			logger.Warn("frontdoor: shutdown", "err", err)
+		}
+	}()
 	logger.Info("frontdoor: started",
 		"public_plain_dns", publicPlain, "doq", doqEnabled, "doh3", doh3Enabled)
 
-	if err := startProxyForwarders(ctx, sset, srv.ACME.Domain, panelBackendUDP, accessGate, logger); err != nil {
+	if err := startProxyForwarders(ctx, sset, panelDomain, panelBackendUDP, accessGate, logger); err != nil {
 		logger.Warn("frontdoor: proxy forwarders skipped", "err", err)
 	}
 	return nil
 }
 
-// applySpoofSettings publishes a SpoofPolicy on res based on
-// panel_settings. Silent no-op if the master switch is off.
-func applySpoofSettings(ctx context.Context, res *resolver.Resolver, sset *settings.Store, panelDomain string, logger *slog.Logger) error {
-	on, _ := sset.GetBool(ctx, settings.KeyFrontdoorSpoofEnabled)
-	if !on {
-		return nil
+func frontdoorCertificate(
+	ctx context.Context,
+	srv *api.Server,
+	dataDir, panelDomain, certFile, keyFile string,
+	logger *slog.Logger,
+) (func() (*tls.Certificate, error), error) {
+	if srv.ACME.Domain != "" {
+		panelTLS, err := api.FrontdoorTLSConfig(ctx, srv.ACME.Domain, srv.ACME.Email, api.ACMEStorageDir(dataDir), logger)
+		if err != nil {
+			return nil, fmt.Errorf("frontdoor: certmagic: %w", err)
+		}
+		return func() (*tls.Certificate, error) {
+			return panelTLS.GetCertificate(&tls.ClientHelloInfo{ServerName: srv.ACME.Domain})
+		}, nil
 	}
-	// server IP: explicit override wins, otherwise use the routing-
-	// table's egress source. panelDomain is unused here but kept in
-	// the signature so a future implementation could resolve the
-	// domain and use its A record as a stability anchor.
-	_ = panelDomain
-	ipStr, _ := sset.GetString(ctx, settings.KeyFrontdoorSpoofServerIP)
-	if ipStr == "" {
-		ipStr = discoverEgressIP()
+	if certFile == "" || keyFile == "" {
+		return nil, fmt.Errorf("frontdoor: TLS certificate and key are required")
 	}
-	ip := net.ParseIP(strings.TrimSpace(ipStr))
-	if ip == nil {
-		return fmt.Errorf("spoof: server_ip not set and autodetect failed")
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("frontdoor: load static certificate for %s: %w", panelDomain, err)
 	}
-
-	scopeStr, _ := sset.GetString(ctx, settings.KeyFrontdoorSpoofScope)
-	scope := resolver.SpoofScopeAll
-	if strings.EqualFold(scopeStr, string(resolver.SpoofScopePrivateOnly)) {
-		scope = resolver.SpoofScopePrivateOnly
-	}
-	cidrStr, _ := sset.GetString(ctx, settings.KeyFrontdoorSpoofAllowCIDR)
-	var cidrs []*net.IPNet
-	if cidrStr != "" {
-		cidrs = resolver.ParseCIDRs(strings.Split(cidrStr, ","))
-	}
-
-	policy := &resolver.SpoofPolicy{
-		Scope:       scope,
-		AllowCIDR:   cidrs,
-		TTL:         60,
-	}
-	if v4 := ip.To4(); v4 != nil {
-		policy.ServerIP4 = v4
-	} else {
-		policy.ServerIP6 = ip
-	}
-	res.SetSpoofPolicy(policy)
-	logger.Info("frontdoor: spoof enabled",
-		"scope", scope, "server_ip", ip.String(), "allow_cidr_count", len(cidrs))
-	return nil
+	return func() (*tls.Certificate, error) { return &cert, nil }, nil
 }
 
 // startProxyForwarders spins up sniforward + quicforward per settings.
 // Both are independent; either can be off without affecting the other.
 func startProxyForwarders(ctx context.Context, sset *settings.Store, panelDomain, panelBackendUDP string, accessGate *access.Gate, logger *slog.Logger) error {
-	sniOn, _ := sset.GetBool(ctx, settings.KeyFrontdoorSNIForwardEnabled)
-	quicOn, _ := sset.GetBool(ctx, settings.KeyFrontdoorQUICForwardEnabled)
+	sniOn, err := sset.GetBool(ctx, settings.KeyFrontdoorSNIForwardEnabled)
+	if err != nil {
+		return err
+	}
+	quicOn, err := sset.GetBool(ctx, settings.KeyFrontdoorQUICForwardEnabled)
+	if err != nil {
+		return err
+	}
 
+	var sni *sniforward.Server
 	if sniOn {
 		panelBackendTCP := defaultPanelBackendTCP
-		if v, _ := sset.GetString(ctx, settings.KeyFrontdoorPanelBackendTCP); v != "" {
+		if v, readErr := sset.GetString(ctx, settings.KeyFrontdoorPanelBackendTCP); readErr != nil {
+			return readErr
+		} else if v != "" {
 			panelBackendTCP = v
 		}
-		sni := sniforward.New(sniforward.Config{
+		sni = sniforward.New(sniforward.Config{
 			Listen:       ":443",
 			PanelDomain:  panelDomain,
 			PanelBackend: panelBackendTCP,
@@ -570,56 +622,48 @@ func startProxyForwarders(ctx context.Context, sset *settings.Store, panelDomain
 			return fmt.Errorf("sniforward: %w", err)
 		}
 	}
+	var qf *quicforward.Server
 	if quicOn {
-		qf := quicforward.New(quicforward.Config{
+		qf = quicforward.New(quicforward.Config{
 			Listen:       ":443",
 			PanelDomain:  panelDomain,
 			PanelBackend: panelBackendUDP,
 			Gate:         accessGate,
 		}, logger)
 		if err := qf.Start(ctx); err != nil {
+			if sni != nil {
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				_ = sni.Shutdown(shutdownCtx)
+				cancel()
+			}
 			return fmt.Errorf("quicforward: %w", err)
 		}
 	}
+	if sni != nil || qf != nil {
+		go func() {
+			<-ctx.Done()
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if qf != nil {
+				_ = qf.Shutdown(shutdownCtx)
+			}
+			if sni != nil {
+				_ = sni.Shutdown(shutdownCtx)
+			}
+		}()
+	}
 	return nil
-}
-
-// startMTProxy USED to spin up the in-tree MTProto proxy per settings.
-// That code path is dead — both VPS now run the externally-installed
-// 9seconds/mtg systemd service, and the panel drives it via
-// internal/mtgctl + internal/api/mtproxy_settings.go. The internal
-// proxy/mtproxy package is left on disk pending a follow-up cleanup
-// but is no longer wired into the daemon. See task rewire spec.
-//
-// Kept here (function removed, doc-only stub) so the removal is
-// explicit in git blame rather than a silent vanish.
-
-// discoverEgressIP returns the local IPv4 the kernel would pick to
-// reach a public destination. UDP "dial" performs a routing-table
-// lookup without emitting a packet, then LocalAddr reveals which
-// source address the routing decision picked. If that lookup fails
-// (no default route on a sandboxed test host, e.g.), return "" so
-// applySpoofSettings surfaces a clear error rather than trying an
-// address we can't stand behind.
-func discoverEgressIP() string {
-	conn, err := net.Dial("udp", "1.1.1.1:80")
-	if err != nil {
-		return ""
-	}
-	defer conn.Close()
-	la, ok := conn.LocalAddr().(*net.UDPAddr)
-	if !ok || la.IP == nil || la.IP.IsUnspecified() {
-		return ""
-	}
-	if v4 := la.IP.To4(); v4 != nil {
-		return v4.String()
-	}
-	return la.IP.String()
 }
 
 func loadOrCreateJWTSecret(path string) ([]byte, error) {
 	raw, err := os.ReadFile(path)
 	if err == nil {
+		if len(raw) < 32 {
+			return nil, fmt.Errorf("jwt secret %s is too short", path)
+		}
+		if err := os.Chmod(path, 0o600); err != nil {
+			return nil, fmt.Errorf("jwt secret permissions: %w", err)
+		}
 		return raw, nil
 	}
 	if !os.IsNotExist(err) {
@@ -635,10 +679,12 @@ func loadOrCreateJWTSecret(path string) ([]byte, error) {
 	return buf, nil
 }
 
-func randomHex(n int) string {
+func randomHex(n int) (string, error) {
 	buf := make([]byte, n)
-	_, _ = rand.Read(buf)
-	return hex.EncodeToString(buf)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
 }
 
 // seedExitsFromYAML runs once at boot: if the DB currently holds only the
@@ -653,7 +699,7 @@ func seedExitsFromYAML(ctx context.Context, store xexit.Store, yamlExits []confi
 	if err != nil {
 		return fmt.Errorf("list: %w", err)
 	}
-	if !(len(existing) == 1 && existing[0].ExitID == "direct") {
+	if len(existing) != 1 || existing[0].ExitID != "direct" {
 		return nil
 	}
 	for _, ex := range yamlExits {
@@ -694,6 +740,10 @@ func (a applierExitAdapter) Switch(ctx context.Context, exitID string) error {
 	return a.inner.Switch(ctx, exitID)
 }
 
+func (a applierExitAdapter) Delete(ctx context.Context, exitID string) error {
+	return a.inner.Delete(ctx, exitID)
+}
+
 // buildTGBotExitState wires the tgbot function-pointer seam onto the
 // DB-backed exit.Store + core.Applier. Add/Delete hit the store directly
 // (no data-plane render). Switch goes through Applier.SwitchExit so the
@@ -729,7 +779,7 @@ func buildTGBotExitState(store xexit.Store, applier *core.Applier, logger *slog.
 			return err
 		},
 		Delete: func(id string) error {
-			return store.Delete(context.Background(), id)
+			return applier.DeleteExit(context.Background(), id)
 		},
 		Active: func() string {
 			e, err := store.Active(context.Background())

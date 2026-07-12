@@ -230,6 +230,43 @@ func TestMihomoRenderUserMatchOverride(t *testing.T) {
 	}
 }
 
+func TestMihomoRenderNormalizesActionsAndRejectsUnknownExit(t *testing.T) {
+	cfg := sampleConfig()
+	cfg.Exits = []config.ExitConfig{
+		{ID: "wg1", Protocol: "wireguard", Config: map[string]any{"endpoint": "vpn.example.com:51820"}},
+	}
+	cfg.EffectiveRules = []rules.Rule{
+		{ID: "block", Kind: rules.KindDomain, Pattern: "block.example", Action: " block ", Priority: 10, Enabled: true},
+		{ID: "reject", Kind: rules.KindDomain, Pattern: "reject.example", Action: "ReJeCt", Priority: 20, Enabled: true},
+		{ID: "direct", Kind: rules.KindDomain, Pattern: "direct.example", Action: "direct", Priority: 30, Enabled: true},
+		{ID: "exit", Kind: rules.KindDomain, Pattern: "exit.example", Action: "wg1", Priority: 40, Enabled: true},
+		{ID: "match", Kind: rules.KindMatch, Action: "proxy", Priority: 50, Enabled: true},
+	}
+
+	var buf bytes.Buffer
+	if err := (MihomoRenderer{}).Render(cfg, &buf); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	for _, want := range []string{
+		"DOMAIN,block.example,REJECT",
+		"DOMAIN,reject.example,REJECT",
+		"DOMAIN,direct.example,DIRECT",
+		"DOMAIN,exit.example,wg1",
+		"MATCH,PROXY",
+	} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("normalized rule %q missing from output:\n%s", want, buf.String())
+		}
+	}
+
+	cfg.EffectiveRules[3].Action = "missing-exit"
+	buf.Reset()
+	err := (MihomoRenderer{}).Render(cfg, &buf)
+	if err == nil || !strings.Contains(err.Error(), "configured exit") || !strings.Contains(err.Error(), "rule exit") {
+		t.Fatalf("unknown action error = %v, want configured-exit error attributed to rule", err)
+	}
+}
+
 // TestMihomoRenderActiveExitLeadsGroup verifies active exit is first in PROXY group.
 func TestMihomoRenderActiveExitLeadsGroup(t *testing.T) {
 	cfg := sampleConfig()

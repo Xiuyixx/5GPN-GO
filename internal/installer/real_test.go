@@ -70,6 +70,24 @@ func TestRealExecutor_Chown_NonLinuxIsNoop(t *testing.T) {
 	}
 }
 
+func TestRealExecutor_Chmod(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "private")
+	if err := os.WriteFile(path, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ex := &RealExecutor{Out: io.Discard, Err: io.Discard}
+	if err := ex.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("mode=%o want=600", got)
+	}
+}
+
 func TestStatus_NonLinuxPrintsSkip(t *testing.T) {
 	if runtime.GOOS == "linux" {
 		t.Skip("this test covers the mac/win path")

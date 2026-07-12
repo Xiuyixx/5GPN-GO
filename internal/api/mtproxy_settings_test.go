@@ -4,7 +4,7 @@
 // shape and the failure paths without shelling out to systemctl.
 //
 // Coverage:
-//   - GET when mtg is not installed → 200 with service_status=not-installed
+//   - GET when mtg is not installed → 503, never a fabricated inactive state
 //   - GET when mtg is active         → 200 with enabled=true + decoded domain
 //   - POST enable without secret      → 400 secret_not_configured
 //   - POST generate-secret + enable   → both succeed, secret is one-shot
@@ -14,6 +14,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
@@ -34,6 +35,7 @@ type fakeMTG struct {
 	unitSecret     string
 	generateReturn string
 	generateErr    error
+	restartErrors  []error
 
 	statusCalls    int
 	isActiveCalls  int
@@ -97,9 +99,13 @@ func (f *fakeMTG) Disable(context.Context) error {
 func (f *fakeMTG) Restart(context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	call := f.restartCalls
 	f.restartCalls++
 	if !f.installed {
 		return mtgctl.ErrNotInstalled
+	}
+	if call < len(f.restartErrors) {
+		return f.restartErrors[call]
 	}
 	return nil
 }
@@ -193,24 +199,11 @@ func TestMTProxySettings_GetNotInstalled(t *testing.T) {
 	srv, token := bootstrapWithMTG(t, f)
 
 	rr := authGet(t, srv, "/api/v1/settings/mtproxy", token)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("GET status = %d, want 200: %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("GET status = %d, want 503: %s", rr.Code, rr.Body.String())
 	}
-	var got mtproxySettingsResponse
-	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if got.Enabled {
-		t.Fatalf("Enabled = true when not installed, want false")
-	}
-	if got.ServiceStatus != "not-installed" {
-		t.Fatalf("ServiceStatus = %q, want not-installed", got.ServiceStatus)
-	}
-	if got.Listen != mtgctl.DefaultListen {
-		t.Fatalf("Listen = %q, want default %q", got.Listen, mtgctl.DefaultListen)
-	}
-	if got.SecretConfigured {
-		t.Fatalf("SecretConfigured = true when not installed, want false")
+	if !strings.Contains(rr.Body.String(), "mtg_not_installed") {
+		t.Fatalf("expected mtg_not_installed: %s", rr.Body.String())
 	}
 }
 
@@ -404,6 +397,69 @@ func TestMTProxySettings_PostFrontingDomainRotatesSecret(t *testing.T) {
 	// Service was active → must restart to pick up the new secret.
 	if f.restartCalls != 1 {
 		t.Fatalf("Restart called %d times, want 1 (service was active)", f.restartCalls)
+	}
+}
+
+func TestMTProxySettings_RestartFailureRestoresAndRestartsActiveUnit(t *testing.T) {
+	oldSecret := synthEESecret("www.cloudflare.com")
+	f := &fakeMTG{
+		installed:      true,
+		active:         true,
+		unitListen:     "0.0.0.0:2443",
+		unitSecret:     oldSecret,
+		generateReturn: synthEESecret("www.example.com"),
+		restartErrors:  []error{errors.New("restart new unit failed"), nil},
+	}
+	srv, token := bootstrapWithMTG(t, f)
+
+	rr := authPost(t, srv, "/api/v1/settings/mtproxy", token, map[string]any{
+		"fronting_domain": "www.example.com",
+	})
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d, want 500: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "restart new unit failed") {
+		t.Fatalf("primary restart error missing: %s", rr.Body.String())
+	}
+	if f.writeUnitCalls != 2 {
+		t.Fatalf("WriteUnit calls=%d, want new + restore", f.writeUnitCalls)
+	}
+	if f.restartCalls != 2 {
+		t.Fatalf("Restart calls=%d, want failed new + restored old", f.restartCalls)
+	}
+	if f.unitSecret != oldSecret {
+		t.Fatal("old unit secret was not restored")
+	}
+}
+
+func TestMTProxySettings_CompensationRestartErrorIsReturned(t *testing.T) {
+	oldSecret := synthEESecret("www.cloudflare.com")
+	f := &fakeMTG{
+		installed:      true,
+		active:         true,
+		unitListen:     "0.0.0.0:2443",
+		unitSecret:     oldSecret,
+		generateReturn: synthEESecret("www.example.com"),
+		restartErrors: []error{
+			errors.New("restart new unit failed"),
+			errors.New("restart restored unit failed"),
+		},
+	}
+	srv, token := bootstrapWithMTG(t, f)
+
+	rr := authPost(t, srv, "/api/v1/settings/mtproxy", token, map[string]any{
+		"fronting_domain": "www.example.com",
+	})
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d, want 500: %s", rr.Code, rr.Body.String())
+	}
+	for _, want := range []string{"restart new unit failed", "restart restored unit failed"} {
+		if !strings.Contains(rr.Body.String(), want) {
+			t.Fatalf("response missing %q: %s", want, rr.Body.String())
+		}
+	}
+	if f.unitSecret != oldSecret {
+		t.Fatal("old unit file was not restored before compensation restart failed")
 	}
 }
 

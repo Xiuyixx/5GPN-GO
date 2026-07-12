@@ -11,6 +11,8 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/Xiuyixx/5GPN-Go/internal/core"
+	"github.com/Xiuyixx/5GPN-Go/internal/db"
 	"github.com/Xiuyixx/5GPN-Go/internal/resolver"
 	"github.com/Xiuyixx/5GPN-Go/internal/rules"
 )
@@ -47,11 +49,12 @@ type applyEntry struct {
 	ID         string    `json:"id"`
 	Hash       string    `json:"hash"`
 	Status     string    `json:"status"` // pending | succeeded | failed
-	Kind       string    `json:"kind"`   // apply | rollback
+	Kind       string    `json:"kind"`   // apply | rollback | import | exit_switch
 	StartedAt  time.Time `json:"started_at"`
 	FinishedAt time.Time `json:"finished_at,omitempty"`
 	Error      string    `json:"error,omitempty"`
 	RuleCount  int       `json:"rule_count"`
+	SnapshotID int64     `json:"snapshot_id,omitempty"`
 }
 
 // applyStore is an in-memory ring buffer of the most recent apply-lifecycle
@@ -82,14 +85,19 @@ func newApplyStore() *applyStore {
 
 // create allocates a new pending entry and inserts it into the ring,
 // evicting the oldest entry once the applyRingCap count-cap is exceeded.
-func (as *applyStore) create(hash, kind string, ruleCount int) *applyEntry {
+func (as *applyStore) create(hash, kind string, ruleCount int, snapshotID ...int64) *applyEntry {
+	var snapID int64
+	if len(snapshotID) > 0 {
+		snapID = snapshotID[0]
+	}
 	e := &applyEntry{
-		ID:        uuid.NewString(),
-		Hash:      hash,
-		Status:    "pending",
-		Kind:      kind,
-		StartedAt: as.now(),
-		RuleCount: ruleCount,
+		ID:         uuid.NewString(),
+		Hash:       hash,
+		Status:     "pending",
+		Kind:       kind,
+		StartedAt:  as.now(),
+		RuleCount:  ruleCount,
+		SnapshotID: snapID,
 	}
 	as.mu.Lock()
 	as.byID[e.ID] = e
@@ -103,6 +111,55 @@ func (as *applyStore) create(hash, kind string, ruleCount int) *applyEntry {
 	return e
 }
 
+func (s *Server) trackRuleApply(set *rules.RuleSet, kind string, result core.ApplyResult) *applyEntry {
+	return s.trackApplyResult(rules.HashRules(set), kind, len(set.Rules), result)
+}
+
+func (s *Server) trackApplyResult(hash, kind string, ruleCount int, result core.ApplyResult) *applyEntry {
+	entry := s.applyStore.create(hash, kind, ruleCount, result.SnapshotID)
+	if result.Health == "observing" {
+		return entry
+	}
+	if result.RolledBack {
+		s.applyStore.finish(entry.ID, "failed", result.Reason)
+	} else {
+		s.applyStore.finish(entry.ID, "succeeded", "")
+	}
+	entry, _ = s.applyStore.Get(entry.ID)
+	return entry
+}
+
+func (s *Server) refreshApplyEntry(entry *applyEntry) *applyEntry {
+	if entry == nil || entry.Status != "pending" || entry.SnapshotID == 0 {
+		return entry
+	}
+	if s.Applier != nil {
+		if terminal, ok := s.Applier.TerminalStatus(entry.SnapshotID); ok {
+			if terminal.State == "confirmed" {
+				s.applyStore.finish(entry.ID, "succeeded", "")
+			} else {
+				s.applyStore.finish(entry.ID, "failed", terminal.Reason)
+			}
+			refreshed, _ := s.applyStore.Get(entry.ID)
+			return refreshed
+		}
+	}
+	status, err := db.ApplyStatusBySnapshot(s.DB, entry.SnapshotID)
+	if err != nil || status == nil || status.State == "submitted" {
+		return entry
+	}
+	if status.State == "confirmed" {
+		s.applyStore.finish(entry.ID, "succeeded", "")
+	} else {
+		s.applyStore.finish(entry.ID, "failed", status.Reason)
+	}
+	refreshed, ok := s.applyStore.Get(entry.ID)
+	if !ok {
+		return entry
+	}
+	return refreshed
+}
+
 // finish marks entry id terminal (succeeded|failed) with an optional error
 // message. No-op if the id has since been evicted by the count-cap.
 func (as *applyStore) finish(id, status, errMsg string) {
@@ -110,6 +167,9 @@ func (as *applyStore) finish(id, status, errMsg string) {
 	defer as.mu.Unlock()
 	e, ok := as.byID[id]
 	if !ok {
+		return
+	}
+	if e.Status != "pending" {
 		return
 	}
 	e.Status = status
@@ -220,12 +280,16 @@ func (s *Server) handleApplyGet(w http.ResponseWriter, r *http.Request) {
 			"apply id no longer tracked; check /api/v1/apply/status or /api/v1/snapshots for latest")
 		return
 	}
-	writeJSON(w, http.StatusOK, entry)
+	writeJSON(w, http.StatusOK, s.refreshApplyEntry(entry))
 }
 
 // handleAppliesList is GET /api/v1/applies — the escape hatch for a
 // polling client whose cached apply_id has been evicted; returns the last
 // applyRingCap live entries ordered by started_at DESC.
 func (s *Server) handleAppliesList(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"entries": s.applyStore.List()})
+	entries := s.applyStore.List()
+	for i := range entries {
+		entries[i] = *s.refreshApplyEntry(&entries[i])
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"entries": entries})
 }

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/Xiuyixx/5GPN-Go/internal/core"
 	"github.com/Xiuyixx/5GPN-Go/internal/db"
 	xexit "github.com/Xiuyixx/5GPN-Go/internal/exit"
 	"github.com/Xiuyixx/5GPN-Go/internal/orchestrator"
@@ -116,8 +117,10 @@ func (s *Server) handleDeleteExit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.Store.Delete(r.Context(), req.ID); err != nil {
+	if err := s.Applier.DeleteExit(r.Context(), req.ID); err != nil {
 		switch {
+		case errors.Is(err, core.ErrExitSwitchInFlight):
+			writeError(w, http.StatusConflict, "exit_switch_in_flight", err.Error())
 		case errors.Is(err, xexit.ErrExitActive):
 			writeError(w, http.StatusConflict, "exit_active", err.Error())
 		case errors.Is(err, xexit.ErrExitNotFound):
@@ -176,6 +179,9 @@ func (s *Server) handleSwitchExit(w http.ResponseWriter, r *http.Request) {
 
 	actor, _ := r.Context().Value(ctxUsername).(string)
 	result := "ok"
+	if res.Health == "observing" {
+		result = "observing"
+	}
 	if res.RolledBack {
 		result = "rolled_back"
 	}
@@ -185,6 +191,15 @@ func (s *Server) handleSwitchExit(w http.ResponseWriter, r *http.Request) {
 		Target: req.ID,
 		Result: result,
 	})
+	entry := s.trackApplyResult(req.ID, "exit_switch", 0, res)
+	if entry.Status == "pending" {
+		w.Header().Set("Location", "/api/v1/applies/"+entry.ID)
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"active": req.ID, "health": res.Health, "status": "pending",
+			"apply_id": entry.ID, "snapshot_id": res.SnapshotID,
+		})
+		return
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"active": req.ID,

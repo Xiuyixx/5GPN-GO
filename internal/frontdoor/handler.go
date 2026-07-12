@@ -14,11 +14,10 @@ import (
 // (plan §7.5 "shared-fate" mitigation) — miekg/dns's own dispatch loop
 // carries no panic recovery of its own.
 //
-// Once the supervisor has exhausted its restart budget (see
-// Supervisor.Run / Frontdoor.enterDegraded), ServeDNS short-circuits
-// straight to SERVFAIL without calling the resolver at all — every
-// still-bound listener keeps answering (degraded) rather than going
-// silent.
+// Once the plain-listener supervisor has exhausted its restart budget (see
+// Supervisor.Run / Frontdoor.enterDegraded), any subsequent direct ServeDNS
+// call short-circuits to SERVFAIL. The failed sockets themselves have already
+// been closed by serveAll.
 func (fd *Frontdoor) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	defer func() {
 		if rec := recover(); rec != nil {

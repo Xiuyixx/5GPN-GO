@@ -1,19 +1,20 @@
-import { useCallback, useEffect, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import { Navigate, Route, Routes } from 'react-router';
 import { useTranslation } from 'react-i18next';
-import Login from './pages/Login';
-import Bootstrap from './pages/Bootstrap';
-import Wizard from './pages/Wizard';
-import Rules from './pages/Rules';
-import Dashboard from './pages/Dashboard';
-import Exits from './pages/Exits';
-import Snapshots from './pages/Snapshots';
-import Backup from './pages/Backup';
-import Logs from './pages/Logs';
-import Settings from './pages/Settings';
 import { api } from './api/client';
 import type { BootstrapStatus } from './api/client';
 import { useAuthStore } from './stores/auth';
+
+const Login = lazy(() => import('./pages/Login'));
+const Bootstrap = lazy(() => import('./pages/Bootstrap'));
+const Wizard = lazy(() => import('./pages/Wizard'));
+const Rules = lazy(() => import('./pages/Rules'));
+const Dashboard = lazy(() => import('./pages/Dashboard'));
+const Exits = lazy(() => import('./pages/Exits'));
+const Snapshots = lazy(() => import('./pages/Snapshots'));
+const Backup = lazy(() => import('./pages/Backup'));
+const Logs = lazy(() => import('./pages/Logs'));
+const Settings = lazy(() => import('./pages/Settings'));
 
 export default function App() {
   const { t } = useTranslation();
@@ -50,7 +51,8 @@ export default function App() {
   };
 
   return (
-    <Routes>
+    <Suspense fallback={<div className="p-8 text-zinc-500">{t('common.loading')}</div>}>
+      <Routes>
       <Route path="/setup" element={
         needsSetup ? <Bootstrap onDone={refresh} /> : <Navigate to="/login" replace />
       } />
@@ -79,6 +81,7 @@ export default function App() {
             : '/'
         } replace />
       } />
-    </Routes>
+      </Routes>
+    </Suspense>
   );
 }

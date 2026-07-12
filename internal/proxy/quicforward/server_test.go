@@ -1,11 +1,13 @@
 package quicforward
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/binary"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -97,6 +99,112 @@ func TestResolveUpstream_PortInSNIRejected(t *testing.T) {
 	}
 }
 
+func TestResolveUpstream_ResolvedPrivateRejected(t *testing.T) {
+	s := New(Config{}, nil)
+	upstream, isLocal, err := s.resolveUpstream("localhost")
+	if err == nil {
+		t.Fatalf("localhost resolved to external upstream %v", upstream)
+	}
+	if isLocal {
+		t.Fatal("localhost must not be treated as the configured panel backend")
+	}
+	if !strings.Contains(err.Error(), "non-public") {
+		t.Fatalf("error = %q, want non-public destination rejection", err)
+	}
+}
+
+func TestResourceLimitsAndRelease(t *testing.T) {
+	s := New(Config{
+		MaxConcurrentSetups: 1,
+		MaxSessions:         2,
+		MaxSessionsPerIP:    1,
+	}, nil)
+	const (
+		ipA = "198.51.100.10"
+		ipB = "203.0.113.20"
+	)
+
+	if !s.tryReserveSession("a:1000", ipA) {
+		t.Fatal("first setup reservation rejected")
+	}
+	if s.tryReserveSession("a:1000", ipA) {
+		t.Fatal("duplicate 4-tuple received a second reservation")
+	}
+	if s.tryReserveSession("b:1000", ipB) {
+		t.Fatal("concurrent setup cap was not enforced")
+	}
+	sessA := &session{resourceIP: ipA}
+	if !s.promoteSession("a:1000", ipA, sessA) {
+		t.Fatal("reserved setup was not promoted")
+	}
+	if s.tryReserveSession("a:1001", ipA) {
+		t.Fatal("per-IP session cap was not enforced")
+	}
+	if !s.tryReserveSession("b:1000", ipB) {
+		t.Fatal("second source could not reserve remaining global capacity")
+	}
+	sessB := &session{resourceIP: ipB}
+	if !s.promoteSession("b:1000", ipB, sessB) {
+		t.Fatal("second setup was not promoted")
+	}
+	if s.tryReserveSession("c:1000", "192.0.2.30") {
+		t.Fatal("global session cap was not enforced")
+	}
+
+	s.dropSession("a:1000", sessA)
+	if !s.tryReserveSession("c:1000", "192.0.2.30") {
+		t.Fatal("released capacity was not reusable")
+	}
+	s.releasePending("c:1000", "192.0.2.30")
+	s.dropSession("b:1000", sessB)
+
+	s.resourceMu.Lock()
+	reserved := s.reserved
+	pending := len(s.pending)
+	perIP := len(s.perIP)
+	s.resourceMu.Unlock()
+	if reserved != 0 || pending != 0 || perIP != 0 {
+		t.Fatalf("resource accounting leaked: reserved=%d pending=%d per_ip=%d", reserved, pending, perIP)
+	}
+}
+
+func TestDropSessionDoesNotDeleteReplacementGeneration(t *testing.T) {
+	s := New(Config{}, nil)
+	const (
+		key = "198.51.100.10:443"
+		ip  = "198.51.100.10"
+	)
+	old := &session{resourceIP: ip}
+	replacement := &session{resourceIP: ip}
+	if !s.tryReserveSession(key, ip) || !s.promoteSession(key, ip, replacement) {
+		t.Fatal("failed to install replacement session")
+	}
+
+	if s.dropSession(key, old) {
+		t.Fatal("stale generation deleted the replacement session")
+	}
+	got, ok := s.sessions.Load(key)
+	if !ok || got != replacement {
+		t.Fatalf("replacement session changed after stale cleanup: got=%p want=%p", got, replacement)
+	}
+	s.resourceMu.Lock()
+	reserved, perIP := s.reserved, s.perIP[ip]
+	s.resourceMu.Unlock()
+	if reserved != 1 || perIP != 1 {
+		t.Fatalf("stale cleanup released replacement accounting: reserved=%d per_ip=%d", reserved, perIP)
+	}
+
+	if !s.dropSession(key, replacement) {
+		t.Fatal("current generation was not deleted")
+	}
+	s.resourceMu.Lock()
+	reserved, perIP = s.reserved, s.perIP[ip]
+	s.resourceMu.Unlock()
+	if reserved != 0 || perIP != 0 {
+		t.Fatalf("current cleanup leaked accounting: reserved=%d per_ip=%d", reserved, perIP)
+	}
+}
+
 // -----------------------------------------------------------------------
 // End-to-end: UDP echo through the forwarder
 // -----------------------------------------------------------------------
@@ -114,7 +222,7 @@ func TestForward_UDPEchoThroughForwarder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer backendConn.Close()
+	defer func() { _ = backendConn.Close() }()
 	go func() {
 		buf := make([]byte, 65535)
 		for {
@@ -135,7 +243,7 @@ func TestForward_UDPEchoThroughForwarder(t *testing.T) {
 	if err := srv.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Shutdown(t.Context())
+	defer func() { _ = srv.Shutdown(t.Context()) }()
 
 	pkt := buildFixtureInitial(t, panelDomain)
 
@@ -143,7 +251,7 @@ func TestForward_UDPEchoThroughForwarder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	if _, err := client.Write(pkt); err != nil {
 		t.Fatal(err)
@@ -156,6 +264,90 @@ func TestForward_UDPEchoThroughForwarder(t *testing.T) {
 	}
 	if n != len(pkt) || string(buf[:n]) != string(pkt) {
 		t.Fatalf("echo mismatch (n=%d want=%d)", n, len(pkt))
+	}
+}
+
+func TestShutdownDuringColdPathFlood(t *testing.T) {
+	backendConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = backendConn.Close() }()
+	go func() {
+		buf := make([]byte, 65535)
+		for {
+			if _, _, err := backendConn.ReadFromUDP(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	const panelDomain = "panel.local.test"
+	srv := New(Config{
+		Listen:              "127.0.0.1:0",
+		PanelDomain:         panelDomain,
+		PanelBackend:        backendConn.LocalAddr().String(),
+		MaxConcurrentSetups: 4,
+		MaxSessions:         8,
+		MaxSessionsPerIP:    8,
+	}, nil)
+	if err := srv.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Shutdown(t.Context()) }()
+
+	pkt := buildFixtureInitial(t, panelDomain)
+	clients := make([]*net.UDPConn, 64)
+	var sends sync.WaitGroup
+	for i := range clients {
+		client, dialErr := net.DialUDP("udp", nil, srv.listener.LocalAddr().(*net.UDPAddr))
+		if dialErr != nil {
+			t.Fatal(dialErr)
+		}
+		clients[i] = client
+		t.Cleanup(func() { _ = client.Close() })
+		sends.Add(1)
+		go func() {
+			defer sends.Done()
+			_, _ = client.Write(pkt)
+		}()
+	}
+	sends.Wait()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		srv.resourceMu.Lock()
+		reserved := srv.reserved
+		srv.resourceMu.Unlock()
+		if reserved > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("forwarder did not admit any cold-path work")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	srv.resourceMu.Lock()
+	reserved := srv.reserved
+	pending := len(srv.pending)
+	perIP := len(srv.perIP)
+	srv.resourceMu.Unlock()
+	if reserved != 0 || pending != 0 || perIP != 0 {
+		t.Fatalf("shutdown leaked resources: reserved=%d pending=%d per_ip=%d", reserved, pending, perIP)
+	}
+	sessions := 0
+	srv.sessions.Range(func(_, _ any) bool {
+		sessions++
+		return true
+	})
+	if sessions != 0 {
+		t.Fatalf("shutdown left %d sessions", sessions)
 	}
 }
 
@@ -275,14 +467,14 @@ func buildClientHello(sni string) []byte {
 	// Extension = server_name (0x0000): len(2), list_len(2), name_type(1=0),
 	// name_len(2), name bytes.
 	sniBytes := []byte(sni)
-	extBody := []byte{0x00}                                           // name_type=host_name
+	extBody := []byte{0x00}                                                // name_type=host_name
 	extBody = append(extBody, byte(len(sniBytes)>>8), byte(len(sniBytes))) // name_len
 	extBody = append(extBody, sniBytes...)
 	listLen := len(extBody)
 	extData := []byte{byte(listLen >> 8), byte(listLen)}
 	extData = append(extData, extBody...)
 
-	ext := []byte{0x00, 0x00} // ext_type = server_name
+	ext := []byte{0x00, 0x00}                                    // ext_type = server_name
 	ext = append(ext, byte(len(extData)>>8), byte(len(extData))) // ext_len
 	ext = append(ext, extData...)
 
@@ -293,9 +485,9 @@ func buildClientHello(sni string) []byte {
 	// + extensions_len(2) + extensions
 	body := []byte{0x03, 0x03}
 	body = append(body, make([]byte, 32)...)
-	body = append(body, 0x00) // sid_len = 0
+	body = append(body, 0x00)                   // sid_len = 0
 	body = append(body, 0x00, 0x02, 0x00, 0x2f) // 1 cipher: TLS_RSA_WITH_AES_128_CBC_SHA
-	body = append(body, 0x01, 0x00) // compression: 1 method, null
+	body = append(body, 0x01, 0x00)             // compression: 1 method, null
 	body = append(body, byte(len(ext)>>8), byte(len(ext)))
 	body = append(body, ext...)
 
@@ -343,7 +535,7 @@ func TestSNIFromClientHello_Fixture(t *testing.T) {
 func TestForward_UDPEchoRejectsShortHeader(t *testing.T) {
 	// Backend that echoes if reached — we assert it is NOT.
 	backendConn, _ := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
-	defer backendConn.Close()
+	defer func() { _ = backendConn.Close() }()
 	reached := make(chan struct{}, 1)
 	go func() {
 		buf := make([]byte, 65535)
@@ -367,10 +559,10 @@ func TestForward_UDPEchoRejectsShortHeader(t *testing.T) {
 	if err := srv.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Shutdown(t.Context())
+	defer func() { _ = srv.Shutdown(t.Context()) }()
 
 	client, _ := net.DialUDP("udp", nil, srv.listener.LocalAddr().(*net.UDPAddr))
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	_, _ = client.Write([]byte{0x00, 0x11, 0x22, 0x33}) // short header garbage
 
 	select {

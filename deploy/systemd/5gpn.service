@@ -6,12 +6,17 @@ Wants=network-online.target
 Requires=dnsdist.service mihomo.service
 
 [Service]
-Type=notify
+Type=simple
 DynamicUser=yes
 StateDirectory=5gpn
 RuntimeDirectory=5gpn
 LogsDirectory=5gpn
 ConfigurationDirectory=5gpn
+StateDirectoryMode=0700
+RuntimeDirectoryMode=0700
+LogsDirectoryMode=0700
+ConfigurationDirectoryMode=0750
+UMask=0077
 SupplementaryGroups=systemd-journal
 ExecStart=/usr/local/bin/5gpn --config /etc/5gpn/config.yaml --data /var/lib/5gpn
 Restart=on-failure

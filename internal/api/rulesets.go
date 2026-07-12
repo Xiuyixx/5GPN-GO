@@ -17,6 +17,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/Xiuyixx/5GPN-Go/internal/db"
+	"github.com/Xiuyixx/5GPN-Go/internal/netguard"
 	"github.com/Xiuyixx/5GPN-Go/internal/rulesets"
 )
 
@@ -24,17 +25,17 @@ import (
 // content blob so payloads stay small; the panel never needs the raw
 // body directly.
 type rulesetView struct {
-	Name         string  `json:"name"`
-	SourceURL    string  `json:"source_url"`
-	Kind         string  `json:"kind"`
-	Action       string  `json:"action"`
-	Priority     int     `json:"priority"`
-	Enabled      bool    `json:"enabled"`
-	RuleCount    int     `json:"rule_count"`
-	LastSyncedAt *int64  `json:"last_synced_at,omitempty"` // unix epoch, nullable
-	LastError    string  `json:"last_error,omitempty"`
-	CreatedAt    int64   `json:"created_at"`
-	CreatedBy    string  `json:"created_by,omitempty"`
+	Name         string `json:"name"`
+	SourceURL    string `json:"source_url"`
+	Kind         string `json:"kind"`
+	Action       string `json:"action"`
+	Priority     int    `json:"priority"`
+	Enabled      bool   `json:"enabled"`
+	RuleCount    int    `json:"rule_count"`
+	LastSyncedAt *int64 `json:"last_synced_at,omitempty"` // unix epoch, nullable
+	LastError    string `json:"last_error,omitempty"`
+	CreatedAt    int64  `json:"created_at"`
+	CreatedBy    string `json:"created_by,omitempty"`
 }
 
 func toView(r rulesets.Ruleset) rulesetView {
@@ -110,8 +111,8 @@ func (s *Server) handleRegisterRuleset(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "empty_url", "source_url is required")
 		return
 	}
-	if !strings.HasPrefix(req.SourceURL, "http://") && !strings.HasPrefix(req.SourceURL, "https://") {
-		writeError(w, http.StatusBadRequest, "bad_url", "source_url must start with http:// or https://")
+	if _, err := netguard.ValidateHTTPURL(req.SourceURL); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_url", err.Error())
 		return
 	}
 	if req.Action == "" {

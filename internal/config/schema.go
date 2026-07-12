@@ -1,6 +1,6 @@
-// Package config defines the YAML schema for /etc/5gpn/config.yaml and
-// provides loading + validation. This is the single source of truth from
-// which dnsdist.conf, mihomo.yaml, and sniproxy.conf are rendered.
+// Package config defines and validates the static YAML boot configuration.
+// Runtime rules, exits, and panel settings are layered from SQLite by
+// core.Assemble before data-plane files are rendered.
 package config
 
 import (
@@ -11,17 +11,17 @@ import (
 
 // Config is the root document.
 type Config struct {
-	Server         ServerConfig  `yaml:"server"          validate:"required"`
-	Panel          PanelConfig   `yaml:"panel"           validate:"required"`
-	DNS            DNSConfig     `yaml:"dns"`
-	Proxy          ProxyConfig   `yaml:"proxy"`
-	Exits          []ExitConfig  `yaml:"exits"           validate:"omitempty,dive"`
-	Rules          RulesConfig   `yaml:"rules"`
-	TGBot          TGBotConfig   `yaml:"tgbot"`
-	IOS            IOSConfig     `yaml:"ios"`
-	LowMem         LowMemConfig  `yaml:"lowmem"`
+	Server ServerConfig `yaml:"server"          validate:"required"`
+	Panel  PanelConfig  `yaml:"panel"           validate:"required"`
+	DNS    DNSConfig    `yaml:"dns"`
+	Proxy  ProxyConfig  `yaml:"proxy"`
+	Exits  []ExitConfig `yaml:"exits"           validate:"omitempty,dive"`
+	Rules  RulesConfig  `yaml:"rules"`
+	TGBot  TGBotConfig  `yaml:"tgbot"`
+	IOS    IOSConfig    `yaml:"ios"`
+	LowMem LowMemConfig `yaml:"lowmem"`
 	// EffectiveRules is populated at runtime by core.Assemble; never serialized.
-	EffectiveRules []rules.Rule  `yaml:"-" json:"-"`
+	EffectiveRules []rules.Rule `yaml:"-" json:"-"`
 }
 
 type ServerConfig struct {
@@ -54,10 +54,10 @@ type DNSConfig struct {
 }
 
 type ProxyConfig struct {
-	SniProxy       SniProxyConfig `yaml:"sniproxy"`
-	WAShim         WAShimConfig   `yaml:"wa_shim"`
-	QUIC           QUICConfig     `yaml:"quic"`
-	MihomoMixedPort int           `yaml:"mihomo_mixed_port"`
+	SniProxy        SniProxyConfig `yaml:"sniproxy"`
+	WAShim          WAShimConfig   `yaml:"wa_shim"`
+	QUIC            QUICConfig     `yaml:"quic"`
+	MihomoMixedPort int            `yaml:"mihomo_mixed_port"`
 }
 
 type SniProxyConfig struct {
@@ -65,7 +65,9 @@ type SniProxyConfig struct {
 	LoopbackHTTPS int `yaml:"loopback_https" validate:"omitempty,min=1,max=65535"`
 }
 
-// WAShimConfig mirrors 5GPN-X/wa-shim.py env-var contract 1:1.
+// WAShimConfig is a compatibility schema for the in-tree WA-shim library.
+// The v0.4.0 daemon does not start that library, so these fields currently
+// have no runtime consumer.
 type WAShimConfig struct {
 	Listen         string        `yaml:"listen"          validate:"required"`
 	Port           int           `yaml:"port"            validate:"required,min=1,max=65535"`
@@ -79,6 +81,8 @@ type WAShimConfig struct {
 }
 
 type QUICConfig struct {
+	// Listen is retained for config compatibility. The current QUIC forwarder
+	// uses the panel setting toggle and a fixed :443 listener instead.
 	Listen string `yaml:"listen"`
 }
 
@@ -89,6 +93,8 @@ type ExitConfig struct {
 }
 
 type RulesConfig struct {
+	// Sources and DefaultsFile are parsed for compatibility but are not loaded
+	// by the current runtime. Managed sources live in SQLite's rulesets table.
 	Sources      []RuleSource `yaml:"sources"       validate:"dive"`
 	DefaultsFile string       `yaml:"defaults_file"`
 }
@@ -105,17 +111,21 @@ type TGBotConfig struct {
 }
 
 type IOSConfig struct {
+	// DoTDomain is retained for compatibility; profile generation currently
+	// uses server.domain for its primary DoH URL and local DoT preflight.
 	DoTDomain   string `yaml:"dot_domain"`
 	ProfileUUID string `yaml:"profile_uuid"`
 	HTTPPort    int    `yaml:"http_port" validate:"omitempty,min=1,max=65535"`
 }
 
 type LowMemConfig struct {
+	// Reserved compatibility surface. No runtime component applies these
+	// process or mihomo resource limits in v0.4.0.
 	AutoDetectBelowMB int             `yaml:"auto_detect_below_mb"`
 	HardLimits        LowMemHardLimit `yaml:"hard_limits"`
 }
 
 type LowMemHardLimit struct {
-	GoMaxProcs    int    `yaml:"go_max_procs"`
-	MihomoMaxRAM  string `yaml:"mihomo_max_ram"`
+	GoMaxProcs   int    `yaml:"go_max_procs"`
+	MihomoMaxRAM string `yaml:"mihomo_max_ram"`
 }

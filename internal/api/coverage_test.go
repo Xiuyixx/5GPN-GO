@@ -389,7 +389,7 @@ func TestHandleImportBackup_OrchestratorFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	found := false
 	for rows.Next() {
 		var action string
@@ -405,6 +405,88 @@ func TestHandleImportBackup_OrchestratorFailure(t *testing.T) {
 	}
 }
 
+func TestHandleImportBackupValidatesWholeArchiveBeforeApply(t *testing.T) {
+	srv, tok := s2Setup(t)
+	seed := map[string]any{
+		"rules": []map[string]any{{
+			"id": "seed", "kind": "MATCH", "pattern": "",
+			"action": "direct", "priority": 100, "enabled": true,
+		}},
+		"note": "seed",
+	}
+	rr := do(t, srv, authed(t, "POST", "/api/v1/rules/apply", seed, tok))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("seed: %d %s", rr.Code, rr.Body.String())
+	}
+	prior, _ := db.GetActiveRuleVersion(srv.DB)
+
+	body, err := buildBackupEntries([]backupTestMember{
+		{Name: "rules/active.yaml", Body: "rules:\n- id: imported\n  kind: MATCH\n  action: block\n  priority: 1\n  enabled: true\n"},
+		{Name: "unexpected/file", Body: "must reject"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest("POST", "/api/v1/backup/import", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rr = do(t, srv, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("unknown member: want 400, got %d %s", rr.Code, rr.Body.String())
+	}
+	after, _ := db.GetActiveRuleVersion(srv.DB)
+	if after.ID != prior.ID {
+		t.Fatalf("archive applied before final validation: active=%d prior=%d", after.ID, prior.ID)
+	}
+}
+
+func TestHandleImportBackupRejectsDuplicateRulesAndLinks(t *testing.T) {
+	srv, tok := s2Setup(t)
+	rulesBody := "rules:\n- id: r\n  kind: MATCH\n  action: direct\n  priority: 1\n  enabled: true\n"
+	for name, members := range map[string][]backupTestMember{
+		"duplicate": {
+			{Name: "rules/active.yaml", Body: rulesBody},
+			{Name: "rules/active.yaml", Body: rulesBody},
+		},
+		"symlink": {{Name: "rules/active.yaml", Typeflag: tar.TypeSymlink}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			body, err := buildBackupEntries(members)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req, _ := http.NewRequest("POST", "/api/v1/backup/import", strings.NewReader(body))
+			req.Header.Set("Authorization", "Bearer "+tok)
+			rr := do(t, srv, req)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("want 400, got %d %s", rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestHandleImportBackupRejectsCompressedAndExpandedLimits(t *testing.T) {
+	srv, tok := s2Setup(t)
+	req, _ := http.NewRequest("POST", "/api/v1/backup/import", strings.NewReader("short"))
+	req.ContentLength = backupMaxCompressedBytes + 1
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rr := do(t, srv, req)
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("compressed limit: want 413, got %d %s", rr.Code, rr.Body.String())
+	}
+
+	large := strings.Repeat("x", backupMaxRulesBytes+1)
+	body, err := buildBackupEntries([]backupTestMember{{Name: "rules/active.yaml", Body: large}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ = http.NewRequest("POST", "/api/v1/backup/import", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rr = do(t, srv, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expanded rules limit: want 400, got %d %s", rr.Code, rr.Body.String())
+	}
+}
+
 // failingOrchestrator returns err from Apply, letting Applier.ImportRules
 // bubble the error out and drive the handler's rollback branch.
 type failingOrchestrator struct{ err error }
@@ -416,22 +498,18 @@ func (f *failingOrchestrator) Apply(_ context.Context, _ orchestrator.ApplyReque
 func (f *failingOrchestrator) Rollback(_ context.Context, _ int64) error { return nil }
 
 func TestJournalHelpers(t *testing.T) {
-	// isUnitChar allows only safe characters for the journalctl arg.
-	safe := "dnsdist-1.2_a"
-	for _, r := range safe {
-		if !isUnitChar(r) {
-			t.Errorf("expected %q to be a valid unit char", r)
+	for _, unit := range []string{"5gpn", "dnsdist", "mihomo", "sniproxy", "mtg"} {
+		if _, ok := allowedLogUnits[unit]; !ok {
+			t.Errorf("expected %q in log-unit allowlist", unit)
 		}
 	}
-	for _, r := range " ;`$()<>" {
-		if isUnitChar(r) {
-			t.Errorf("expected %q to be REJECTED", r)
-		}
+	if _, ok := allowedLogUnits["ssh.service"]; ok {
+		t.Error("unrelated system service must not be readable through panel logs")
 	}
 
-	// journalTimestamp: prefer __REALTIME_TIMESTAMP when present as a
-	// string; falls back to "now" formatted RFC3339Nano when absent.
-	if got := journalTimestamp(map[string]any{"__REALTIME_TIMESTAMP": "1704067200000000"}); got != "1704067200000000" {
+	// journalTimestamp: convert journalctl's microsecond epoch into the
+	// RFC3339 timestamp consumed by the browser; fall back to now when absent.
+	if got := journalTimestamp(map[string]any{"__REALTIME_TIMESTAMP": "1704067200000000"}); got != "2024-01-01T00:00:00Z" {
 		t.Errorf("realtime timestamp = %q", got)
 	}
 	if journalTimestamp(map[string]any{}) == "" {
@@ -474,16 +552,34 @@ func TestJournalHelpers(t *testing.T) {
 // buildBackupTar produces a gzip'd tar carrying the given members in
 // memory. Used to feed handleImportBackup its happy-path input.
 func buildBackupTar(members map[string]string) (string, error) {
+	entries := make([]backupTestMember, 0, len(members))
+	for name, body := range members {
+		entries = append(entries, backupTestMember{Name: name, Body: body})
+	}
+	return buildBackupEntries(entries)
+}
+
+type backupTestMember struct {
+	Name     string
+	Body     string
+	Typeflag byte
+}
+
+func buildBackupEntries(members []backupTestMember) (string, error) {
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
-	for name, body := range members {
+	for _, member := range members {
+		typeflag := member.Typeflag
+		if typeflag == 0 {
+			typeflag = tar.TypeReg
+		}
 		if err := tw.WriteHeader(&tar.Header{
-			Name: name, Mode: 0o600, Size: int64(len(body)),
+			Name: member.Name, Mode: 0o600, Size: int64(len(member.Body)), Typeflag: typeflag,
 		}); err != nil {
 			return "", err
 		}
-		if _, err := tw.Write([]byte(body)); err != nil {
+		if _, err := tw.Write([]byte(member.Body)); err != nil {
 			return "", err
 		}
 	}

@@ -14,9 +14,14 @@ type NoOp struct {
 }
 
 // Apply logs the request and returns success.
-func (n *NoOp) Apply(_ context.Context, req ApplyRequest) (ApplyResult, error) {
+func (n *NoOp) Apply(ctx context.Context, req ApplyRequest) (ApplyResult, error) {
 	n.log().Info("noop-orchestrator: apply",
 		"snapshot_id", req.SnapshotID, "rule_version_id", req.RuleVersionID)
+	if req.Commit != nil {
+		if err := req.Commit(ctx); err != nil {
+			return ApplyResult{RolledBack: true, Health: "failed", Reason: err.Error()}, err
+		}
+	}
 	return ApplyResult{Health: "ok (noop)"}, nil
 }
 

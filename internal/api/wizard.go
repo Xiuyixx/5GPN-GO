@@ -10,6 +10,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 
 	"github.com/Xiuyixx/5GPN-Go/internal/db"
@@ -125,131 +127,113 @@ func (s *Server) handleUpdatePanelSettings(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
+	s.settingsMu.Lock()
+	defer s.settingsMu.Unlock()
 	actor := actorFromCtx(r)
 	ctx := r.Context()
-
+	values := map[string]any{}
 	if req.Server != nil {
 		if v := req.Server.Domain; v != nil {
-			if err := s.Settings.SetString(ctx, settings.KeyServerDomain, *v, actor); err != nil {
-				writeError(w, http.StatusInternalServerError, "write_error", err.Error())
-				return
-			}
+			values[settings.KeyServerDomain] = *v
 		}
 		if v := req.Server.PanelBind; v != nil {
-			if err := s.Settings.SetString(ctx, settings.KeyServerPanelBind, *v, actor); err != nil {
-				writeError(w, http.StatusInternalServerError, "write_error", err.Error())
-				return
-			}
+			values[settings.KeyServerPanelBind] = *v
 		}
 		if v := req.Server.PanelPort; v != nil {
 			if *v < 1 || *v > 65535 {
 				writeError(w, http.StatusBadRequest, "bad_port", "panel_port must be 1..65535")
 				return
 			}
-			if err := s.Settings.SetInt(ctx, settings.KeyServerPanelPort, *v, actor); err != nil {
-				writeError(w, http.StatusInternalServerError, "write_error", err.Error())
-				return
-			}
+			values[settings.KeyServerPanelPort] = *v
 		}
 	}
 	if req.TLS != nil {
 		if v := req.TLS.ACMEEnabled; v != nil {
-			if err := s.Settings.SetBool(ctx, settings.KeyTLSACMEEnabled, *v, actor); err != nil {
-				writeError(w, http.StatusInternalServerError, "write_error", err.Error())
-				return
-			}
+			values[settings.KeyTLSACMEEnabled] = *v
 		}
 		if v := req.TLS.ACMEEmail; v != nil {
-			if err := s.Settings.SetString(ctx, settings.KeyTLSACMEEmail, *v, actor); err != nil {
-				writeError(w, http.StatusInternalServerError, "write_error", err.Error())
-				return
-			}
-		}
-	}
-	// tgbotWarning is set when the token was accepted by the DB but rejected
-	// by Telegram (401/getMe failure, network drop, etc.). We report it as a
-	// non-fatal warning so the rest of the wizard save still lands and the
-	// user is not stuck in a wizard loop.
-	tgbotWarning := ""
-	if req.TGBot != nil && (req.TGBot.Token != nil || req.TGBot.AdminChatIDs != nil) {
-		// Compute the effective (token, ids) from the request + current DB
-		// snapshot BEFORE any write, so we can attempt the hot-reload first
-		// and only persist if Telegram accepts. This way a bad token never
-		// pollutes panel_settings.
-		token, ids := effectiveTGBot(ctx, s.Settings, req.TGBot.Token, req.TGBot.AdminChatIDs)
-		if s.TGBot != nil {
-			if err := s.TGBot.Update(ctx, token, ids); err != nil {
-				// Common case: Telegram getMe 401 → invalid token. Do NOT
-				// persist tgbot.* fields (leave DB untouched) and surface the
-				// error as a warning so the wizard save completes.
-				tgbotWarning = err.Error()
-				s.Logger.Warn("wizard: tgbot hot-reload rejected — settings not persisted",
-					"actor", actor, "err", err)
-			}
-		}
-		if tgbotWarning == "" {
-			if req.TGBot.Token != nil {
-				if err := s.Settings.SetString(ctx, settings.KeyTGBotToken, *req.TGBot.Token, actor); err != nil {
-					writeError(w, http.StatusInternalServerError, "write_error", err.Error())
-					return
-				}
-			}
-			if req.TGBot.AdminChatIDs != nil {
-				if err := s.Settings.SetJSON(ctx, settings.KeyTGBotAdminChats, *req.TGBot.AdminChatIDs, actor); err != nil {
-					writeError(w, http.StatusInternalServerError, "write_error", err.Error())
-					return
-				}
-			}
+			values[settings.KeyTLSACMEEmail] = *v
 		}
 	}
 	if req.WAShim != nil {
 		if v := req.WAShim.Enabled; v != nil {
-			if err := s.Settings.SetBool(ctx, settings.KeyWAShimEnabled, *v, actor); err != nil {
-				writeError(w, http.StatusInternalServerError, "write_error", err.Error())
-				return
-			}
+			values[settings.KeyWAShimEnabled] = *v
 		}
 		if v := req.WAShim.Listen; v != nil {
-			if err := s.Settings.SetString(ctx, settings.KeyWAShimListen, *v, actor); err != nil {
-				writeError(w, http.StatusInternalServerError, "write_error", err.Error())
-				return
-			}
+			values[settings.KeyWAShimListen] = *v
 		}
 		if v := req.WAShim.Port; v != nil {
 			if *v < 1 || *v > 65535 {
 				writeError(w, http.StatusBadRequest, "bad_port", "washim.port must be 1..65535")
 				return
 			}
-			if err := s.Settings.SetInt(ctx, settings.KeyWAShimPort, *v, actor); err != nil {
-				writeError(w, http.StatusInternalServerError, "write_error", err.Error())
-				return
-			}
+			values[settings.KeyWAShimPort] = *v
 		}
 		if v := req.WAShim.Backend; v != nil {
-			if err := s.Settings.SetString(ctx, settings.KeyWAShimBackend, *v, actor); err != nil {
-				writeError(w, http.StatusInternalServerError, "write_error", err.Error())
-				return
-			}
+			values[settings.KeyWAShimBackend] = *v
 		}
 		if v := req.WAShim.WAHost; v != nil {
-			if err := s.Settings.SetString(ctx, settings.KeyWAShimWAHost, *v, actor); err != nil {
-				writeError(w, http.StatusInternalServerError, "write_error", err.Error())
-				return
-			}
+			values[settings.KeyWAShimWAHost] = *v
 		}
 		if v := req.WAShim.AllowCIDR; v != nil {
-			if err := s.Settings.SetJSON(ctx, settings.KeyWAShimAllowCIDR, *v, actor); err != nil {
-				writeError(w, http.StatusInternalServerError, "write_error", err.Error())
+			if len(*v) == 0 {
+				writeError(w, http.StatusBadRequest, "invalid_cidr", "washim.allow_cidr must not be empty")
 				return
 			}
+			for _, raw := range *v {
+				if _, _, err := net.ParseCIDR(raw); err != nil {
+					writeError(w, http.StatusBadRequest, "invalid_cidr", fmt.Sprintf("washim.allow_cidr %q: %v", raw, err))
+					return
+				}
+			}
+			values[settings.KeyWAShimAllowCIDR] = *v
 		}
 	}
 	if req.Wizard != nil {
 		if v := req.Wizard.Complete; v != nil {
-			if err := s.Settings.SetBool(ctx, settings.KeyWizardComplete, *v, actor); err != nil {
-				writeError(w, http.StatusInternalServerError, "write_error", err.Error())
-				return
+			values[settings.KeyWizardComplete] = *v
+		}
+	}
+
+	// Validate Telegram while the previous bot remains live. The Manager swaps
+	// runtime state only after the settings transaction commits successfully.
+	tgbotWarning := ""
+	settingsCommitted := false
+	if req.TGBot != nil && (req.TGBot.Token != nil || req.TGBot.AdminChatIDs != nil) {
+		token, ids, err := effectiveTGBot(ctx, s.Settings, req.TGBot.Token, req.TGBot.AdminChatIDs)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "read_error", err.Error())
+			return
+		}
+		if req.TGBot.Token != nil {
+			values[settings.KeyTGBotToken] = *req.TGBot.Token
+		}
+		if req.TGBot.AdminChatIDs != nil {
+			values[settings.KeyTGBotAdminChats] = *req.TGBot.AdminChatIDs
+		}
+		if s.TGBot != nil {
+			var persistErr error
+			if err := s.TGBot.UpdateWithCommit(ctx, token, ids, func() error {
+				persistErr = s.Settings.SetMany(ctx, values, actor)
+				return persistErr
+			}); err != nil {
+				if persistErr != nil {
+					writeError(w, http.StatusInternalServerError, "write_error", persistErr.Error())
+					return
+				}
+				tgbotWarning = err.Error()
+				s.Logger.Warn("wizard: tgbot hot-reload rejected; settings not persisted", "actor", actor, "err", err)
+				delete(values, settings.KeyTGBotToken)
+				delete(values, settings.KeyTGBotAdminChats)
+			} else {
+				settingsCommitted = true
 			}
+		}
+	}
+	if !settingsCommitted {
+		if err := s.Settings.SetMany(ctx, values, actor); err != nil {
+			writeError(w, http.StatusInternalServerError, "write_error", err.Error())
+			return
 		}
 	}
 
@@ -382,18 +366,24 @@ func readPanelSettings(ctx context.Context, store *settings.Store) (*panelSettin
 // effectiveTGBot combines a partial update with the current DB snapshot
 // so a caller can change JUST the token or JUST the admin ids without
 // losing the other field.
-func effectiveTGBot(ctx context.Context, store *settings.Store, tokenPatch *string, idsPatch *[]int64) (string, []int64) {
+func effectiveTGBot(ctx context.Context, store *settings.Store, tokenPatch *string, idsPatch *[]int64) (string, []int64, error) {
 	token := ""
 	if tokenPatch != nil {
 		token = *tokenPatch
 	} else {
-		token, _ = store.GetString(ctx, settings.KeyTGBotToken)
+		var err error
+		token, err = store.GetString(ctx, settings.KeyTGBotToken)
+		if err != nil {
+			return "", nil, err
+		}
 	}
 	var ids []int64
 	if idsPatch != nil {
 		ids = *idsPatch
 	} else {
-		_ = store.GetJSON(ctx, settings.KeyTGBotAdminChats, &ids)
+		if err := store.GetJSON(ctx, settings.KeyTGBotAdminChats, &ids); err != nil && !errors.Is(err, settings.ErrNotFound) {
+			return "", nil, err
+		}
 	}
-	return token, ids
+	return token, ids, nil
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
@@ -64,7 +65,7 @@ func (MihomoRenderer) Render(cfg *config.Config, w io.Writer) error {
 	proxyGroupNames := buildProxyGroupNames(names, activeExitName)
 
 	// Build rules list from EffectiveRules.
-	ruleLines, err := buildRuleLines(cfg.EffectiveRules, activeExitName)
+	ruleLines, err := buildRuleLines(cfg.EffectiveRules, activeExitName, names)
 	if err != nil {
 		return fmt.Errorf("mihomo: build rules: %w", err)
 	}
@@ -110,7 +111,7 @@ func buildProxyGroupNames(names []string, activeExitName string) []string {
 // Rules are sorted by Priority (ascending). MATCH, if present in the set,
 // is always emitted last regardless of its Priority value. If no MATCH rule
 // exists in the set a synthetic "MATCH,<activeExitName>" is appended.
-func buildRuleLines(effectiveRules []rules.Rule, activeExitName string) ([]string, error) {
+func buildRuleLines(effectiveRules []rules.Rule, activeExitName string, exitNames []string) ([]string, error) {
 	if len(effectiveRules) == 0 {
 		// No rules at all — emit a bare MATCH fallback.
 		return []string{fmt.Sprintf("MATCH,%s", activeExitName)}, nil
@@ -139,6 +140,11 @@ func buildRuleLines(effectiveRules []rules.Rule, activeExitName string) ([]strin
 
 	out := make([]string, 0, len(nonMatch)+1)
 	for _, r := range nonMatch {
+		canonical, err := mihomoAction(r.Action, exitNames)
+		if err != nil {
+			return nil, fmt.Errorf("rule %s: %w", r.ID, err)
+		}
+		r.Action = canonical
 		line, err := r.ToMihomoLine()
 		if err != nil {
 			return nil, err
@@ -148,6 +154,11 @@ func buildRuleLines(effectiveRules []rules.Rule, activeExitName string) ([]strin
 
 	// MATCH is always last.
 	if matchRule != nil {
+		canonical, err := mihomoAction(matchRule.Action, exitNames)
+		if err != nil {
+			return nil, fmt.Errorf("rule %s: %w", matchRule.ID, err)
+		}
+		matchRule.Action = canonical
 		line, err := matchRule.ToMihomoLine()
 		if err != nil {
 			return nil, err
@@ -158,4 +169,22 @@ func buildRuleLines(effectiveRules []rules.Rule, activeExitName string) ([]strin
 	}
 
 	return out, nil
+}
+
+func mihomoAction(action string, exitNames []string) (string, error) {
+	action = strings.TrimSpace(action)
+	switch strings.ToLower(action) {
+	case "block", "reject":
+		return "REJECT", nil
+	case "direct":
+		return "DIRECT", nil
+	case "proxy":
+		return "PROXY", nil
+	}
+	for _, name := range exitNames {
+		if action == name {
+			return action, nil
+		}
+	}
+	return "", fmt.Errorf("action %q is neither a built-in policy nor a configured exit", action)
 }

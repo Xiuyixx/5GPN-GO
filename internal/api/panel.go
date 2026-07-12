@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -37,9 +38,12 @@ func (s *Server) handleBootstrapStatus(w http.ResponseWriter, r *http.Request) {
 	// only makes sense AFTER bootstrap.
 	needsWizard := false
 	if n > 0 && s.Settings != nil {
-		if v, err := s.Settings.GetBool(r.Context(), settings.KeyWizardComplete); err == nil {
-			needsWizard = !v
+		v, err := s.Settings.GetBool(r.Context(), settings.KeyWizardComplete)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "settings_error", err.Error())
+			return
 		}
+		needsWizard = !v
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"needs_setup":  n == 0,
@@ -53,21 +57,18 @@ func (s *Server) handleBootstrapClaim(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	if s.SetupToken == "" || req.Token != s.SetupToken {
-		writeError(w, http.StatusForbidden, "invalid_setup_token", "setup token is missing or wrong")
-		return
-	}
-	n, err := db.CountPanelUsers(s.DB)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "db_error", err.Error())
-		return
-	}
-	if n > 0 {
-		writeError(w, http.StatusConflict, "already_setup", "bootstrap can only be claimed once")
-		return
-	}
 	if len(req.Password) < 8 {
 		writeError(w, http.StatusBadRequest, "weak_password", "password must be at least 8 characters")
+		return
+	}
+
+	// Keep the in-memory one-shot token and the DB first-user insert in one
+	// critical section. InsertFirstPanelUser is also atomic at SQLite level,
+	// which protects against two daemon processes racing on the same DB.
+	s.setupMu.Lock()
+	defer s.setupMu.Unlock()
+	if s.SetupToken == "" || subtle.ConstantTimeCompare([]byte(req.Token), []byte(s.SetupToken)) != 1 {
+		writeError(w, http.StatusForbidden, "invalid_setup_token", "setup token is missing or wrong")
 		return
 	}
 	hash, err := HashPassword(req.Password)
@@ -75,9 +76,14 @@ func (s *Server) handleBootstrapClaim(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "hash_error", err.Error())
 		return
 	}
-	uid, err := db.InsertPanelUser(s.DB, req.Username, hash)
+	uid, created, err := db.InsertFirstPanelUser(s.DB, req.Username, hash)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "insert_error", err.Error())
+		return
+	}
+	if !created {
+		s.SetupToken = ""
+		writeError(w, http.StatusConflict, "already_setup", "bootstrap can only be claimed once")
 		return
 	}
 	// Setup token is one-shot.

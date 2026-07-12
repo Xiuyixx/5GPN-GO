@@ -3,8 +3,11 @@ package tgbot
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -23,34 +26,38 @@ func (s *stubHandlers) call(name string, args ...string) (string, error) {
 	return name, nil
 }
 
-func (s *stubHandlers) Start(_ context.Context, _ int64) (string, error)       { return s.call("start") }
+func (s *stubHandlers) Start(_ context.Context, _ int64) (string, error) { return s.call("start") }
 func (s *stubHandlers) Menu(_ context.Context, _ int64) (string, *tgbotapi.InlineKeyboardMarkup, error) {
 	_, err := s.call("menu")
 	return "menu", nil, err
 }
-func (s *stubHandlers) Status(_ context.Context) (string, error)                { return s.call("status") }
-func (s *stubHandlers) ListExits(_ context.Context) (string, error)             { return s.call("exits") }
-func (s *stubHandlers) ListRules(_ context.Context) (string, error)             { return s.call("rules") }
-func (s *stubHandlers) SwitchExit(_ context.Context, id string) (string, error) { return s.call("switch", id) }
+func (s *stubHandlers) Status(_ context.Context) (string, error)    { return s.call("status") }
+func (s *stubHandlers) ListExits(_ context.Context) (string, error) { return s.call("exits") }
+func (s *stubHandlers) ListRules(_ context.Context) (string, error) { return s.call("rules") }
+func (s *stubHandlers) SwitchExit(_ context.Context, id string) (string, error) {
+	return s.call("switch", id)
+}
 func (s *stubHandlers) AddExit(_ context.Context, id, uri string) (string, error) {
 	return s.call("add", id, uri)
 }
-func (s *stubHandlers) DeleteExit(_ context.Context, id string) (string, error) { return s.call("del", id) }
-func (s *stubHandlers) Uptime(_ context.Context) (string, error)                { return s.call("uptime") }
-func (s *stubHandlers) LoadAvg(_ context.Context) (string, error)               { return s.call("load") }
-func (s *stubHandlers) MemInfo(_ context.Context) (string, error)               { return s.call("mem") }
-func (s *stubHandlers) CPUStat(_ context.Context) (string, error)               { return s.call("cpu") }
-func (s *stubHandlers) TCPStat(_ context.Context) (string, error)               { return s.call("tcp") }
-func (s *stubHandlers) NFConntrack(_ context.Context) (string, error)           { return s.call("conntrack") }
-func (s *stubHandlers) Route(_ context.Context) (string, error)                 { return s.call("route") }
-func (s *stubHandlers) ExitIP(_ context.Context) (string, error)                { return s.call("ip") }
-func (s *stubHandlers) WireGuard(_ context.Context) (string, error)             { return s.call("wg") }
-func (s *stubHandlers) Dev(_ context.Context) (string, error)                   { return s.call("dev") }
-func (s *stubHandlers) WWW(_ context.Context) (string, error)                   { return s.call("www") }
-func (s *stubHandlers) JSON(_ context.Context) (string, error)                  { return s.call("json") }
-func (s *stubHandlers) Cancel(_ context.Context, _ int64) (string, error)       { return s.call("cancel") }
-func (s *stubHandlers) AsID(_ int64, _ string) (string, error)                  { return s.call("id") }
-func (s *stubHandlers) RecordUnauthorized(_ int64, _ string)                    { s.unauth++ }
+func (s *stubHandlers) DeleteExit(_ context.Context, id string) (string, error) {
+	return s.call("del", id)
+}
+func (s *stubHandlers) Uptime(_ context.Context) (string, error)          { return s.call("uptime") }
+func (s *stubHandlers) LoadAvg(_ context.Context) (string, error)         { return s.call("load") }
+func (s *stubHandlers) MemInfo(_ context.Context) (string, error)         { return s.call("mem") }
+func (s *stubHandlers) CPUStat(_ context.Context) (string, error)         { return s.call("cpu") }
+func (s *stubHandlers) TCPStat(_ context.Context) (string, error)         { return s.call("tcp") }
+func (s *stubHandlers) NFConntrack(_ context.Context) (string, error)     { return s.call("conntrack") }
+func (s *stubHandlers) Route(_ context.Context) (string, error)           { return s.call("route") }
+func (s *stubHandlers) ExitIP(_ context.Context) (string, error)          { return s.call("ip") }
+func (s *stubHandlers) WireGuard(_ context.Context) (string, error)       { return s.call("wg") }
+func (s *stubHandlers) Dev(_ context.Context) (string, error)             { return s.call("dev") }
+func (s *stubHandlers) WWW(_ context.Context) (string, error)             { return s.call("www") }
+func (s *stubHandlers) JSON(_ context.Context) (string, error)            { return s.call("json") }
+func (s *stubHandlers) Cancel(_ context.Context, _ int64) (string, error) { return s.call("cancel") }
+func (s *stubHandlers) AsID(_ int64, _ string) (string, error)            { return s.call("id") }
+func (s *stubHandlers) RecordUnauthorized(_ int64, _ string)              { s.unauth++ }
 
 func TestDispatchCoversAllCommands(t *testing.T) {
 	s := &stubHandlers{}
@@ -132,6 +139,30 @@ func TestSplitCommandStripsBotName(t *testing.T) {
 	}
 }
 
+func TestOnlyIDIsPublic(t *testing.T) {
+	for input, want := range map[string]bool{
+		"/id": true, "/id@mybot": true, "/status": false, "/help": false, "hello": false,
+	} {
+		if got := isPublicCommand(input); got != want {
+			t.Errorf("isPublicCommand(%q)=%v, want %v", input, got, want)
+		}
+	}
+}
+
+func TestHelpListsActualCommands(t *testing.T) {
+	d := newDispatcher(&stubHandlers{})
+	msg := &tgbotapi.Message{Chat: &tgbotapi.Chat{ID: 42}, From: &tgbotapi.User{UserName: "u"}}
+	reply, _, err := d.Dispatch(context.Background(), "/help", nil, msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cmd := range DispatchCommands() {
+		if !strings.Contains(reply, cmd) {
+			t.Fatalf("help omitted %s: %q", cmd, reply)
+		}
+	}
+}
+
 func TestNewRefusesEmptyWhitelist(t *testing.T) {
 	_, err := New(Config{Token: "x", Handlers: &stubHandlers{}, AdminChatIDs: nil})
 	if err == nil || !strings.Contains(err.Error(), "whitelist") {
@@ -153,9 +184,46 @@ func TestNewRefusesNilHandlers(t *testing.T) {
 	}
 }
 
+func TestNewWithContextCancelsCredentialValidation(t *testing.T) {
+	started := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		started <- struct{}{}
+		<-r.Context().Done()
+	}))
+	t.Cleanup(server.Close)
+	previousEndpoint := telegramAPIEndpoint
+	telegramAPIEndpoint = server.URL + "/bot%s/%s"
+	t.Cleanup(func() { telegramAPIEndpoint = previousEndpoint })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := NewWithContext(ctx, Config{
+			Token:        "blackhole-token",
+			AdminChatIDs: []int64{1},
+			Handlers:     &stubHandlers{},
+		})
+		errCh <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("credential-validation request did not start")
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("NewWithContext error = %v, want context.Canceled", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("credential-validation request ignored context cancellation")
+	}
+}
+
 func TestDispatchCommandsListCount(t *testing.T) {
 	got := DispatchCommands()
-	if len(got) != 20 {
-		t.Fatalf("expected 20 commands, got %d: %v", len(got), got)
+	if len(got) != 21 {
+		t.Fatalf("expected 21 commands, got %d: %v", len(got), got)
 	}
 }

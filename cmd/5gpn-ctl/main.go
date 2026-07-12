@@ -9,6 +9,7 @@
 //	<<< {"ok": true|false, "error": "...", "data": { ... }}
 //
 // Subcommands:
+//
 //	status                   daemon uptime + version + active exit + rule count
 //	version                  daemon version string
 //	exits list               JSON exit list
@@ -25,9 +26,9 @@ import (
 	"os"
 )
 
-// clientVersion is stamped at build time. It has no coupling to the
+// version is stamped at build time. It has no coupling to the
 // daemon version — the daemon reports its own via the "version" cmd.
-var clientVersion = "0.2.0"
+var version = "0.4.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -36,22 +37,22 @@ func main() {
 	}
 	code, err := dispatch(os.Args[1:])
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		_, _ = fmt.Fprintln(os.Stderr, err)
 	}
 	os.Exit(code)
 }
 
 func usage(w *os.File) {
-	fmt.Fprintln(w, "usage: 5gpn-ctl <subcommand> [args]")
-	fmt.Fprintln(w, "")
-	fmt.Fprintln(w, "subcommands:")
-	fmt.Fprintln(w, "  status                   daemon status summary")
-	fmt.Fprintln(w, "  version                  daemon version")
-	fmt.Fprintln(w, "  exits list               list exits")
-	fmt.Fprintln(w, "  exits switch <id>        switch active exit")
-	fmt.Fprintln(w, "  rules rollback           rollback to prior snapshot")
-	fmt.Fprintln(w, "  chinalist sync           refresh chinalist")
-	fmt.Fprintln(w, "  --version                print client version")
+	_, _ = fmt.Fprintln(w, "usage: 5gpn-ctl <subcommand> [args]")
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "subcommands:")
+	_, _ = fmt.Fprintln(w, "  status                   daemon status summary")
+	_, _ = fmt.Fprintln(w, "  version                  daemon version")
+	_, _ = fmt.Fprintln(w, "  exits list               list exits")
+	_, _ = fmt.Fprintln(w, "  exits switch <id>        switch active exit")
+	_, _ = fmt.Fprintln(w, "  rules rollback           rollback to prior snapshot")
+	_, _ = fmt.Fprintln(w, "  chinalist sync           refresh chinalist")
+	_, _ = fmt.Fprintln(w, "  --version                print client version")
 }
 
 // dispatch parses argv (without argv[0]) into a wire request and hands
@@ -63,7 +64,7 @@ func dispatch(args []string) (int, error) {
 		usage(os.Stdout)
 		return 0, nil
 	case "--version":
-		fmt.Println(clientVersion)
+		_, _ = fmt.Println(version)
 		return 0, nil
 	case "status":
 		return run(request{Cmd: "status"})
@@ -109,16 +110,10 @@ func dispatch(args []string) (int, error) {
 	}
 }
 
-// request / response are the wire types. Kept in main.go so both the
+// request is the wire type. Kept in main.go so both the
 // linux client and the darwin stub (which never actually sends one)
 // compile against the same shape.
 type request struct {
 	Cmd  string         `json:"cmd"`
 	Args map[string]any `json:"args,omitempty"`
-}
-
-type response struct {
-	OK    bool           `json:"ok"`
-	Error string         `json:"error,omitempty"`
-	Data  map[string]any `json:"data,omitempty"`
 }

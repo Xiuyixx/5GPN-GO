@@ -39,9 +39,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/Xiuyixx/5GPN-Go/internal/mtgctl"
 	"github.com/Xiuyixx/5GPN-Go/internal/settings"
@@ -103,7 +106,12 @@ func (s *Server) handleGetMTProxySettings(w http.ResponseWriter, r *http.Request
 			"mtg controller not wired — panel host must have 9seconds/mtg installed")
 		return
 	}
-	writeJSON(w, http.StatusOK, s.readMTGSnapshot(r.Context()))
+	resp, err := s.readMTGSnapshot(r.Context())
+	if err != nil {
+		writeMTGError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleUpdateMTProxySettings toggles the service and optionally
@@ -125,10 +133,15 @@ func (s *Server) handleUpdateMTProxySettings(w http.ResponseWriter, r *http.Requ
 	}
 
 	ctx := r.Context()
-	currentListen, currentSecret, _ := s.MTG.ReadUnit(ctx)
+	currentListen, currentSecret, err := s.MTG.ReadUnit(ctx)
+	if err != nil {
+		writeMTGError(w, err)
+		return
+	}
 	if currentListen == "" {
 		currentListen = mtgctl.DefaultListen
 	}
+	oldSecret := currentSecret
 	currentDomain := mtgctl.DecodeFrontingDomain(currentSecret)
 
 	// Fronting-domain rotation: only regenerate when the caller sent a
@@ -149,9 +162,14 @@ func (s *Server) handleUpdateMTProxySettings(w http.ResponseWriter, r *http.Requ
 			currentSecret = newSecret
 			// Restart only if the service is already active; a disabled
 			// service should stay disabled after the write.
-			if on, _ := s.MTG.IsActive(ctx); on {
+			on, err := s.MTG.IsActive(ctx)
+			if err != nil {
+				writeMTGError(w, restoreMTGUnit(ctx, s.MTG, currentListen, oldSecret, false, err))
+				return
+			}
+			if on {
 				if err := s.MTG.Restart(ctx); err != nil {
-					writeMTGError(w, err)
+					writeMTGError(w, restoreMTGUnit(ctx, s.MTG, currentListen, oldSecret, true, err))
 					return
 				}
 			}
@@ -177,7 +195,12 @@ func (s *Server) handleUpdateMTProxySettings(w http.ResponseWriter, r *http.Requ
 			}
 		}
 	}
-	writeJSON(w, http.StatusOK, s.readMTGSnapshot(ctx))
+	resp, err := s.readMTGSnapshot(ctx)
+	if err != nil {
+		writeMTGError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleGenerateMTProxySecret shells to `mtg generate-secret`, rewrites
@@ -192,45 +215,88 @@ func (s *Server) handleGenerateMTProxySecret(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	var req mtproxyGenerateSecretRequest
-	// Empty body is valid — decoder just leaves the zero value.
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	// Empty body is valid; malformed non-empty JSON is not.
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
 	domain := strings.TrimSpace(req.FrontingDomain)
 	if domain == "" {
 		domain = "www.cloudflare.com"
 	}
 
 	ctx := r.Context()
+	domainForLink, err := s.panelDomain(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "settings_failed", err.Error())
+		return
+	}
+	listen, oldSecret, err := s.MTG.ReadUnit(ctx)
+	if err != nil {
+		writeMTGError(w, err)
+		return
+	}
+	if listen == "" {
+		listen = mtgctl.DefaultListen
+	}
 	secret, err := s.MTG.GenerateSecret(ctx, domain)
 	if err != nil {
 		writeMTGError(w, err)
 		return
 	}
-	listen, _, _ := s.MTG.ReadUnit(ctx)
-	if listen == "" {
-		listen = mtgctl.DefaultListen
-	}
 	if err := s.MTG.WriteUnit(ctx, listen, secret); err != nil {
 		writeMTGError(w, err)
 		return
 	}
-	if on, _ := s.MTG.IsActive(ctx); on {
+	on, err := s.MTG.IsActive(ctx)
+	if err != nil {
+		writeMTGError(w, restoreMTGUnit(ctx, s.MTG, listen, oldSecret, false, err))
+		return
+	}
+	if on {
 		if err := s.MTG.Restart(ctx); err != nil {
-			writeMTGError(w, err)
+			writeMTGError(w, restoreMTGUnit(ctx, s.MTG, listen, oldSecret, true, err))
 			return
 		}
 	}
 	writeJSON(w, http.StatusOK, mtproxyGenerateSecretResponse{
 		OK:          true,
 		Secret:      secret,
-		ConnectLink: buildConnectLink(s.panelDomain(ctx), listen, secret),
+		ConnectLink: buildConnectLink(domainForLink, listen, secret),
 	})
+}
+
+func restoreMTGUnit(ctx context.Context, controller MTG, listen, oldSecret string, wasActive bool, primary error) error {
+	if oldSecret == "" {
+		return errors.Join(primary, errors.New("restore previous unit: previous secret is unavailable"))
+	}
+	// Compensation must survive a client disconnect or the request deadline
+	// that may have caused the primary systemctl failure. The controller still
+	// applies its own per-command timeout inside this bounded window.
+	compCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+	if err := controller.WriteUnit(compCtx, listen, oldSecret); err != nil {
+		return errors.Join(primary, fmt.Errorf("restore previous unit: %w", err))
+	}
+	if wasActive {
+		if err := controller.Restart(compCtx); err != nil {
+			return errors.Join(primary, fmt.Errorf("restart restored unit: %w", err))
+		}
+	}
+	return primary
 }
 
 // readMTGSnapshot bundles the "state the panel renders" reads into one
 // call so GET and POST return the same shape.
-func (s *Server) readMTGSnapshot(ctx context.Context) mtproxySettingsResponse {
-	status, _ := s.MTG.Status(ctx)
-	listen, secret, _ := s.MTG.ReadUnit(ctx)
+func (s *Server) readMTGSnapshot(ctx context.Context) (mtproxySettingsResponse, error) {
+	status, err := s.MTG.Status(ctx)
+	if err != nil {
+		return mtproxySettingsResponse{}, err
+	}
+	listen, secret, err := s.MTG.ReadUnit(ctx)
+	if err != nil {
+		return mtproxySettingsResponse{}, err
+	}
 	if listen == "" {
 		listen = mtgctl.DefaultListen
 	}
@@ -239,25 +305,32 @@ func (s *Server) readMTGSnapshot(ctx context.Context) mtproxySettingsResponse {
 	if configured {
 		domain = mtgctl.DecodeFrontingDomain(secret)
 	}
+	domainForLink, err := s.panelDomain(ctx)
+	if err != nil {
+		return mtproxySettingsResponse{}, err
+	}
 	return mtproxySettingsResponse{
 		Enabled:          status == "active",
 		Listen:           listen,
 		SecretConfigured: configured,
 		FrontingDomain:   domain,
-		ConnectLinkHint:  buildConnectLinkHint(s.panelDomain(ctx), listen),
+		ConnectLinkHint:  buildConnectLinkHint(domainForLink, listen),
 		ServiceStatus:    status,
-	}
+	}, nil
 }
 
 // panelDomain looks up settings.KeyServerDomain so the tg:// link can
 // embed the operator's canonical panel hostname. Empty string is fine —
 // the hint template falls back to "<panel_domain>" literal.
-func (s *Server) panelDomain(ctx context.Context) string {
+func (s *Server) panelDomain(ctx context.Context) (string, error) {
 	if s.Settings == nil {
-		return ""
+		return "", nil
 	}
-	v, _ := s.Settings.GetString(ctx, settings.KeyServerDomain)
-	return strings.TrimSpace(v)
+	v, err := s.Settings.GetString(ctx, settings.KeyServerDomain)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(v), nil
 }
 
 // buildConnectLinkHint returns the placeholder template shown to

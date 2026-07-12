@@ -71,7 +71,7 @@ func TestDoH3_POST_ValidWire_Returns200(t *testing.T) {
 			NextProtos:         []string{"h3"},
 		},
 	}
-	defer rt.Close()
+	defer func() { _ = rt.Close() }()
 	client := &http.Client{Transport: rt, Timeout: 5 * time.Second}
 
 	q := makeQuery("doh3.example.com", dns.TypeA)
@@ -90,7 +90,7 @@ func TestDoH3_POST_ValidWire_Returns200(t *testing.T) {
 	if err != nil {
 		t.Fatalf("client.Do: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)

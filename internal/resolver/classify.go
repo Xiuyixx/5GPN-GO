@@ -12,11 +12,11 @@ const (
 	ActionProxy  Action = "proxy"
 )
 
-// classify walks tbl to decide qname's action. Precedence: exact DOMAIN
-// match, then the most specific DOMAIN-SUFFIX match, then the first
-// DOMAIN-KEYWORD match in priority order, then the table's default (its
-// MATCH rule, or "proxy" per AC-R4 when no MATCH rule exists). A nil
-// table (Store never published) also falls back to proxy.
+// classify walks tbl to decide qname's action. All matching DOMAIN,
+// DOMAIN-SUFFIX, and DOMAIN-KEYWORD rules compete in the same global priority
+// order, matching the sequential rule list emitted to mihomo. The table's
+// MATCH rule is consulted only when no qname rule matched. A nil table (Store
+// never published) also falls back to proxy.
 //
 // IP-CIDR / GEOIP rules never reach here — RuleTable.CIDRs is compiled
 // but unconsulted, since the DNS layer classifies on qname only (AC-R5).
@@ -26,16 +26,27 @@ func classify(tbl *RuleTable, qname string) Action {
 	}
 	name := normalizeName(qname)
 
-	if action, ok := tbl.exact[name]; ok {
-		return toAction(action)
+	var best rankedAction
+	matched := false
+	consider := func(candidate rankedAction, ok bool) {
+		if ok && (!matched || candidate.rank < best.rank) {
+			best = candidate
+			matched = true
+		}
 	}
-	if action, ok := tbl.suffix.lookup(name); ok {
-		return toAction(action)
-	}
+
+	exact, ok := tbl.exact[name]
+	consider(exact, ok)
+	suffix, ok := tbl.suffix.lookup(name)
+	consider(suffix, ok)
 	for _, kw := range tbl.keywords {
 		if strings.Contains(name, kw.keyword) {
-			return toAction(kw.action)
+			consider(rankedAction{action: kw.action, rank: kw.rank}, true)
+			break
 		}
+	}
+	if matched {
+		return toAction(best.action)
 	}
 	if tbl.defaultAction != "" {
 		return toAction(tbl.defaultAction)
@@ -49,7 +60,7 @@ func classify(tbl *RuleTable, qname string) Action {
 // proxy, matching the "no match -> proxy" default (AC-R4).
 func toAction(s string) Action {
 	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "block":
+	case "block", "reject":
 		return ActionBlock
 	case "direct":
 		return ActionDirect

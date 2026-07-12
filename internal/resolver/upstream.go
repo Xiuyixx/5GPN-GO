@@ -1,8 +1,7 @@
 // Package resolver implements the DNS plane's split-horizon resolver
 // kernel: a hot-swappable RuleTable, a three-state (block/direct/proxy)
-// classifier over it, and a DoT upstream client. Listeners (:53, :853,
-// :443, DoQ) are wired in a later phase; this package only answers
-// dns.Msg in, dns.Msg out.
+// classifier over it, and a DoT upstream client. Listener packages call
+// Resolver with dns.Msg values; socket ownership stays outside this package.
 package resolver
 
 import (
@@ -97,7 +96,7 @@ type Upstream struct {
 	// stage runs; a wedged primary pool returns an error at Timeout.
 	Fallback []string
 
-	// Timeout is the hard cap on Query. Defaults to 5s.
+	// Timeout is the hard cap on Query. Defaults to 8s.
 	Timeout time.Duration
 
 	// FallbackDelay is how long to wait before firing Fallback dials.
@@ -120,9 +119,9 @@ type Upstream struct {
 	conns   map[string]*dotConn
 }
 
-// NewUpstream returns an Upstream with the plan's default CN and Proxy
-// DoT endpoints, cross-category Fallback wired (each pool falls back to
-// the other), and Timeout=5s / FallbackDelay=500ms.
+// NewUpstream returns an Upstream with the default CN and Proxy DoT
+// endpoints, Timeout=8s, and FallbackDelay=500ms. Cross-category fallback
+// is disabled unless the caller explicitly populates Fallback.
 func NewUpstream() *Upstream {
 	return &Upstream{
 		CN:            []string{"223.5.5.5:853", "223.6.6.6:853"},
@@ -195,11 +194,14 @@ func (u *Upstream) Query(ctx context.Context, msg *dns.Msg, category string) (*d
 	// Buffered to len(primary)+len(fallback) so no goroutine blocks on
 	// send after the winner returns.
 	resCh := make(chan result, len(primary)+len(fallback))
+	var queryWG sync.WaitGroup
 
 	fire := func(addrs []string, tier Tier) {
 		for _, addr := range addrs {
 			addr := addr
+			queryWG.Add(1)
 			go func() {
+				defer queryWG.Done()
 				m, err := u.queryOne(qctx, addr, msg)
 				resCh <- result{msg: m, err: err, tier: tier}
 			}()
@@ -254,6 +256,14 @@ func (u *Upstream) Query(ctx context.Context, msg *dns.Msg, category string) (*d
 				expected = len(primary) + len(fallback)
 			}
 		case <-qctx.Done():
+			if errors.Is(qctx.Err(), context.DeadlineExceeded) {
+				// Make timeout retirement synchronous so an immediate retry cannot
+				// reuse a blackholed connection. Each query retires only the exact
+				// connection generation it pinned; retiring an address's current
+				// connection here could close a replacement opened concurrently.
+				cancel()
+				queryWG.Wait()
+			}
 			if lastErr == nil {
 				lastErr = qctx.Err()
 			}

@@ -162,3 +162,49 @@ func TestGetJSONMissingReturnsErrNotFound(t *testing.T) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }
+
+func TestSetManyRollsBackEveryKeyOnWriteFailure(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if err := s.SetString(ctx, KeyServerDomain, "before.example", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`CREATE TRIGGER reject_bad_setting
+		BEFORE INSERT ON panel_settings WHEN NEW.key = 'reject.me'
+		BEGIN SELECT RAISE(ABORT, 'rejected for test'); END`); err != nil {
+		t.Fatal(err)
+	}
+	err := s.SetMany(ctx, map[string]any{
+		KeyServerDomain: "after.example",
+		"reject.me":     true,
+	}, "test")
+	if err == nil {
+		t.Fatal("SetMany unexpectedly succeeded")
+	}
+	got, err := s.GetString(ctx, KeyServerDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "before.example" {
+		t.Fatalf("transaction partially committed: domain=%q", got)
+	}
+}
+
+func TestSetManyRejectsUnencodableValueBeforeWriting(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if err := s.SetString(ctx, KeyServerDomain, "before.example", "test"); err != nil {
+		t.Fatal(err)
+	}
+	err := s.SetMany(ctx, map[string]any{
+		KeyServerDomain: "after.example",
+		"bad.value":     func() {},
+	}, "test")
+	if err == nil {
+		t.Fatal("SetMany unexpectedly encoded a function")
+	}
+	got, _ := s.GetString(ctx, KeyServerDomain)
+	if got != "before.example" {
+		t.Fatalf("encoding failure partially committed: domain=%q", got)
+	}
+}

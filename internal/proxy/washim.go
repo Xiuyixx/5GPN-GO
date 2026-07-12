@@ -131,10 +131,10 @@ func SourceAllowed(cfg WAShimConfig, remoteHost string) bool {
 
 // WAShim is the running server.
 type WAShim struct {
-	cfg     WAShimConfig
-	active  atomic.Int64
-	cache   waCache
-	log     *slog.Logger
+	cfg    WAShimConfig
+	active atomic.Int64
+	cache  waCache
+	log    *slog.Logger
 }
 
 type waCache struct {
@@ -159,7 +159,7 @@ func (s *WAShim) Serve(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("wa-shim: listen %s: %w", addr, err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	s.log.Info("wa-shim listening", "addr", addr, "backend", s.cfg.Backend, "allow", s.cfg.AllowCIDR)
 
 	go func() {
@@ -192,7 +192,7 @@ func (s *WAShim) Serve(ctx context.Context) error {
 func (s *WAShim) ActiveConnections() int64 { return s.active.Load() }
 
 func (s *WAShim) handle(ctx context.Context, conn net.Conn) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	source := peerHost(conn)
 	first, _ := peek(conn, 8, s.cfg.PeekTimeout)
@@ -216,7 +216,7 @@ func (s *WAShim) handle(ctx context.Context, conn net.Conn) {
 // peek() early-exit heuristics on 2-4 bytes of WA prefix data.
 func peek(conn net.Conn, n int, timeout time.Duration) ([]byte, error) {
 	_ = conn.SetReadDeadline(time.Now().Add(timeout))
-	defer conn.SetReadDeadline(time.Time{})
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
 
 	buf := make([]byte, 0, n)
 	tmp := make([]byte, n)
@@ -318,7 +318,7 @@ func (s *WAShim) relay(ctx context.Context, client net.Conn, upstreamAddr string
 	if err != nil {
 		return false
 	}
-	defer up.Close()
+	defer func() { _ = up.Close() }()
 	if len(first) > 0 {
 		if _, err := up.Write(first); err != nil {
 			return false

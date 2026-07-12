@@ -61,7 +61,7 @@ func newUpstreamHarness(t *testing.T) *upstreamHarness {
 // answerWith replies to every framed query with rcode+answer after delay.
 func (h *upstreamHarness) answerWith(delay time.Duration, rcode int, a net.IP) func(context.Context, net.Conn) {
 	return func(ctx context.Context, server net.Conn) {
-		defer server.Close()
+		defer func() { _ = server.Close() }()
 		for {
 			var hdr [2]byte
 			if _, err := io.ReadFull(server, hdr[:]); err != nil {
@@ -102,10 +102,10 @@ func (h *upstreamHarness) answerWith(delay time.Duration, rcode int, a net.IP) f
 // blackhole reads the query and never responds. Server closes on ctx.Done.
 func (h *upstreamHarness) blackhole() func(context.Context, net.Conn) {
 	return func(ctx context.Context, server net.Conn) {
-		defer server.Close()
+		defer func() { _ = server.Close() }()
 		go func() {
 			<-ctx.Done()
-			server.Close()
+			_ = server.Close()
 		}()
 		// Keep reading so the client's Write doesn't block on a full
 		// pipe buffer.
@@ -244,6 +244,140 @@ func TestUpstreamRace_AllFail(t *testing.T) {
 	}
 }
 
+func TestUpstreamRace_TimeoutRedialsOnImmediateRetry(t *testing.T) {
+	h := newUpstreamHarness(t)
+	h.up.CN = []string{"blackhole.cn:853"}
+	h.up.Timeout = 30 * time.Millisecond
+
+	var generations atomic.Int64
+	h.perAddr["blackhole.cn:853"] = func(ctx context.Context, server net.Conn) {
+		defer func() { _ = server.Close() }()
+		generation := generations.Add(1)
+		msg, err := readFramed(server)
+		if err != nil {
+			return
+		}
+		if generation == 1 {
+			// Keep the first connection silent until the client retires it.
+			buf := make([]byte, 1)
+			_, _ = server.Read(buf)
+			return
+		}
+		resp := new(dns.Msg)
+		resp.SetReply(msg)
+		_ = writeFramed(server, resp)
+	}
+
+	if _, _, err := h.up.Query(context.Background(), makeQuery("first.example", dns.TypeA), "direct"); err == nil {
+		t.Fatal("blackholed first query returned nil error")
+	}
+	h.up.Timeout = time.Second
+	if _, _, err := h.up.Query(context.Background(), makeQuery("second.example", dns.TypeA), "direct"); err != nil {
+		t.Fatalf("immediate retry after blackhole: %v", err)
+	}
+	if got := h.dialCount.Load(); got != 2 {
+		t.Fatalf("dial count = %d, want 2", got)
+	}
+}
+
+func TestUpstreamRace_TimeoutDoesNotRetireReplacementGeneration(t *testing.T) {
+	h := newUpstreamHarness(t)
+	const (
+		target = "target.cn:853"
+		other  = "other.cn:853"
+	)
+	h.up.CN = []string{target, other}
+	h.up.Timeout = 180 * time.Millisecond
+	h.up.FallbackDelay = time.Second
+
+	firstRead := make(chan struct{})
+	firstClosed := make(chan struct{})
+	secondRead := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	var targetGeneration atomic.Int64
+	h.perAddr[target] = func(ctx context.Context, server net.Conn) {
+		defer func() { _ = server.Close() }()
+		switch targetGeneration.Add(1) {
+		case 1:
+			if _, err := readFramed(server); err != nil {
+				return
+			}
+			close(firstRead)
+			for {
+				if _, err := readFramed(server); err != nil {
+					close(firstClosed)
+					return
+				}
+			}
+		case 2:
+			msg, err := readFramed(server)
+			if err != nil {
+				return
+			}
+			close(secondRead)
+			select {
+			case <-releaseSecond:
+			case <-ctx.Done():
+				return
+			}
+			resp := new(dns.Msg)
+			resp.SetReply(msg)
+			_ = writeFramed(server, resp)
+		}
+	}
+	h.perAddr[other] = h.blackhole()
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, _, err := h.up.Query(context.Background(), makeQuery("first.example", dns.TypeA), "direct")
+		firstDone <- err
+	}()
+	waitSignal(t, firstRead, "first target query")
+
+	shortCtx, shortCancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	_, shortErr := h.up.queryOne(shortCtx, target, makeQuery("retire.example", dns.TypeA))
+	shortCancel()
+	if !errors.Is(shortErr, context.DeadlineExceeded) {
+		t.Fatalf("short query error = %v, want deadline exceeded", shortErr)
+	}
+	waitSignal(t, firstClosed, "first target generation retirement")
+
+	type queryResult struct {
+		msg *dns.Msg
+		err error
+	}
+	secondDone := make(chan queryResult, 1)
+	secondCtx, secondCancel := context.WithTimeout(context.Background(), time.Second)
+	defer secondCancel()
+	go func() {
+		msg, err := h.up.queryOne(secondCtx, target, makeQuery("second.example", dns.TypeA))
+		secondDone <- queryResult{msg: msg, err: err}
+	}()
+	waitSignal(t, secondRead, "replacement target query")
+
+	select {
+	case err := <-firstDone:
+		if err == nil {
+			t.Fatal("timed-out multi-upstream query returned nil error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed-out multi-upstream query did not return")
+	}
+	close(releaseSecond)
+
+	select {
+	case got := <-secondDone:
+		if got.err != nil {
+			t.Fatalf("replacement generation was retired by older timeout: %v", got.err)
+		}
+		if got.msg == nil || got.msg.Rcode != dns.RcodeSuccess {
+			t.Fatalf("replacement response = %+v", got.msg)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("replacement generation query did not return")
+	}
+}
+
 // TestUpstreamRace_PipelinedQueriesShareConn — five concurrent queries
 // to the same addr must reuse the single multiplexed dotConn (dialCount
 // stays at 1 across the burst). RFC 7858 pipelining lets us amortize
@@ -296,7 +430,7 @@ func TestUpstreamRace_ReconnectsAfterDrop(t *testing.T) {
 
 	answered := atomic.Int64{}
 	h.perAddr["flap.cn:853"] = func(ctx context.Context, server net.Conn) {
-		defer server.Close()
+		defer func() { _ = server.Close() }()
 		// Answer the first query, then close to simulate a drop.
 		var hdr [2]byte
 		if _, err := io.ReadFull(server, hdr[:]); err != nil {
@@ -318,9 +452,12 @@ func TestUpstreamRace_ReconnectsAfterDrop(t *testing.T) {
 		packed, _ := m.Pack()
 		var out [2]byte
 		binary.BigEndian.PutUint16(out[:], uint16(len(packed)))
+		// Count the response attempt before writing. net.Pipe can wake the
+		// client reader before the server goroutine resumes after Write, so
+		// incrementing afterwards makes the assertion scheduler-dependent.
+		answered.Add(1)
 		_, _ = server.Write(out[:])
 		_, _ = server.Write(packed)
-		answered.Add(1)
 	}
 	h.perAddr["fb.proxy:853"] = h.blackhole()
 
@@ -338,5 +475,118 @@ func TestUpstreamRace_ReconnectsAfterDrop(t *testing.T) {
 	}
 	if h.dialCount.Load() < 2 {
 		t.Fatalf("dialCount = %d, want >=2 (redial occurred)", h.dialCount.Load())
+	}
+}
+
+func TestDotConn_StaleReaderOnlyFailsItsGeneration(t *testing.T) {
+	oldClient, oldServer := net.Pipe()
+	newClient, newServer := net.Pipe()
+	defer func() { _ = oldServer.Close() }()
+	defer func() { _ = newServer.Close() }()
+
+	oldWaiter := make(chan *dns.Msg, 1)
+	newWaiter := make(chan *dns.Msg, 1)
+	c := newDotConn("upstream:853", nil, nil)
+	c.conn = newClient
+	c.pending[1] = pendingQuery{conn: oldClient, ch: oldWaiter}
+	c.pending[2] = pendingQuery{conn: newClient, ch: newWaiter}
+	t.Cleanup(c.close)
+
+	c.terminate(oldClient, io.EOF)
+
+	select {
+	case got := <-oldWaiter:
+		if got != nil {
+			t.Fatalf("old generation waiter received %v, want nil", got)
+		}
+	default:
+		t.Fatal("old generation waiter was not released")
+	}
+	select {
+	case <-newWaiter:
+		t.Fatal("stale reader released a waiter owned by the new connection")
+	default:
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conn != newClient {
+		t.Fatal("stale reader cleared the active replacement connection")
+	}
+	if pending, ok := c.pending[2]; !ok || pending.conn != newClient {
+		t.Fatal("new connection's pending query was removed")
+	}
+}
+
+func TestDotConn_IDCapacityDoesNotOverwritePendingQuery(t *testing.T) {
+	client, server := net.Pipe()
+	defer func() { _ = server.Close() }()
+	c := newDotConn("full:853", nil, nil)
+	c.conn = client
+	sharedWaiter := make(chan *dns.Msg, 1)
+	for i := 0; i < 1<<16; i++ {
+		c.pending[uint16(i)] = pendingQuery{conn: client, ch: sharedWaiter}
+	}
+	defer c.close()
+
+	_, _, _, err := c.register(context.Background())
+	if !errors.Is(err, ErrDoTQueryCapacity) {
+		t.Fatalf("register error = %v, want ErrDoTQueryCapacity", err)
+	}
+	if got := len(c.pending); got != 1<<16 {
+		t.Fatalf("pending size = %d, want 65536", got)
+	}
+	if pending := c.pending[c.nextID]; pending.conn != client || pending.ch != sharedWaiter {
+		t.Fatal("capacity exhaustion overwrote an existing pending query")
+	}
+}
+
+func TestDotConn_DeadlineRetiresBlackholedConnection(t *testing.T) {
+	var dials atomic.Int64
+	dial := func(context.Context, string) (net.Conn, error) {
+		client, server := net.Pipe()
+		if dials.Add(1) == 1 {
+			go func() {
+				defer func() { _ = server.Close() }()
+				_, _ = io.Copy(io.Discard, server)
+			}()
+			return client, nil
+		}
+		go func() {
+			defer func() { _ = server.Close() }()
+			msg, err := readFramed(server)
+			if err != nil {
+				return
+			}
+			resp := new(dns.Msg)
+			resp.SetReply(msg)
+			_ = writeFramed(server, resp)
+		}()
+		return client, nil
+	}
+
+	c := newDotConn("blackhole:853", dial, nil)
+	t.Cleanup(c.close)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if _, err := c.query(ctx, makeQuery("first.example", dns.TypeA)); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first query error = %v, want deadline exceeded", err)
+	}
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Second)
+	defer cancel2()
+	if _, err := c.query(ctx2, makeQuery("second.example", dns.TypeA)); err != nil {
+		t.Fatalf("second query after blackhole: %v", err)
+	}
+	if got := dials.Load(); got != 2 {
+		t.Fatalf("dial count = %d, want 2 after blackholed connection retirement", got)
+	}
+}
+
+func waitSignal(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for %s", what)
 	}
 }

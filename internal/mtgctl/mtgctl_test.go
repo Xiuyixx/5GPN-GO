@@ -182,6 +182,15 @@ func TestController_Status_NotInstalled(t *testing.T) {
 	}
 }
 
+func TestControllerStatusPropagatesSystemctlFailure(t *testing.T) {
+	stubStat(t, true)
+	var sink []captured
+	fakeExec(t, &sink, "systemd unavailable\n", true)
+	if _, err := New("", "", "", nil).Status(context.Background()); err == nil {
+		t.Fatal("unexpected systemctl failure was swallowed")
+	}
+}
+
 func TestController_GenerateSecret_ArgvAndReturn(t *testing.T) {
 	stubStat(t, true)
 	var sink []captured
@@ -317,6 +326,54 @@ func TestWriteUnit_EmptySecretRejected(t *testing.T) {
 	if err := c.WriteUnit(context.Background(), "0.0.0.0:2443", ""); err == nil {
 		t.Fatalf("WriteUnit accepted empty secret")
 	}
+}
+
+func TestWriteUnitReloadFailureRestoresPreviousFile(t *testing.T) {
+	dir := t.TempDir()
+	unitPath := filepath.Join(dir, "mtg.service")
+	old := []byte("[Service]\nExecStart=/usr/local/bin/mtg run --bind :2443 OLDSECRET\n")
+	if err := os.WriteFile(unitPath, old, 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	prev := execCommandContext
+	var calls int
+	execCommandContext = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		calls++
+		if calls == 1 {
+			return exec.CommandContext(ctx, "sh", "-c", "exit 3")
+		}
+		return exec.CommandContext(ctx, "sh", "-c", "exit 0")
+	}
+	t.Cleanup(func() { execCommandContext = prev })
+
+	c := &Controller{BinaryPath: "/usr/local/bin/mtg", UnitName: "mtg.service", UnitFile: unitPath}
+	err := c.WriteUnit(context.Background(), ":2443", "NEWSECRET")
+	if err == nil {
+		t.Fatal("daemon-reload failure was swallowed")
+	}
+	got, readErr := os.ReadFile(unitPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != string(old) {
+		t.Fatalf("unit was not restored:\n%s", got)
+	}
+	if mode := fileMode(t, unitPath); mode != 0o640 {
+		t.Fatalf("restored mode=%#o, want 0640", mode)
+	}
+	if calls != 2 {
+		t.Fatalf("daemon-reload calls=%d, want failed reload + restored reload", calls)
+	}
+}
+
+func fileMode(t *testing.T, path string) os.FileMode {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Mode().Perm()
 }
 
 func TestParseExecStart_Variants(t *testing.T) {

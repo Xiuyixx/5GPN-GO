@@ -1,9 +1,9 @@
 # Legacy `tgbot.py` command & callback inventory
 
-**Source:** [../5GPN-X/tgbot.py](../5GPN-X/tgbot.py) (1408 LoC, single file).
-**Purpose:** AC8 sub-checklist. Everything the legacy bot could do must
-have an equivalent in the new `internal/tgbot` handlers so we can prove
-parity before removing the Python bot.
+**Source:** local-only `5GPN-X/tgbot.py` when that excluded nested repository is
+present (1,408 lines at the audit baseline). It is not shipped by this repo.
+**Purpose:** historical migration inventory and an explicit record of which
+verbs are, and are not, implemented by the current Go bot.
 
 Legacy dispatch is hand-rolled: no `python-telegram-bot` framework, no
 `CommandHandler` / `CallbackQueryHandler` registrations. The main loop
@@ -106,42 +106,36 @@ invalid indexes bounce back to `policy_menu()`.
 
 ---
 
-## 6. New-panel parity checklist
+## 6. Current Go bot coverage
 
 | Legacy verb | New surface |
 |-------------|-------------|
-| `/id` | `internal/tgbot/handlers_default.go` — public `/id` |
-| `/status` | `internal/tgbot` `/status` + panel Dashboard |
-| `/exits` | `internal/tgbot` `/exits` + panel Exits page |
-| `/rules` | `internal/tgbot` `/rules` + panel Rules page |
-| `menu:*` | Not applicable in the first-cut Go bot (text-command first); inline keyboards deferred to a later polish pass. |
-| `rules:set / add / addset / del` | Panel Rules CRUD + `POST /api/v1/rules/apply`; bot `/rules_replace`, `/rules_add`, `/rules_addset`, `/rules_del`. |
-| `exit_add / exit:* / exitdel:* / exits:check` | Panel Exits page + `/api/v1/exits/add|switch|delete`; bot `/exit_add`, `/exit_switch`, `/exit_del`, `/exits_check`. |
-| `dot:*` | Panel Settings page (M2) + `internal/ios/profile.go` regenerate hook; bot `/dot_status`, `/dot_domain`, `/dot_dns_remote`, `/dot_dns_local`, `/dot_force_domain`. |
-| `act:update_rules / renew / restart` | Panel Rules apply + Snapshots restart + Settings renew; bot `/update_rules`, `/renew`, `/restart`. |
-| `act:ios` | Panel iOS profile download (`GET /api/v1/ios/profile`); bot `/ios_qr`. |
-| `logs:<svc>` | Panel Logs page (SSE journalctl); bot `/logs <svc>`. |
-| `pol:* / ps:*` | Panel Rules page policy column + `POST /api/v1/rules/apply`; bot `/policy_set <cat> <target>`. |
+| `/id` | Implemented and public; returns only the caller's own chat ID. |
+| `/start`, `/menu`, `/help` | Implemented. `/menu` has inline buttons for current read-only commands. |
+| `/status`, `/exits`, `/rules` | Implemented. `/exits add|switch|del` provides the current mutation subset. |
+| `/a`, `/dev`, `/ip`, `/json`, `/loadavg`, `/meminfo`, `/nf_conntrack_count`, `/route`, `/stat`, `/tcp`, `/uptime`, `/wireguard`, `/www` | Implemented diagnostics. `/ip` reports direct host egress, not a selected-exit proof. |
+| Legacy rule editing/ruleset sync | Not implemented in the bot; use the panel Rules surface. |
+| Legacy DoT mutation/certificate renewal | Not implemented in the bot. |
+| Legacy service restart/log viewing | Not implemented in the bot; the panel exposes separate restart and Logs surfaces. |
+| Legacy iOS QR upload | Not implemented; the panel serves `/ios-dot.mobileconfig`. |
+| Legacy policy-map and exit connectivity probe | Not implemented in the bot. |
 
-**Deferred (post-M4, tracked in tech-debt):**
-
-- Inline-keyboard menu system (all `menu:*` and multi-step edit flows).
-  The new bot ships with text commands only; UI polish is not blocking
-  AC8 parity.
-- `LAST_FAILED_DOT_DOMAIN` recovery flow (`dot:force_domain`) is present
-  in the new bot as an explicit `/dot_force_domain <domain>` argument
-  rather than a callback that reads chat-local state.
+The Go bot therefore does **not** have full legacy command parity. The
+authoritative command list is `internal/tgbot/handlers.go:DispatchCommands`;
+unknown slash commands return the `/menu` hint rather than invoking a hidden
+handler.
 
 ---
 
 ## 7. Auth model differences
 
-- Legacy: `TG_ADMIN_IDS` env, comma-separated numeric ids. `/id` always
-  allowed for bootstrap. Unauthorized replies "⛔ 未授权。".
-- New: `config.tgbot.admin_chat_ids` YAML list + optional
-  `--admin-chat-id` installer flag. Empty list is a hard start-up refusal
-  ([internal/tgbot/bot.go](../internal/tgbot/bot.go)). Auth failure lands
-  in `audit_log` with `actor=chat_id` and `action=tgbot.reject`.
+- Legacy: `TG_ADMIN_IDS` env, comma-separated numeric ids. `/id` was public.
+- Current Go bot: YAML plus SQLite-layered `tgbot.admin_chat_ids`; there is no
+  installer `--admin-chat-id` flag. A token with an empty whitelist is a hard
+  bot-start refusal. `/id` is public for enrollment; every other command and
+  callback requires the whitelist.
+- Rejected messages are silent and append audit action
+  `tgbot.unauthorized`, actor `tgbot:<username>`, target `<chat_id>`.
 
 ---
 

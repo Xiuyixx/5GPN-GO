@@ -13,8 +13,8 @@
 # Env overrides
 #   GPN_REPO      Github repo               (default: Xiuyixx/5GPN-GO)
 #   GPN_VERSION   Release tag               (default: latest)
-#   GPN_PREFIX    Install root              (default: system-wide via installer)
-#   GPN_TMPDIR    Staging dir for downloads (default: mktemp -d)
+#   GPN_PREFIX    Unsupported here; use installer --root for controlled tests
+#   GPN_TMPDIR    Parent for private staging (default: TMPDIR or /tmp)
 #   GPN_NO_COLOR  Set to 1 to disable ANSI  (default: color on TTY)
 #   GPN_INSECURE  Set to 1 to skip TLS verify on GitHub fetches (dev only)
 
@@ -65,6 +65,12 @@ if [ "${GPN_INSECURE:-0}" = "1" ]; then
     warn "GPN_INSECURE=1 — skipping TLS verify on GitHub fetches. Do not use in production."
 fi
 
+if [ -n "$PREFIX" ]; then
+	die "GPN_PREFIX is not supported by the one-shot production installer." \
+		"The Go installer's --root mode is for controlled dry-runs/tests; a real" \
+		"gateway still needs host users, ownership, systemd, ports, and network access."
+fi
+
 # --------------------------------------------------------------------
 # Banner
 # --------------------------------------------------------------------
@@ -88,7 +94,7 @@ EOF
 step "Preflight: checking required commands / 环境依赖"
 
 missing=()
-for tool in curl uname tar; do
+for tool in curl uname tar mktemp; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         missing+=("$tool")
     fi
@@ -136,15 +142,13 @@ good "target: ${os}-${arch}"
 step "Preflight: privileges + disk / 权限与磁盘"
 
 if [ "$os" = "linux" ] && [ "$(id -u)" -ne 0 ]; then
-    if [ -n "$PREFIX" ]; then
-        info "not root, but GPN_PREFIX=${PREFIX} is set — will attempt a rootless install."
-    elif command -v sudo >/dev/null 2>&1; then
+	if command -v sudo >/dev/null 2>&1; then
         info "not root — this script will re-exec the installer under sudo."
     else
         die "not root and 'sudo' is not available." \
-            "Either run as root:  sudo bash -c \"\$(curl -fsSL ...)\"" \
-            "Or set GPN_PREFIX to a writable path for a rootless install:" \
-            "  GPN_PREFIX=\$HOME/5gpn curl -fsSL ... | bash"
+			"Run as root:  sudo bash -c \"\$(curl -fsSL ...)\"" \
+			"For an unprivileged development boot, build from source and use" \
+			"  5gpn --orchestrator=noop --listen 127.0.0.1:8443 --insecure"
     fi
 fi
 
@@ -164,14 +168,12 @@ good "privileges + disk look OK"
 
 step "Preflight: network reachability / 网络连通性"
 
-if ! curl "${CURL_OPTS[@]}" -o /dev/null -w '%{http_code}' https://api.github.com/rate_limit >/tmp/gpn_gh_probe 2>&1; then
-    die "cannot reach api.github.com" \
+if ! gh_code=$(curl "${CURL_OPTS[@]}" -o /dev/null -w '%{http_code}' https://api.github.com/rate_limit); then
+	die "cannot reach api.github.com" \
         "Check outbound HTTPS: curl -v https://api.github.com/rate_limit" \
         "In mainland China, a proxy / mirror may be required:" \
         "  HTTPS_PROXY=http://127.0.0.1:7890 curl -fsSL ... | bash"
 fi
-gh_code=$(cat /tmp/gpn_gh_probe 2>/dev/null || echo "")
-rm -f /tmp/gpn_gh_probe
 if [ "$gh_code" != "200" ] && [ "$gh_code" != "403" ]; then
     warn "GitHub API returned HTTP ${gh_code} (rate-limited or unusual). Continuing anyway."
 fi
@@ -205,8 +207,15 @@ good "installing ${C_BOLD}${tag}${C_RST}"
 
 step "Downloading binaries + checksums / 下载"
 
-tmpdir="${GPN_TMPDIR:-$(mktemp -d)}"
-trap 'rm -rf "$tmpdir"' EXIT
+staging_parent="${GPN_TMPDIR:-${TMPDIR:-/tmp}}"
+if [ ! -d "$staging_parent" ] || [ ! -w "$staging_parent" ]; then
+	die "staging parent is not a writable directory: ${staging_parent}" \
+		"Set GPN_TMPDIR to an existing private or system temporary directory."
+fi
+tmpdir=$(mktemp -d "${staging_parent%/}/5gpn-install.XXXXXX")
+chmod 700 "$tmpdir"
+cleanup() { rm -rf -- "$tmpdir"; }
+trap cleanup EXIT
 info "staging in ${tmpdir}"
 
 installer_asset="5gpn-installer-${os}-${arch}"
@@ -271,23 +280,22 @@ chmod +x "${tmpdir}/${installer_asset}" "${tmpdir}/${daemon_asset}"
 step "Running installer / 执行安装"
 
 install_flags=(--source-binary "${tmpdir}/${daemon_asset}")
-if [ -n "$PREFIX" ]; then
-    install_flags+=(--root "$PREFIX")
-fi
 
 # Re-invoke under sudo if we're not root on Linux system-wide installs.
-if [ "$os" = "linux" ] && [ "$(id -u)" -ne 0 ] && [ -z "$PREFIX" ]; then
+installed_via_sudo=0
+if [ "$os" = "linux" ] && [ "$(id -u)" -ne 0 ]; then
     info "elevating with sudo (you may be prompted for a password)"
-    if ! exec sudo "${tmpdir}/${installer_asset}" install "${install_flags[@]}" "$@"; then
+    if ! sudo "${tmpdir}/${installer_asset}" install "${install_flags[@]}" "$@"; then
         die "sudo installer failed" \
             "See installer output above. Common fixes:" \
             "  - systemctl daemon-reload; systemctl status 5gpn" \
             "  - inspect /etc/5gpn/config.yaml — port 80/443 already in use?" \
             "  - re-run with GPN_VERSION pinned to a known-good tag"
     fi
+    installed_via_sudo=1
 fi
 
-if ! "${tmpdir}/${installer_asset}" install "${install_flags[@]}" "$@"; then
+if [ "$installed_via_sudo" -eq 0 ] && ! "${tmpdir}/${installer_asset}" install "${install_flags[@]}" "$@"; then
     die "installer step failed" \
         "See the last lines of installer output for the specific error." \
         "If it's about port 80/443 being taken, stop caddy/nginx/apache first:" \
@@ -314,7 +322,7 @@ if [ "$os" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
 
     # Loopback health probe — try HTTPS first, HTTP fallback.
     port=$(sed -n 's/^ *panel_port: *\([0-9]*\).*/\1/p' /etc/5gpn/config.yaml 2>/dev/null | head -n1 || echo "")
-    port="${port:-443}"
+    port="${port:-8443}"
     if curl -sk --max-time 3 "https://127.0.0.1:${port}/api/v1/health" | grep -q '"ok":true'; then
         good "panel responds on https://127.0.0.1:${port}/api/v1/health"
     elif curl -s --max-time 3 "http://127.0.0.1:${port}/api/v1/health" | grep -q '"ok":true'; then
@@ -338,8 +346,10 @@ ${C_GRN}${C_BOLD}✓ Install complete / 安装完成${C_RST}
 ${C_BOLD}Next steps / 下一步${C_RST}
   1. Read the setup token in /var/log/syslog or:
        ${C_DIM}journalctl -u 5gpn -n 100 | grep -A2 'SETUP TOKEN'${C_RST}
-  2. Open ${C_CYN}https://<your-domain>/${C_RST} in a browser
-  3. Claim the panel with the token, then run the wizard.
+  2. The fresh panel is loopback-only. From your workstation, open a tunnel:
+       ${C_DIM}ssh -L 8443:127.0.0.1:8443 root@<server-ip>${C_RST}
+  3. Open ${C_CYN}http://127.0.0.1:8443/${C_RST}, claim the panel, then configure
+     the public domain and HTTPS in the wizard before changing panel_bind.
 
 ${C_BOLD}If HTTPS is broken / 如果 HTTPS 打不开${C_RST}
   ${C_DIM}- confirm your DNS A record points at this box${C_RST}

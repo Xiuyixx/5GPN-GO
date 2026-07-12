@@ -8,7 +8,8 @@ import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
 import { Alert, AlertBody, AlertTitle } from '../components/ui/alert';
 import { api } from '../api/client';
-import type { Snapshot, SnapshotsResponse } from '../api/client';
+import { settleRollback } from '../api/apply';
+import type { PendingApplyResponse, RollbackResponse, Snapshot, SnapshotsResponse } from '../api/client';
 
 export default function Snapshots() {
   const { t } = useTranslation();
@@ -32,7 +33,8 @@ export default function Snapshots() {
     if (!confirm(t('snapshots.rollbackConfirm', { id, hash: hash.slice(0, 12) }))) return;
     setErr(null); setBusy(id); setOk(null);
     try {
-      await api.post(`/api/v1/snapshots/${id}/rollback`);
+      const response = await api.post<RollbackResponse | PendingApplyResponse>(`/api/v1/snapshots/${id}/rollback`);
+      await settleRollback(response);
       setOk(t('snapshots.rollbackSuccess', { id }));
       await refresh();
     } catch (e) {
@@ -92,9 +94,16 @@ export default function Snapshots() {
                 <TableCell><code className="text-xs">{s.config_hash.slice(0, 12)}…</code></TableCell>
                 <TableCell>{s.note || '—'}</TableCell>
                 <TableCell className="flex justify-end gap-2">
-                  {i === 0
-                    ? <Badge color="lime">{t('snapshots.currentBadge')}</Badge>
-                    : <Button plain disabled={busy === s.id} onClick={() => rollback(s.id, s.config_hash)}>{t('snapshots.rollbackAction')}</Button>}
+                  <div className="flex items-center justify-end gap-2">
+                    {i === 0 && <Badge color="zinc">{t('snapshots.latestBadge')}</Badge>}
+                    {s.active
+                      ? <Badge color="lime">{t('snapshots.currentBadge')}</Badge>
+                      : s.rollbackable
+                        ? <Button plain disabled={busy === s.id} onClick={() => rollback(s.id, s.config_hash)}>
+                          {busy === s.id ? t('snapshots.rollbackPending') : t('snapshots.rollbackAction')}
+                        </Button>
+                        : <Badge color="zinc">{t('snapshots.notRollbackableBadge')}</Badge>}
+                  </div>
                 </TableCell>
               </TableRow>
             ))}

@@ -58,8 +58,9 @@ func (r *Resolver) SetSpoofPolicy(p *SpoofPolicy) {
 // closed. scope=all ignores client entirely.
 //
 // Behavior:
-//   - AXFR/IXFR (or any query with no Question section that would race for
-//     one) is refused before classification (RFC 5936, plan Missing #2).
+//   - AXFR/IXFR is refused before classification (RFC 5936, plan Missing #2).
+//     A request with zero or multiple Questions gets FORMERR: one routing
+//     decision cannot safely represent several independently classified names.
 //   - EDNS0 client-subnet is stripped from a defensive copy of req before
 //     the upstream ever sees it (plan §4 Phase 1 R14 mitigation).
 //   - EDNS0 UDP payload size is clamped to 1232 (DNS Flag Day 2020 / plan
@@ -83,7 +84,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, client net.IP) (*d
 		r.Metrics.IncRefusedAXFR()
 		return refusedReply(req), nil
 	}
-	if len(req.Question) == 0 {
+	if len(req.Question) != 1 {
 		return formatErrorReply(req), nil
 	}
 

@@ -88,130 +88,21 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-type updateApplyResponse struct {
-	Version         string `json:"version"`
-	Checksum        string `json:"checksum"`
-	Applied         bool   `json:"applied"`
-	RestartRequired bool   `json:"restart_required"`
-}
-
-// handleUpdateApply downloads the latest release asset, verifies its
-// sha256, and swaps it over the running binary via updater.Swap
-// (synchronous — no progress polling). If systemd restart is configured
-// the process may exit before the response reaches the client; the panel
-// UI handles this by polling /api/v1/health.
+// handleUpdateApply is deliberately fail-closed. A daemon cannot safely
+// replace and restart itself while also being the only process capable of
+// health-checking and restoring the previous binary. Upgrades must be driven
+// by the external installer/supervisor, which remains alive across restart.
 func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 	if s.Updater.Client == nil {
 		writeError(w, http.StatusServiceUnavailable, "updater_disabled", "updater is not configured")
 		return
 	}
-	if s.Updater.BinaryPath == "" {
-		writeError(w, http.StatusServiceUnavailable, "updater_disabled", "binary_path is not configured")
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
-	defer cancel()
-
-	rel, err := s.Updater.Client.Latest(ctx)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "github_error", err.Error())
-		return
-	}
-
-	suffix := updater.ArtifactSuffix()
-	asset, err := updater.FindAsset(rel, suffix)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "no_asset", err.Error())
-		return
-	}
-
-	checksum, _ := updater.ExtractSha256(rel.Body, asset.Name)
-	if checksum == "" {
-		if sums := findSumsAsset(rel); sums != nil {
-			checksum, _ = fetchSumForAsset(ctx, s.Updater.Client, sums, asset.Name)
-		}
-	}
-	if checksum == "" {
-		_ = db.AppendAudit(s.DB, db.AuditEntry{
-			Actor: actorFromCtx(r), Action: "update.apply", Target: rel.TagName,
-			Result: "no_checksum", After: asset.Name, IP: clientIP(r),
-		})
-		writeError(w, http.StatusFailedDependency, "no_checksum", "release did not publish a sha256 for this asset")
-		return
-	}
-
-	newPath := s.Updater.BinaryPath + ".new"
-	if _, err := s.Updater.Client.Download(ctx, asset, newPath, checksum); err != nil {
-		_ = db.AppendAudit(s.DB, db.AuditEntry{
-			Actor: actorFromCtx(r), Action: "update.apply", Target: rel.TagName,
-			Result: "download_error", After: err.Error(), IP: clientIP(r),
-		})
-		writeError(w, http.StatusBadGateway, "download_error", err.Error())
-		return
-	}
-
-	// Phase 1: swap files synchronously. Unit="" tells Swap to skip its
-	// internal systemctl call — the daemon cannot block on
-	// `systemctl restart 5gpn` when it IS 5gpn: systemctl waits for the
-	// old process to exit, but the old process is stuck in this handler.
-	// We do the file-level swap here and defer the actual restart to a
-	// post-response goroutine below.
-	err = updater.Swap(ctx, updater.SwapOptions{
-		CurrentPath: s.Updater.BinaryPath,
-		NewPath:     newPath,
-		Unit:        "",
-	})
-	if err != nil {
-		_ = db.AppendAudit(s.DB, db.AuditEntry{
-			Actor: actorFromCtx(r), Action: "update.apply.rolled_back", Target: rel.TagName,
-			Result: "swap_failed", After: err.Error(), IP: clientIP(r),
-		})
-		writeError(w, http.StatusInternalServerError, "swap_failed", err.Error())
-		return
-	}
-
 	_ = db.AppendAudit(s.DB, db.AuditEntry{
-		Actor:  actorFromCtx(r),
-		Action: "update.apply",
-		Target: rel.TagName,
-		Before: s.Updater.Version,
-		After:  asset.Name,
-		Result: "ok",
-		IP:     clientIP(r),
+		Actor: actorFromCtx(r), Action: "update.apply.refused",
+		Target: s.Updater.Version, Result: "external_supervisor_required", IP: clientIP(r),
 	})
-	writeJSON(w, http.StatusOK, updateApplyResponse{
-		Version:         rel.TagName,
-		Checksum:        checksum,
-		Applied:         true,
-		RestartRequired: true,
-	})
-	// Best-effort flush so the client receives the response before we
-	// queue the restart — otherwise systemd may SIGTERM the daemon
-	// mid-write and the panel sees a connection reset instead of the
-	// success payload.
-	if f, ok := w.(http.Flusher); ok {
-		f.Flush()
-	}
-
-	// Phase 2: kick off the restart out of band. Detached goroutine on
-	// context.Background() so it survives the request ctx being cancelled
-	// when the handler returns. A short delay gives the TCP write above
-	// time to drain to the client before systemd yanks the process. The
-	// systemctl call uses --no-block so it does not deadlock (see
-	// updater.RestartService docs).
-	unit := s.Updater.Unit
-	if unit != "" {
-		logger := s.Logger
-		go func() {
-			time.Sleep(300 * time.Millisecond)
-			restartCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			if err := updater.RestartService(restartCtx, unit); err != nil && logger != nil {
-				logger.Warn("update.apply: RestartService failed", "unit", unit, "err", err)
-			}
-		}()
-	}
+	writeError(w, http.StatusServiceUnavailable, "updater_requires_supervisor",
+		"in-process update is disabled; run the external installer or a privileged supervisor")
 }
 
 func actorFromCtx(r *http.Request) string {
@@ -242,7 +133,7 @@ func fetchSumForAsset(ctx context.Context, c *updater.Client, sums *updater.Asse
 	}
 	tmpPath := tmp.Name()
 	_ = tmp.Close()
-	defer os.Remove(tmpPath)
+	defer func() { _ = os.Remove(tmpPath) }()
 
 	if _, err := c.Download(ctx, sums, tmpPath, ""); err != nil {
 		return "", err

@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -66,6 +67,25 @@ func InsertPanelUser(db *sql.DB, username, bcryptHash string) (int64, error) {
 		return 0, err
 	}
 	return res.LastInsertId()
+}
+
+// InsertFirstPanelUser atomically inserts the bootstrap user only while the
+// table is empty. created=false means another bootstrap request won the race.
+func InsertFirstPanelUser(db *sql.DB, username, bcryptHash string) (id int64, created bool, err error) {
+	res, err := db.Exec(`INSERT INTO panel_users(username, bcrypt_hash)
+		SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM panel_users)`, username, bcryptHash)
+	if err != nil {
+		return 0, false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, false, err
+	}
+	if n == 0 {
+		return 0, false, nil
+	}
+	id, err = res.LastInsertId()
+	return id, true, err
 }
 
 // GetPanelUserByUsername returns a user by username.
@@ -154,16 +174,29 @@ func UpdatePanelUserPassword(db *sql.DB, userID int64, bcryptHash string) error 
 	return err
 }
 
-// InsertSnapshot writes a new snapshot row and returns its id.
+// InsertSnapshot writes a snapshot row and returns its id. Config hashes are
+// unique, so an identical snapshot is idempotently reused.
 func InsertSnapshot(db *sql.DB, s Snapshot) (int64, error) {
 	res, err := db.Exec(
-		`INSERT INTO snapshots(config_hash, tarball_path, note) VALUES(?, ?, ?)`,
+		`INSERT INTO snapshots(config_hash, tarball_path, note) VALUES(?, ?, ?)
+		 ON CONFLICT(config_hash) DO NOTHING`,
 		s.ConfigHash, s.TarballPath, s.Note,
 	)
 	if err != nil {
 		return 0, err
 	}
-	return res.LastInsertId()
+	inserted, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if inserted == 1 {
+		return res.LastInsertId()
+	}
+	var id int64
+	if err := db.QueryRow(`SELECT id FROM snapshots WHERE config_hash = ?`, s.ConfigHash).Scan(&id); err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 // GetSnapshotByID returns a snapshot row.
@@ -185,7 +218,7 @@ func ListSnapshots(db *sql.DB, limit int) ([]Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []Snapshot
 	for rows.Next() {
 		var s Snapshot
@@ -204,7 +237,7 @@ func InsertRuleVersion(db *sql.DB, snapshotID int64, rulesYAML string, setActive
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	if setActive {
 		if _, err := tx.Exec(`UPDATE rule_versions SET active = 0 WHERE active = 1`); err != nil {
@@ -234,14 +267,57 @@ func SetActiveRuleVersion(db *sql.DB, id int64) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.Exec(`UPDATE rule_versions SET active = 0 WHERE active = 1`); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE rule_versions SET active = 1 WHERE id = ?`, id); err != nil {
+	res, err := tx.Exec(`UPDATE rule_versions SET active = 1 WHERE id = ?`, id)
+	if err != nil {
 		return err
 	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n != 1 {
+		return ErrNoRows
+	}
 	return tx.Commit()
+}
+
+// ClearActiveRuleVersion leaves every rule version inactive atomically.
+func ClearActiveRuleVersion(db *sql.DB) error {
+	_, err := db.Exec(`UPDATE rule_versions SET active = 0 WHERE active = 1`)
+	return err
+}
+
+// GetRuleVersionByID returns one rule version by primary key.
+func GetRuleVersionByID(db *sql.DB, id int64) (*RuleVersion, error) {
+	row := db.QueryRow(`SELECT id, snapshot_id, rules_yaml, created_at, active FROM rule_versions WHERE id = ?`, id)
+	var r RuleVersion
+	var active int
+	if err := row.Scan(&r.ID, &r.SnapshotID, &r.RulesYAML, &r.CreatedAt, &active); err != nil {
+		return nil, err
+	}
+	r.Active = active != 0
+	return &r, nil
+}
+
+// GetRuleVersionBySnapshot returns the newest rule version attached to a
+// snapshot. It avoids bounded history scans when rolling back an old snapshot.
+func GetRuleVersionBySnapshot(db *sql.DB, snapshotID int64) (*RuleVersion, error) {
+	row := db.QueryRow(
+		`SELECT id, snapshot_id, rules_yaml, created_at, active
+		   FROM rule_versions
+		  WHERE snapshot_id = ?
+		  ORDER BY id DESC
+		  LIMIT 1`, snapshotID,
+	)
+	var r RuleVersion
+	var active int
+	if err := row.Scan(&r.ID, &r.SnapshotID, &r.RulesYAML, &r.CreatedAt, &active); err != nil {
+		return nil, err
+	}
+	r.Active = active != 0
+	return &r, nil
 }
 
 // GetActiveRuleVersion returns the row where active = 1 (or ErrNoRows).
@@ -265,7 +341,7 @@ func ListRuleVersions(db *sql.DB, limit int) ([]RuleVersion, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []RuleVersion
 	for rows.Next() {
 		var r RuleVersion
@@ -321,7 +397,7 @@ func UpsertRuleSourceETag(db *sql.DB, url, kind, etag string) error {
 }
 
 // ApplyStatus mirrors an apply_status row. State is one of
-// 'submitted' | 'confirmed' | 'rolled_back' (CHECK-constrained in DDL).
+// 'submitted' | 'confirmed' | 'rolled_back' | 'failed' (CHECK-constrained).
 type ApplyStatus struct {
 	ID         int64
 	SnapshotID int64
@@ -332,8 +408,7 @@ type ApplyStatus struct {
 }
 
 // InsertApplyStatus writes a 'submitted' row for a snapshot and returns
-// its id. Applier updates the same row to 'confirmed'/'rolled_back' from
-// the orchestrator's HealthObserver callback.
+// its id. Applier later writes a terminal confirmed/rolled_back/failed state.
 func InsertApplyStatus(db *sql.DB, snapshotID int64, reason string) (int64, error) {
 	res, err := db.Exec(
 		`INSERT INTO apply_status(snapshot_id, state, reason)
@@ -348,13 +423,23 @@ func InsertApplyStatus(db *sql.DB, snapshotID int64, reason string) (int64, erro
 
 // UpdateApplyStatus flips an existing row's state and reason.
 func UpdateApplyStatus(db *sql.DB, id int64, state, reason string) error {
-	_, err := db.Exec(
+	res, err := db.Exec(
 		`UPDATE apply_status
 		   SET state = ?, reason = ?, updated_at = CURRENT_TIMESTAMP
 		 WHERE id = ?`,
 		state, reason, id,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return fmt.Errorf("update apply_status %d: affected %d rows", id, n)
+	}
+	return nil
 }
 
 // LatestApplyStatus returns the most recently updated apply_status row, or
@@ -365,6 +450,25 @@ func LatestApplyStatus(db *sql.DB) (*ApplyStatus, error) {
 		   FROM apply_status
 		  ORDER BY updated_at DESC, id DESC
 		  LIMIT 1`,
+	)
+	var a ApplyStatus
+	if err := row.Scan(&a.ID, &a.SnapshotID, &a.State, &a.Reason, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &a, nil
+}
+
+// ApplyStatusBySnapshot returns the newest lifecycle row for snapshotID.
+func ApplyStatusBySnapshot(db *sql.DB, snapshotID int64) (*ApplyStatus, error) {
+	row := db.QueryRow(
+		`SELECT id, snapshot_id, state, COALESCE(reason,''), created_at, updated_at
+		   FROM apply_status
+		  WHERE snapshot_id = ?
+		  ORDER BY id DESC
+		  LIMIT 1`, snapshotID,
 	)
 	var a ApplyStatus
 	if err := row.Scan(&a.ID, &a.SnapshotID, &a.State, &a.Reason, &a.CreatedAt, &a.UpdatedAt); err != nil {

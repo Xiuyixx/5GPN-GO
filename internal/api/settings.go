@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+
+	"github.com/Xiuyixx/5GPN-Go/internal/settings"
 )
 
 type tgbotStatusResponse struct {
@@ -41,9 +43,9 @@ func (s *Server) handleGetTgbotSettings(w http.ResponseWriter, r *http.Request) 
 // in-process. Empty token = Stop. Returns the new masked status on
 // success.
 func (s *Server) handleUpdateTgbotSettings(w http.ResponseWriter, r *http.Request) {
-	if s.TGBot == nil {
+	if s.TGBot == nil || s.Settings == nil {
 		writeError(w, http.StatusServiceUnavailable, "tgbot_unavailable",
-			"TG bot manager not wired at daemon boot")
+			"TG bot manager or settings store not wired at daemon boot")
 		return
 	}
 	var req tgbotUpdateRequest
@@ -59,8 +61,22 @@ func (s *Server) handleUpdateTgbotSettings(w http.ResponseWriter, r *http.Reques
 			"admin_chat_ids required when token is set")
 		return
 	}
-	if err := s.TGBot.Update(r.Context(), token, req.AdminChatIDs); err != nil {
-		writeError(w, http.StatusBadGateway, "tgbot_update_failed", err.Error())
+	s.settingsMu.Lock()
+	defer s.settingsMu.Unlock()
+	var persistErr error
+	err := s.TGBot.UpdateWithCommit(r.Context(), token, req.AdminChatIDs, func() error {
+		persistErr = s.Settings.SetMany(r.Context(), map[string]any{
+			settings.KeyTGBotToken:      token,
+			settings.KeyTGBotAdminChats: req.AdminChatIDs,
+		}, actorFromCtx(r))
+		return persistErr
+	})
+	if err != nil {
+		if persistErr != nil {
+			writeError(w, http.StatusInternalServerError, "write_error", err.Error())
+		} else {
+			writeError(w, http.StatusBadGateway, "tgbot_update_failed", err.Error())
+		}
 		return
 	}
 	st := s.TGBot.Status()

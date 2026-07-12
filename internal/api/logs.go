@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -33,13 +34,14 @@ func (s *Server) handleLogsSSE(w http.ResponseWriter, r *http.Request) {
 	if unit == "" {
 		unit = "5gpn"
 	}
-	// Basic sanitization — reject anything that looks like a shell arg.
-	for _, c := range unit {
-		if !isUnitChar(c) {
-			writeError(w, http.StatusBadRequest, "bad_unit", "unit must be alphanumeric plus - _ . @")
-			return
-		}
+	if _, ok := allowedLogUnits[unit]; !ok {
+		writeError(w, http.StatusBadRequest, "bad_unit", "unit is not available through the panel")
+		return
 	}
+	// A normal http.Server WriteTimeout is incompatible with an indefinite
+	// SSE response. Clear only this response's deadline; all other routes keep
+	// the server-wide timeout.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -54,6 +56,7 @@ func (s *Server) handleLogsSSE(w http.ResponseWriter, r *http.Request) {
 	// wait on the first log line.
 	flusher.Flush()
 	ctx := r.Context()
+	token := extractBearer(r)
 
 	// Announce the stream so the client has a definite onopen payload.
 	writeSSE(w, flusher, helloFrame(unit))
@@ -86,6 +89,9 @@ func (s *Server) handleLogsSSE(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			return
 		case <-keepalive.C:
+			if _, err := s.Auth.Verify(token); err != nil {
+				return
+			}
 			if _, err := w.Write([]byte(": keepalive\n\n")); err != nil {
 				return
 			}
@@ -96,17 +102,13 @@ func (s *Server) handleLogsSSE(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+var allowedLogUnits = map[string]struct{}{
+	"5gpn": {}, "dnsdist": {}, "mihomo": {}, "sniproxy": {}, "mtg": {},
+}
+
 func writeSSE(w http.ResponseWriter, flusher http.Flusher, line string) {
 	_, _ = w.Write([]byte("data: " + line + "\n\n"))
 	flusher.Flush()
-}
-
-func isUnitChar(c rune) bool {
-	switch {
-	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
-		return true
-	}
-	return c == '-' || c == '_' || c == '.' || c == '@'
 }
 
 // journalctlStream pipes real journalctl JSON events into out. Each SSE
@@ -228,9 +230,20 @@ func stubStream(ctx context.Context, unit string, out chan<- string) {
 				"msg":   "stub log line — journalctl unavailable on this host",
 				"seq":   i,
 			})
-			out <- string(body)
+			if !sendLogFrame(ctx, out, string(body)) {
+				return
+			}
 			i++
 		}
+	}
+}
+
+func sendLogFrame(ctx context.Context, out chan<- string, frame string) bool {
+	select {
+	case out <- frame:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 
@@ -262,7 +275,12 @@ func journalTimestamp(raw map[string]any) string {
 	// journalctl -o json emits __REALTIME_TIMESTAMP as a microsecond epoch.
 	if v, ok := raw["__REALTIME_TIMESTAMP"]; ok {
 		if s := asString(v); s != "" {
-			return s
+			if micros, err := strconv.ParseInt(s, 10, 64); err == nil {
+				const microsPerSecond = int64(time.Second / time.Microsecond)
+				seconds := micros / microsPerSecond
+				nanos := (micros % microsPerSecond) * int64(time.Microsecond)
+				return time.Unix(seconds, nanos).UTC().Format(time.RFC3339Nano)
+			}
 		}
 	}
 	return time.Now().UTC().Format(time.RFC3339Nano)

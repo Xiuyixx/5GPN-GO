@@ -10,6 +10,7 @@ import { Input } from '../components/ui/input';
 import { Field, FieldGroup, Fieldset, Label, Legend } from '../components/ui/fieldset';
 import { Alert, AlertBody, AlertTitle } from '../components/ui/alert';
 import { api } from '../api/client';
+import { settleExitSwitch, type ExitSwitchResponse } from '../api/apply';
 import type { ExitSummary, ExitsResponse } from '../api/client';
 
 export default function Exits() {
@@ -47,10 +48,12 @@ export default function Exits() {
   async function switchExit(target: string) {
     setErr(null);
     try {
-      await api.post('/api/v1/exits/switch', { id: target });
-      await refresh();
+      const response = await api.post<ExitSwitchResponse>('/api/v1/exits/switch', { id: target });
+      await settleExitSwitch(response);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      await refresh();
     }
   }
 

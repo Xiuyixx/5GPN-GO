@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Xiuyixx/5GPN-Go/internal/netguard"
 	"github.com/Xiuyixx/5GPN-Go/internal/rules"
 )
 
@@ -49,7 +50,7 @@ func NewSyncer(store *Store, logger *slog.Logger, opts SyncOptions) *Syncer {
 	return &Syncer{
 		Store:   store,
 		Logger:  logger,
-		Client:  &http.Client{Timeout: opts.Timeout},
+		Client:  netguard.NewHTTPClient(opts.Timeout),
 		Options: opts,
 	}
 }
@@ -68,6 +69,10 @@ func (s *Syncer) SyncOne(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	if _, err := netguard.ValidateHTTPURL(rs.SourceURL); err != nil {
+		_ = s.Store.RecordError(ctx, name, err.Error())
+		return err
+	}
 	req, err := http.NewRequestWithContext(ctx, "GET", rs.SourceURL, nil)
 	if err != nil {
 		return err
@@ -84,7 +89,7 @@ func (s *Syncer) SyncOne(ctx context.Context, name string) error {
 		_ = s.Store.RecordError(ctx, name, err.Error())
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch {
 	case resp.StatusCode == http.StatusNotModified:

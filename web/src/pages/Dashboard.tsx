@@ -8,6 +8,7 @@ import { Divider } from '../components/ui/divider';
 import { api } from '../api/client';
 import type { ExitsResponse, MetricsSample } from '../api/client';
 import DNSPlaneCard from './DashboardDNS';
+import { pollSerially } from '../api/poll';
 
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -46,23 +47,23 @@ export default function Dashboard() {
   const [exits, setExits] = useState<ExitsResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
-  async function refresh() {
-    try {
-      const [m, e] = await Promise.all([
-        api.get<MetricsSample[]>('/api/v1/metrics'),
-        api.get<ExitsResponse>('/api/v1/exits'),
-      ]);
-      setSamples(m);
-      setExits(e);
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-    }
-  }
-
   useEffect(() => {
-    refresh();
-    const t = setInterval(refresh, 5000);
-    return () => clearInterval(t);
+    const controller = new AbortController();
+    void pollSerially(async (signal) => {
+      try {
+        const [m, e] = await Promise.all([
+          api.get<MetricsSample[]>('/api/v1/metrics'),
+          api.get<ExitsResponse>('/api/v1/exits'),
+        ]);
+        if (signal.aborted) return;
+        setSamples(m);
+        setExits(e);
+        setErr(null);
+      } catch (error) {
+        if (!signal.aborted) setErr(error instanceof Error ? error.message : String(error));
+      }
+    }, 5000, controller.signal);
+    return () => controller.abort();
   }, []);
 
   const latest = samples.length ? samples[samples.length - 1] : null;

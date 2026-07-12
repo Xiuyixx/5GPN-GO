@@ -307,15 +307,16 @@ func sniFromClientHello(data []byte) (string, bool) {
 		return "", false
 	}
 	var hs []byte
-	if data[0] == 0x16 { // TLS record
+	switch data[0] {
+	case 0x16: // TLS record
 		recLen := binary.BigEndian.Uint16(data[3:5])
 		if len(data) < 5+int(recLen) {
 			return "", false
 		}
 		hs = data[5 : 5+int(recLen)]
-	} else if data[0] == 0x01 { // raw handshake (QUIC)
+	case 0x01: // raw handshake (QUIC)
 		hs = data
-	} else {
+	default:
 		return "", false
 	}
 	if len(hs) < 4 || hs[0] != 0x01 {

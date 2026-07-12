@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -51,6 +52,10 @@ func (a serverExitAdapter) Switch(ctx context.Context, exitID string) error {
 	return a.inner.Switch(ctx, exitID)
 }
 
+func (a serverExitAdapter) Delete(ctx context.Context, exitID string) error {
+	return a.inner.Delete(ctx, exitID)
+}
+
 // UpdaterConfig captures the release source + local install target for
 // the panel-driven updater endpoints. Zero values disable the endpoints
 // (GET /update/check returns "not configured").
@@ -71,6 +76,8 @@ type Server struct {
 	Logger        *slog.Logger
 	WebFS         fs.FS
 	SetupToken    string
+	setupMu       sync.Mutex
+	settingsMu    sync.Mutex
 	Orchestrator  orchestrator.Orchestrator
 	BaseConfig    *config.Config
 	Applier       *core.Applier
@@ -91,6 +98,9 @@ type Server struct {
 	// dns_metrics.go). Optional: nil means the DNS front-door isn't wired
 	// in, and the endpoint reports zero counters instead of panicking.
 	Metrics *resolver.Metrics
+	// DNSListeners, when set by cmd/5gpn after Frontdoor starts, returns a
+	// live snapshot for the dashboard. Nil means the DNS plane is absent.
+	DNSListeners func() DNSListenerStatus
 	// LiveResolver is the full DNS resolver instance backing the
 	// front-door listeners (nil until cmd/5gpn's startFrontdoor has
 	// wired one). The path-B settings handler uses it to hot-apply
@@ -196,6 +206,12 @@ func New(db *sql.DB, cfg Config, logger *slog.Logger) *Server {
 			Logger:     logger,
 		}
 	}
+	// The Applier owns the DB + DNS commit boundary. Keep the explicitly
+	// supplied Applier (production wiring) aligned with this Server's resolver.
+	cfg.Applier.Resolver = cfg.Resolver
+	if systemd, ok := cfg.Applier.Orch.(*orchestrator.Systemd); ok {
+		systemd.HealthObserver = cfg.Applier.OnHealth
+	}
 	if cfg.Updater.Client == nil && cfg.Updater.Owner != "" && cfg.Updater.Repo != "" {
 		cfg.Updater.Client = updater.New(updater.Config{
 			Owner: cfg.Updater.Owner,
@@ -237,8 +253,9 @@ func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
+	r.Use(securityHeaders)
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"https://*", "http://localhost:5173"},
+		AllowedOrigins:   []string{"http://localhost:5173", "http://127.0.0.1:5173"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Authorization", "Content-Type"},
 		AllowCredentials: false,
@@ -256,9 +273,8 @@ func (s *Server) Router() http.Handler {
 	r.Use(s.internalOnlyMiddleware)
 
 	r.Get("/api/v1/health", func(w http.ResponseWriter, req *http.Request) {
-		// version is exposed here (not just on the authenticated /me path)
-		// so the panel's post-upgrade poll can detect the new daemon
-		// coming back up before the auth session has been re-established.
+		// Version remains public so health monitors and an external updater
+		// can identify the running daemon without an authenticated session.
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":      true,
 			"version": s.Updater.Version,
@@ -274,7 +290,7 @@ func (s *Server) Router() http.Handler {
 
 	// iOS mobileconfig is served unauthenticated over HTTPS so Apple's OTA
 	// install flow can pull it without a bearer token. Content is public
-	// anyway (only the DoT server hostname). Must be registered BEFORE the
+	// anyway (only the encrypted-DNS server hostname). Must be registered BEFORE the
 	// SPA catch-all below or the router serves index.html instead.
 	r.Get("/ios-dot.mobileconfig", s.handleIOSMobileconfig)
 
@@ -382,7 +398,7 @@ func (s *Server) serveIndex(w http.ResponseWriter) {
 		http.Error(w, "index.html missing from embedded bundle", http.StatusInternalServerError)
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = io.Copy(w, f)
 }

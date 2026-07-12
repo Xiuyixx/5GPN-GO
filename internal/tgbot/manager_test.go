@@ -2,6 +2,7 @@ package tgbot
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -10,11 +11,11 @@ import (
 // fakeBot records the ctx it received in Serve so tests can observe the
 // lifetime that Manager gave it. Blocks until that ctx is Done.
 type fakeBot struct {
-	served     atomic.Bool
-	serveCtx   atomic.Pointer[context.Context]
-	exited     atomic.Bool
-	exitedCh   chan struct{}
-	serveErr   error
+	served   atomic.Bool
+	serveCtx atomic.Pointer[context.Context]
+	exited   atomic.Bool
+	exitedCh chan struct{}
+	serveErr error
 }
 
 func newFakeBot() *fakeBot {
@@ -37,7 +38,7 @@ func installFakeBotFactory(t *testing.T) *fakeBot {
 	t.Helper()
 	fb := newFakeBot()
 	prev := newBotFn
-	newBotFn = func(cfg Config) (runnable, error) {
+	newBotFn = func(_ context.Context, cfg Config) (runnable, error) {
 		return fb, nil
 	}
 	t.Cleanup(func() { newBotFn = prev })
@@ -139,7 +140,7 @@ func TestManagerUpdateSupersededDoesNotStompRunning(t *testing.T) {
 	fbs := []*fakeBot{newFakeBot(), newFakeBot()}
 	var idx atomic.Int32
 	prev := newBotFn
-	newBotFn = func(cfg Config) (runnable, error) {
+	newBotFn = func(_ context.Context, cfg Config) (runnable, error) {
 		i := idx.Add(1) - 1
 		if int(i) >= len(fbs) {
 			t.Fatalf("newBotFn called %d times, want <=%d", i+1, len(fbs))
@@ -174,6 +175,179 @@ func TestManagerUpdateSupersededDoesNotStompRunning(t *testing.T) {
 	time.Sleep(80 * time.Millisecond)
 	if st := m.Status(); !st.Enabled || st.AdminCount != 1 {
 		t.Fatalf("stale cleanup stomped current state: %+v", st)
+	}
+}
+
+func TestManagerFailedUpdateKeepsPreviousBotRunning(t *testing.T) {
+	oldBot := newFakeBot()
+	var calls atomic.Int32
+	prev := newBotFn
+	newBotFn = func(_ context.Context, cfg Config) (runnable, error) {
+		switch calls.Add(1) {
+		case 1:
+			return oldBot, nil
+		case 2:
+			return nil, errors.New("new token rejected")
+		default:
+			t.Fatalf("unexpected factory call %d", calls.Load())
+			return nil, errors.New("unexpected call")
+		}
+	}
+	t.Cleanup(func() { newBotFn = prev })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := NewManager(ManagerConfig{Handlers: &stubHandlers{}})
+	if err := m.Start(ctx, "old-token", []int64{7}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Update(context.Background(), "bad-token", []int64{9}); err == nil {
+		t.Fatal("failed replacement reported success")
+	}
+	select {
+	case <-oldBot.exitedCh:
+		t.Fatal("failed candidate validation stopped the previous bot")
+	case <-time.After(80 * time.Millisecond):
+	}
+	st := m.Status()
+	if !st.Enabled || st.AdminCount != 1 || st.TokenMasked != MaskToken("old-token") {
+		t.Fatalf("previous bot was not preserved: %+v", st)
+	}
+}
+
+func TestManagerCancelledValidationKeepsPreviousBotRunning(t *testing.T) {
+	oldBot := newFakeBot()
+	validationStarted := make(chan struct{})
+	var calls atomic.Int32
+	prev := newBotFn
+	newBotFn = func(ctx context.Context, _ Config) (runnable, error) {
+		if calls.Add(1) == 1 {
+			return oldBot, nil
+		}
+		close(validationStarted)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	t.Cleanup(func() { newBotFn = prev })
+
+	daemonCtx, daemonCancel := context.WithCancel(context.Background())
+	defer daemonCancel()
+	m := NewManager(ManagerConfig{Handlers: &stubHandlers{}})
+	if err := m.Start(daemonCtx, "old-token", []int64{7}); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, 500*time.Millisecond, func() bool { return oldBot.served.Load() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- m.Update(ctx, "blackhole-token", []int64{9}) }()
+	select {
+	case <-validationStarted:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("candidate validation did not start")
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Update error = %v, want context.Canceled", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Update ignored caller cancellation")
+	}
+	if st := m.Status(); !st.Enabled || st.TokenMasked != MaskToken("old-token") {
+		t.Fatalf("cancelled validation replaced previous bot: %+v", st)
+	}
+	select {
+	case <-oldBot.exitedCh:
+		t.Fatal("cancelled validation stopped the previous bot")
+	default:
+	}
+}
+
+func TestManagerValidationTimeoutBoundsBlackhole(t *testing.T) {
+	oldBot := newFakeBot()
+	var calls atomic.Int32
+	prev := newBotFn
+	newBotFn = func(ctx context.Context, _ Config) (runnable, error) {
+		if calls.Add(1) == 1 {
+			return oldBot, nil
+		}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	t.Cleanup(func() { newBotFn = prev })
+
+	daemonCtx, daemonCancel := context.WithCancel(context.Background())
+	defer daemonCancel()
+	m := NewManager(ManagerConfig{
+		Handlers:          &stubHandlers{},
+		ValidationTimeout: 25 * time.Millisecond,
+	})
+	if err := m.Start(daemonCtx, "old-token", []int64{7}); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	err := m.Update(context.Background(), "blackhole-token", []int64{9})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Update error = %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("validation timeout took %s, want bounded return", elapsed)
+	}
+	if st := m.Status(); !st.Enabled || st.TokenMasked != MaskToken("old-token") {
+		t.Fatalf("timed-out validation replaced previous bot: %+v", st)
+	}
+}
+
+func TestManagerCommitFailureKeepsPreviousBotRunning(t *testing.T) {
+	oldBot := newFakeBot()
+	candidate := newFakeBot()
+	var calls atomic.Int32
+	prev := newBotFn
+	newBotFn = func(_ context.Context, _ Config) (runnable, error) {
+		if calls.Add(1) == 1 {
+			return oldBot, nil
+		}
+		return candidate, nil
+	}
+	t.Cleanup(func() { newBotFn = prev })
+
+	daemonCtx, daemonCancel := context.WithCancel(context.Background())
+	defer daemonCancel()
+	m := NewManager(ManagerConfig{Handlers: &stubHandlers{}})
+	if err := m.Start(daemonCtx, "old-token", []int64{7}); err != nil {
+		t.Fatal(err)
+	}
+	commitErr := errors.New("database unavailable")
+	err := m.UpdateWithCommit(context.Background(), "new-token", []int64{9}, func() error {
+		return commitErr
+	})
+	if !errors.Is(err, commitErr) {
+		t.Fatalf("UpdateWithCommit error = %v, want commit error", err)
+	}
+	if candidate.served.Load() {
+		t.Fatal("candidate started before settings commit")
+	}
+	if st := m.Status(); !st.Enabled || st.TokenMasked != MaskToken("old-token") {
+		t.Fatalf("commit failure replaced previous bot: %+v", st)
+	}
+	select {
+	case <-oldBot.exitedCh:
+		t.Fatal("commit failure stopped the previous bot")
+	default:
+	}
+}
+
+func TestManagerDisableClearsCredentialStatus(t *testing.T) {
+	m := NewManager(ManagerConfig{Handlers: &stubHandlers{}})
+	m.token = "old-token"
+	m.adminChatIDs = []int64{7}
+	if err := m.Update(context.Background(), "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if st := m.Status(); st.TokenSet || st.TokenMasked != "" || st.AdminCount != 0 {
+		t.Fatalf("disable retained credential metadata: %+v", st)
 	}
 }
 

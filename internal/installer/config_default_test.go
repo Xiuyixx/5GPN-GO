@@ -40,10 +40,41 @@ func TestDefaultConfigTemplate_LoadsAndValidates(t *testing.T) {
 	if cfg.Server.PanelPort == 0 {
 		t.Errorf("server.panel_port zero after Load")
 	}
+	if cfg.Server.PanelBind != "127.0.0.1" {
+		t.Errorf("fresh install must be loopback-only, got panel_bind=%q", cfg.Server.PanelBind)
+	}
 	if cfg.Panel.SessionTTL == 0 {
 		t.Errorf("panel.session_ttl zero after Load")
 	}
 	if cfg.Proxy.WAShim.Port == 0 {
 		t.Errorf("proxy.wa_shim.port zero after Load — validate should have caught this")
+	}
+	if cfg.IOS.HTTPPort != 0 {
+		t.Errorf("legacy plaintext iOS listener must default off, got %d", cfg.IOS.HTTPPort)
+	}
+}
+
+func TestMigratedConfig_LoadsAndValidates(t *testing.T) {
+	body, _ := installer.RenderNewConfig(installer.LegacyExtract{
+		Domain:         "gateway.example.com",
+		RemoteDNS:      "1.1.1.1 8.8.8.8",
+		LocalDNS:       "223.5.5.5",
+		TGToken:        "111:secret",
+		TGAdminIDs:     "42 43",
+		IOSProfileUUID: "abcd-uuid",
+	})
+	path := filepath.Join(t.TempDir(), "migrated.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("config.Load rejected migrated config: %v\n%s", err, body)
+	}
+	if len(cfg.DNS.Upstreams) != 3 {
+		t.Fatalf("migrated upstreams=%v", cfg.DNS.Upstreams)
+	}
+	if cfg.Proxy.WAShim.Listen != "127.0.0.1" {
+		t.Fatalf("migrated wa_shim must remain loopback-only: %+v", cfg.Proxy.WAShim)
 	}
 }

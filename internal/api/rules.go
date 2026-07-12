@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -38,23 +39,29 @@ type applyResponse struct {
 	Reason        string `json:"reason,omitempty"`
 }
 
-// stripRulesetExpansions drops rules that carry a GroupID from the incoming
-// draft. Any rule with GroupID != "" was materialized by a previous apply's
-// call to Rulesets.Expand() and persisted into rule_versions.rules_yaml,
-// which handleListRules serves back to the panel verbatim. Re-appending
-// them here without stripping would collide with the fresh Expand() call
-// below (ruleset expansion produces deterministic IDs like "<name>-<idx>"),
-// tripping RuleSet.Validate's "duplicate id" check and blocking every
-// dry-run/apply after the first successful apply with rulesets registered.
-func stripRulesetExpansions(in []rules.Rule) []rules.Rule {
+// stripRulesetExpansions drops only entries owned by a currently registered
+// ruleset. Older one-shot imports also used GroupID; treating every non-empty
+// value as managed would hide and delete those historical manual rules.
+func stripRulesetExpansions(in []rules.Rule, managed map[string]struct{}) []rules.Rule {
 	out := in[:0]
 	for _, r := range in {
-		if r.GroupID != "" {
+		if _, ok := managed[r.GroupID]; r.GroupID != "" && ok {
 			continue
 		}
 		out = append(out, r)
 	}
 	return out
+}
+
+func (s *Server) expandRulesets(ctx context.Context, in []rules.Rule) ([]rules.Rule, error) {
+	if s.Rulesets == nil {
+		return in, nil
+	}
+	extra, managed, err := s.Rulesets.ExpandWithGroups(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return append(stripRulesetExpansions(in, managed), extra...), nil
 }
 
 func (s *Server) handleListRules(w http.ResponseWriter, r *http.Request) {
@@ -85,11 +92,11 @@ func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
 	// caller's manually-authored rules so dry-run matches whatever the
 	// effective config will look like post-apply. Rulesets contribute
 	// their cached content; ungrouped rules keep their existing shape.
-	req.Rules = stripRulesetExpansions(req.Rules)
-	if s.Rulesets != nil {
-		if extra, err := s.Rulesets.Expand(r.Context()); err == nil && len(extra) > 0 {
-			req.Rules = append(req.Rules, extra...)
-		}
+	var err error
+	req.Rules, err = s.expandRulesets(r.Context(), req.Rules)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "ruleset_expand_failed", err.Error())
+		return
 	}
 	set := &rules.RuleSet{Rules: req.Rules}
 	if err := set.Validate(); err != nil {
@@ -122,11 +129,11 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 	// entries) so the mihomo config always matches what the operator
 	// saw in dry-run. GroupID tags survive so the panel can still
 	// render the two-section split (Rules + Rulesets) on next load.
-	req.Rules = stripRulesetExpansions(req.Rules)
-	if s.Rulesets != nil {
-		if extra, err := s.Rulesets.Expand(r.Context()); err == nil && len(extra) > 0 {
-			req.Rules = append(req.Rules, extra...)
-		}
+	var err error
+	req.Rules, err = s.expandRulesets(r.Context(), req.Rules)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "ruleset_expand_failed", err.Error())
+		return
 	}
 	set := &rules.RuleSet{Rules: req.Rules}
 	if err := set.Validate(); err != nil {
@@ -150,20 +157,21 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rvID, err := db.InsertRuleVersion(s.DB, snapID, string(yamlBytes), true)
+	var prevSnapshot int64
+	if prev, prevErr := db.GetActiveRuleVersion(s.DB); prevErr == nil {
+		prevSnapshot = prev.SnapshotID
+	} else if !errors.Is(prevErr, db.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, "rule_version_error", prevErr.Error())
+		return
+	}
+
+	rvID, err := db.InsertRuleVersion(s.DB, snapID, string(yamlBytes), false)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "rule_version_error", err.Error())
 		return
 	}
 
 	actor, _ := r.Context().Value(ctxUsername).(string)
-
-	// Determine prev snapshot (if any) so orchestrator can roll back.
-	var prevSnapshot int64
-	if prev, err := db.ListRuleVersions(s.DB, 2); err == nil && len(prev) >= 2 {
-		// [0] is the version we just wrote; [1] is the previous.
-		prevSnapshot = prev[1].SnapshotID
-	}
 
 	appRes, appErr := s.Applier.ApplyRules(r.Context(), snapID, rvID, prevSnapshot)
 
@@ -176,16 +184,6 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 	}
 	if appRes.RolledBack {
 		result = "rolled_back"
-		if prevSnapshot != 0 {
-			if prev, err := db.ListRuleVersions(s.DB, 5); err == nil {
-				for _, p := range prev {
-					if p.SnapshotID == prevSnapshot {
-						_ = db.SetActiveRuleVersion(s.DB, p.ID)
-						break
-					}
-				}
-			}
-		}
 	}
 
 	_ = db.AppendAudit(s.DB, db.AuditEntry{
@@ -197,27 +195,22 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 		IP:     clientIP(r),
 	})
 
-	// Hot-swap the DNS resolver's RuleTable to match the just-applied rule
-	// set. This is a concern the handler owns separately from the
-	// orchestrator apply above: if the Applier call failed, the data plane
-	// never changed, so the resolver must not be touched either. A
-	// successful Applier call always proceeds here — the DNS plane build
-	// is independent of the mihomo/orchestrator health-check lifecycle.
-	if appErr == nil {
-		entry := s.rebuildAndPublish(r.Context(), set.Rules, "apply")
-		if entry.Status == "failed" {
-			s.Logger.Warn("rules.apply: resolver rebuild failed",
-				"apply_id", entry.ID, "err", entry.Error)
-		}
-		if entry.Status == "pending" {
-			w.Header().Set("Location", "/api/v1/applies/"+entry.ID)
-			writeJSON(w, http.StatusAccepted, map[string]any{
-				"apply_id": entry.ID,
-				"hash":     entry.Hash,
-				"status":   "pending",
-			})
+	if appErr != nil {
+		if errors.Is(appErr, orchestrator.ErrApplyInFlight) {
+			writeError(w, http.StatusConflict, "apply_in_flight", appErr.Error())
 			return
 		}
+		writeError(w, http.StatusInternalServerError, "apply_failed", appErr.Error())
+		return
+	}
+	entry := s.trackRuleApply(set, "apply", appRes)
+	if entry.Status == "pending" {
+		w.Header().Set("Location", "/api/v1/applies/"+entry.ID)
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"snapshot_id": snapID, "rule_version_id": rvID,
+			"apply_id": entry.ID, "hash": entry.Hash, "status": "pending", "health": appRes.Health,
+		})
+		return
 	}
 
 	writeJSON(w, http.StatusOK, applyResponse{

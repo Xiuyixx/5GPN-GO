@@ -86,8 +86,8 @@ const (
 	KeyFrontdoorPanelBackendTCP    = "frontdoor.panel_backend_tcp"
 	KeyFrontdoorPanelBackendUDP    = "frontdoor.panel_backend_udp"
 
-	// Internal-only access gate. When enabled, panel + mtproxy +
-	// sniforward + quicforward accept traffic only from clients whose
+	// Internal-only access gate. When enabled, the panel plus in-process
+	// sniforward and quicforward accept traffic only from clients whose
 	// source IP falls inside KeyFrontdoorInternalCIDRs. This mirrors
 	// the operator's 5G APN slice business rule: paying customers all
 	// come in via 联通 5G APN with a private RFC1918 assignment
@@ -95,7 +95,8 @@ const (
 	// prima facie non-customer scanner traffic and can be dropped at
 	// accept time. Default off; loopback is always allowed regardless
 	// of the CIDR list so local health probes never lock themselves
-	// out. See internal/access/gate.go for the runtime.
+	// out. The external mtg.service is not covered by this in-process gate.
+	// See internal/access/gate.go for the runtime.
 	KeyFrontdoorInternalOnlyEnabled = "frontdoor.internal_only_enabled"
 	KeyFrontdoorInternalCIDRs       = "frontdoor.internal_cidrs"
 
@@ -108,12 +109,9 @@ const (
 	// under mtproxy.* are left untouched on upgrade — they are simply
 	// ignored by the new controller.
 
-	// v0.4.0 WG plane — kernel WireGuard split-tunnel settings.
-	//
-	// The enabled flag is the blue-green feature flag: the WG plane
-	// ships fully inert (wg0 never brought up, no mobileconfig payload
-	// emitted) until the operator flips it on. Rollback is just
-	// flipping it back off.
+	// Reserved WireGuard split-tunnel settings. v0.4.0 has no runtime
+	// consumer, enrollment API, or profile generator for these keys; changing
+	// them does not create or reconcile a WireGuard interface.
 	//
 	// The listen-port / server-address / DNS-address keys configure
 	// the wg0 interface itself — the UDP listen port, the server's
@@ -134,11 +132,11 @@ const (
 	// mangle_fwd nftables chain to steer wg0-sourced forward traffic
 	// into routing table 100 (Phase 8); exposed as a setting so an
 	// operator can override it if 0x100 collides with another daemon.
-	KeyFrontdoorWGEnabled         = "frontdoor.wg.enabled"           // default false
-	KeyFrontdoorWGListenPort      = "frontdoor.wg.listen_port"       // default 51820
-	KeyFrontdoorWGServerAddress   = "frontdoor.wg.server_address"    // default 10.66.66.1/24
-	KeyFrontdoorWGDNSAddress      = "frontdoor.wg.dns_address"       // default 10.66.66.1
-	KeyFrontdoorWGPublicKey       = "frontdoor.wg.public_key"        // populated on first bringup
+	KeyFrontdoorWGEnabled         = "frontdoor.wg.enabled"        // default false
+	KeyFrontdoorWGListenPort      = "frontdoor.wg.listen_port"    // default 51820
+	KeyFrontdoorWGServerAddress   = "frontdoor.wg.server_address" // default 10.66.66.1/24
+	KeyFrontdoorWGDNSAddress      = "frontdoor.wg.dns_address"    // default 10.66.66.1
+	KeyFrontdoorWGPublicKey       = "frontdoor.wg.public_key"     // populated on first bringup
 	KeyFrontdoorWGLastReconcileAt = "frontdoor.wg.last_reconcile_at"
 	KeyFrontdoorWGAllowedIPsHash  = "frontdoor.wg.allowed_ips_hash"
 	KeyFrontdoorWGAllowedIPsCap   = "frontdoor.wg.allowedips_cap" // default 8000
@@ -151,6 +149,46 @@ var ErrNotFound = errors.New("settings: key not found")
 // Store wraps *sql.DB with the panel_settings CRUD surface.
 type Store struct {
 	db *sql.DB
+}
+
+// SetMany JSON-encodes and writes all values in one SQLite transaction.
+// Encoding finishes before Begin, so an unsupported value cannot leave a
+// partially-updated settings document.
+func (s *Store) SetMany(ctx context.Context, values map[string]any, updatedBy string) error {
+	if len(values) == 0 {
+		return nil
+	}
+	encoded := make(map[string]string, len(values))
+	for key, value := range values {
+		raw, err := json.Marshal(value)
+		if err != nil {
+			return fmt.Errorf("settings.SetMany %q: encode: %w", key, err)
+		}
+		encoded[key] = string(raw)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("settings.SetMany: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	now := time.Now().Unix()
+	for key, value := range encoded {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO panel_settings(key, value, updated_at, updated_by)
+			 VALUES (?, ?, ?, ?)
+			 ON CONFLICT(key) DO UPDATE
+			   SET value = excluded.value,
+			       updated_at = excluded.updated_at,
+			       updated_by = excluded.updated_by`,
+			key, value, now, updatedBy,
+		); err != nil {
+			return fmt.Errorf("settings.SetMany %q: %w", key, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("settings.SetMany: commit: %w", err)
+	}
+	return nil
 }
 
 // New returns a Store bound to the given *sql.DB. The caller retains
@@ -211,7 +249,7 @@ func (s *Store) Snapshot(ctx context.Context) (map[string]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("settings.Snapshot: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := map[string]string{}
 	for rows.Next() {
 		var k, v string

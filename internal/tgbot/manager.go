@@ -9,14 +9,16 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"time"
 )
 
 // ManagerConfig captures the constant pieces of a bot lifecycle. The
 // Handlers plumbing does not change across reloads, but token and admin
 // ids do — those come from Update.
 type ManagerConfig struct {
-	Handlers Handlers
-	Logger   *slog.Logger
+	Handlers          Handlers
+	Logger            *slog.Logger
+	ValidationTimeout time.Duration // default DefaultValidationTimeout
 }
 
 // Manager owns at most one running Bot. Start/Update replace the
@@ -26,19 +28,20 @@ type ManagerConfig struct {
 type Manager struct {
 	cfg ManagerConfig
 
+	updateMu     sync.Mutex
 	mu           sync.Mutex
 	rootCtx      context.Context // daemon lifetime ctx captured on first Start
 	token        string
 	adminChatIDs []int64
 	cancel       context.CancelFunc
 	running      bool
-	generation   uint64 // bumped on every startLocked; cleanup uses it to detect "still me?"
+	generation   uint64 // bumped on every activation; cleanup uses it to detect "still me?"
 }
 
 // newBotFn is the seam for tests to inject a fake Bot without hitting
-// Telegram's servers. Production keeps the real tgbot.New.
-var newBotFn = func(cfg Config) (runnable, error) {
-	return New(cfg)
+// Telegram's servers. Production keeps the real context-aware constructor.
+var newBotFn = func(ctx context.Context, cfg Config) (runnable, error) {
+	return NewWithContext(ctx, cfg)
 }
 
 // runnable is the minimum surface Manager needs from a live Bot. Kept
@@ -64,41 +67,88 @@ func NewManager(cfg ManagerConfig) *Manager {
 // panel-driven restart (whose caller ctx is a short-lived HTTP request
 // ctx) does not kill the new bot the moment the HTTP response is written.
 func (m *Manager) Start(ctx context.Context, token string, adminChatIDs []int64) error {
+	m.updateMu.Lock()
+	defer m.updateMu.Unlock()
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	// Always remember the daemon ctx, even on the empty-token path, so a
 	// later panel-driven Update can spawn a bot rooted in the correct
 	// lifetime.
 	if m.rootCtx == nil {
 		m.rootCtx = ctx
 	}
+	m.mu.Unlock()
 	if token == "" {
 		return ErrBotDisabled
 	}
-	return m.startLocked(token, adminChatIDs)
+	bot, err := m.buildCandidate(ctx, token, adminChatIDs)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.stopLocked()
+	m.activateLocked(bot, token, adminChatIDs)
+	m.mu.Unlock()
+	return nil
 }
 
-// Update replaces token / admin ids in place. Stops any running bot and
-// starts fresh with the new credentials. When token is empty this is
-// equivalent to Stop.
+// Update replaces token / admin ids in place. The candidate is fully built
+// and validated before the running bot is stopped. When token is empty this
+// is equivalent to Stop.
 //
-// The ctx parameter is used only for cancellation of the token validation
-// (tgbot.New's getMe call) — it is deliberately NOT the parent of the new
-// bot's lifetime. See Start for why: the settings handler passes the HTTP
-// request ctx, which Go cancels the instant the response is written.
-func (m *Manager) Update(_ context.Context, token string, adminChatIDs []int64) error {
+// ctx governs validation only; the activated bot still derives its lifetime
+// from the daemon root context captured by Start.
+func (m *Manager) Update(ctx context.Context, token string, adminChatIDs []int64) error {
+	return m.UpdateWithCommit(ctx, token, adminChatIDs, nil)
+}
+
+// UpdateWithCommit validates a replacement, runs commit while the old bot is
+// still live, and swaps runtime state only after commit succeeds. Settings
+// handlers use this to keep SQLite and the running bot in one failure domain:
+// a database error leaves the previous bot untouched.
+func (m *Manager) UpdateWithCommit(ctx context.Context, token string, adminChatIDs []int64, commit func() error) error {
+	m.updateMu.Lock()
+	defer m.updateMu.Unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	var candidate runnable
+	var err error
+	if token != "" {
+		candidate, err = m.buildCandidate(ctx, token, adminChatIDs)
+		if err != nil {
+			return err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if commit != nil {
+		if err := commit(); err != nil {
+			return err
+		}
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopLocked()
-	if token == "" {
+	if candidate == nil {
+		m.token = ""
+		m.adminChatIDs = nil
 		return nil
 	}
-	return m.startLocked(token, adminChatIDs)
+	m.activateLocked(candidate, token, adminChatIDs)
+	return nil
 }
 
 // Stop tears down the bot; no-op if not running. Safe to call multiple
 // times.
 func (m *Manager) Stop() {
+	m.updateMu.Lock()
+	defer m.updateMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopLocked()
@@ -125,17 +175,23 @@ type Status struct {
 	TokenMasked string
 }
 
-// startLocked assumes m.mu is held.
-func (m *Manager) startLocked(token string, adminChatIDs []int64) error {
-	bot, err := newBotFn(Config{
+func (m *Manager) buildCandidate(ctx context.Context, token string, adminChatIDs []int64) (runnable, error) {
+	timeout := m.cfg.ValidationTimeout
+	if timeout <= 0 {
+		timeout = DefaultValidationTimeout
+	}
+	validationCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return newBotFn(validationCtx, Config{
 		Token:        token,
 		AdminChatIDs: adminChatIDs,
 		Handlers:     m.cfg.Handlers,
 		Logger:       m.cfg.Logger,
 	})
-	if err != nil {
-		return err
-	}
+}
+
+// activateLocked assumes m.mu is held and candidate already passed validation.
+func (m *Manager) activateLocked(bot runnable, token string, adminChatIDs []int64) {
 	parent := m.rootCtx
 	if parent == nil {
 		// Defensive: Start should have set this. Falling back keeps a
@@ -168,7 +224,6 @@ func (m *Manager) startLocked(token string, adminChatIDs []int64) error {
 		}
 		m.mu.Unlock()
 	}()
-	return nil
 }
 
 // stopLocked assumes m.mu is held.

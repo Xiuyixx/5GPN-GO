@@ -1,142 +1,139 @@
-# 5GPN Panel Honesty Audit (S3 · AC10)
+# 5GPN Panel Honesty Audit
 
-**Scope:** Every screen under `web/src/pages/` cross-referenced against its backend
-handler in `internal/api/`. For each interactive control we record: which endpoint
-it hits, whether the backend persists AND affects the data plane, and any known
-divergence between the UI's success signal and reality.
+**Audit date:** 2026-07-13
 
-**Legend:**
-- 🟢 **Honest** — control persists + affects data plane; success signal matches reality.
-- 🟡 **Documented stub** — control returns a synthetic/placeholder response by design.
-  Not deceptive because the surrounding copy or platform gating is honest.
-- 🔴 **Deceptive** — control claims success but the effect is partial or missing.
-  Tracked as follow-up work; S3 documents, does not fix.
+**Scope:** React routes and Settings sections under `web/src/`, cross-checked
+against the current handlers in `internal/api/`. This audit distinguishes a
+real handler from a production-operational control; those are not equivalent
+while the privilege boundary remains unresolved.
 
-**Audit date:** 2026-07-11
-**Base commit:** post-S2 (`internal/exit` DB-backed + `internal/core/applier` on-line);
-S3-T1 (backup import → Applier) may land after this doc.
+## Status terms
 
----
+- **Verified:** persistence/effect and the success signal match.
+- **Conditional:** the code path is real and surfaces errors, but an external
+  dependency or host privilege is required.
+- **Mismatch:** visible copy omits or overstates a material behavior.
+- **Disabled:** intentionally unavailable and represented as unavailable.
 
-## Pages under audit
+## Cross-cutting facts
 
-```
-web/src/pages/
-├── Backup.tsx
-├── Bootstrap.tsx
-├── Dashboard.tsx
-├── Exits.tsx
-├── Login.tsx
-├── Logs.tsx
-├── Rules.tsx
-└── Snapshots.tsx
-```
+- Panel tokens are HS256 JWTs backed by revocable SQLite sessions. The browser
+  persists the token in `localStorage`; it is not an HttpOnly cookie.
+- Authenticated requests send a bearer header. Logs use a fetch-based SSE client
+  with the same header; the token is not placed in the query string.
+- Rule/exit/rollback/import apply can return `202 Accepted` with an `apply_id`.
+  The frontend polls `/api/v1/applies/{id}` before reporting completion.
+- The durable lifecycle is `submitted` followed by one terminal state:
+  `confirmed`, `rolled_back`, or `failed`. `failed` is distinct from
+  `rolled_back`: it means the operation was not confirmed and a complete
+  rollback of its prior state could not be confirmed.
+- The default systemd health probe checks only whether dnsdist and mihomo are
+  active. It does not check sniproxy, send a DNS query, or verify the public
+  egress IP, so `confirmed` has that deliberately narrow meaning.
+- `--orchestrator=noop` commits control-plane state without an external data
+  plane and is intended for development/tests. A UI success in NoOp mode must
+  not be interpreted as a systemd deployment result.
+- The canonical installed unit cannot currently perform the system-file writes
+  or `systemctl` calls required by several controls. Those handlers return
+  errors rather than fabricating success, but the controls are not
+  production-operational until a privileged helper/equivalent policy exists.
 
-All 8 files enumerated. AppShell.tsx (layout, not a page) audited separately at the bottom.
+## Authentication, setup, and shell
 
----
-
-## 1. Login.tsx
-
-| Control | Endpoint | Verified real | Notes |
+| Control | Endpoint/effect | Status | Notes |
 |---|---|---|---|
-| **Sign in** button (`onSubmit`) | `POST /api/v1/login` | 🟢 | `internal/api/panel.go:75` — validates credentials against `panel_users` bcrypt hash, issues JWT, records `panel.login` audit entry, applies rate limit. Real. |
+| Bootstrap claim | `POST /api/v1/bootstrap` | Verified | The setup token is checked and first-user creation is atomic. A subsequent claim conflicts. |
+| Sign in | `POST /api/v1/login` | Verified | Checks bcrypt, creates a revocable session, and returns an HS256 JWT. The browser then stores it in `localStorage`, which is a documented security limitation. |
+| Current identity | `GET /api/v1/me` | Verified | Returns identity from verified claims/session. |
+| Log out | `POST /api/v1/logout` | Verified | Revokes the server session and clears client auth state. |
+| App navigation | client-side routes | Verified | Setup, login, wizard, dashboard, rules, exits, snapshots, backup, logs, and settings are protected/routed according to bootstrap and auth state. |
 
-## 2. Bootstrap.tsx
+## First-run wizard
 
-| Control | Endpoint | Verified real | Notes |
+| Control | Endpoint/effect | Status | Notes |
 |---|---|---|---|
-| **Complete setup** button (`onSubmit`) | `POST /api/v1/bootstrap` | 🟢 | `internal/api/panel.go:37` `handleBootstrapClaim` — validates setup-token, bcrypts password, inserts panel_user, enforces single-use via `already_setup` conflict. Real. |
-| **needs_setup** probe | `GET /api/v1/bootstrap` | 🟢 | `panel.go:26` — direct DB count of `panel_users`. Real. |
+| Load/save wizard settings | `GET/POST /api/v1/settings/panel` | Verified for persistence | The final POST writes a batch to `panel_settings`; intermediate Back/Next actions are local only. It does not rewrite `/etc/5gpn/config.yaml`. |
+| Telegram credentials | same POST plus bot manager update | Verified | Invalid runtime credentials are surfaced as a warning and are not silently reported as active. |
+| Server/TLS values | `panel_settings` | Conditional | Values persist, but listener/TLS changes that require restart depend on the restart/privilege path. Finishing the wizard alone is not proof that a public listener is reachable. |
 
-## 3. AppShell.tsx (layout wrapper — audited here because it owns navigation + logout)
+## Dashboard and exits
 
-| Control | Endpoint | Verified real | Notes |
+| Control | Endpoint/effect | Status | Notes |
 |---|---|---|---|
-| **Log out** (navbar + sidebar) | `POST /api/v1/logout` | 🟢 | `panel.go:116` — revokes the JWT session via `s.Auth.Revoke(sid)`, appends `panel.logout` audit entry. Real. |
-| **Signed-in username** display | `GET /api/v1/me` | 🟢 | Wired in S3-T3. `handleMe` at `panel.go:133` returns `{user_id, username}` from JWT context. Falls back to `authStore.username` on network error. Not deceptive because the fallback is the same identity that was proven on login. |
+| Metrics and DNS metrics | `GET /api/v1/metrics`, `/api/v1/metrics/dns` | Verified | Displays collected rows; it does not manufacture host samples in the browser. |
+| Exit list/current exit | `GET /api/v1/exits` | Verified | Reads the DB-backed exit store and active exit. |
+| Add/delete exit | `/api/v1/exits/add`, `/delete` | Verified | These are control-plane store operations. Adding an exit does not claim to switch traffic; deleting the active exit is rejected. |
+| Switch exit | `POST /api/v1/exits/switch` | Conditional | Uses `core.Applier`; an observing result returns `202 + apply_id`, and the panel waits for `confirmed`, `rolled_back`, or `failed` before refreshing. It is end-to-end only when the orchestrator can write/reload the external data plane, and confirmation uses the narrow process-state probe described above. |
 
-## 4. Dashboard.tsx
+## Rules and rulesets
 
-| Control | Endpoint | Verified real | Notes |
+| Control | Endpoint/effect | Status | Notes |
 |---|---|---|---|
-| **Metrics tiles** (CPU/mem/conns/tx/rx) | `GET /api/v1/metrics` | 🟢 | `internal/api/metrics.go:24` — reads `metrics_samples` table populated by the collector; returns raw rows. Real. |
-| **Active exit + exit list** | `GET /api/v1/exits` | 🟢 | Post-S2: `exits.go:40` reads from `exit.Store` (DB-backed). Prior to S2 this was the fake `exitsState` package var; that regression is closed. |
-| **5s auto-refresh** | (both above) | 🟢 | `setInterval(refresh, 5000)`. No control, just polling; both endpoints return current DB state. |
+| List/edit/reset rules | `GET /api/v1/rules` plus local draft | Verified | Edits remain local until Apply; Reset reloads the active DB rule version. |
+| Dry-run | `POST /api/v1/rules/dry-run` | Verified with a narrow meaning | Validates rules and evaluates fixtures using the in-process matcher. It does **not** execute mihomo/dnsdist config-check commands or start a second data plane. |
+| URL/text import preview | `POST /api/v1/rules/import` | Verified | Produces draft rules. URL fetches apply the public-address network guard. Manual imports are not incorrectly grouped as registered rulesets. |
+| Ruleset register/sync/toggle/delete | `/api/v1/rulesets...` | Verified for store/cache state | These operations manage ruleset metadata/cache. Enabled rulesets affect the candidate on a later rule apply. |
+| Apply rules | `POST /api/v1/rules/apply` | Conditional | Creates DB snapshot/rule-version rows, validates/builds the resolver table, calls Applier, and polls its durable apply status. The active DB pointer and live resolver advance only on `confirmed`; a failed probe attempts file restoration/reload, and an incomplete or unconfirmed rollback is recorded as `failed`, not `rolled_back`. Production external reload still needs the missing privilege path. |
 
-## 5. Exits.tsx
+## Snapshots
 
-| Control | Endpoint | Verified real | Notes |
+| Control | Endpoint/effect | Status | Notes |
 |---|---|---|---|
-| **List exits** | `GET /api/v1/exits` | 🟢 | See Dashboard row. Reads `exit.Store`. |
-| **Add exit** (form submit) | `POST /api/v1/exits/add` | 🟢 | `exits.go:66` `handleAddExit` — `xexit.Parse` validates URI, `Store.Add` writes to DB with UNIQUE constraint; `exits.add` audit entry appended. Note: add does NOT trigger Apply (spec §S2.3 explicit: add does not touch data plane until switched-to). Not deceptive — Add advertises "configured", not "active". |
-| **Switch exit** button | `POST /api/v1/exits/switch` | 🟢 | `exits.go:146` `handleSwitchExit` — routes through `s.Applier.SwitchExit`, which runs Assemble + Orchestrator.Apply + health observation + automatic rollback on failure. Response reports `health` state. Real end-to-end. |
-| **Delete exit** button | `POST /api/v1/exits/delete` | 🟢 | `exits.go:108` — rejects active exit via `ErrExitActive`, otherwise removes from Store. No data-plane apply needed (removed exits aren't referenced by render). Real. |
+| List snapshots | `GET /api/v1/snapshots` | Verified | Lists SQLite snapshot metadata. `active` is derived from the active paired rule version; the newest row is not assumed to be current. |
+| Roll back | `POST /api/v1/snapshots/{id}/rollback` | Conditional | The earlier DB-only flip has been removed. Rollback loads the paired rule version and sends it through Applier/apply polling, including the same four-state lifecycle. As with Apply, external systemd effect depends on host privilege. |
 
-## 6. Rules.tsx
+Snapshot terminology is important: these are DB records paired with rules YAML.
+Current apply does not write `/var/lib/5gpn/snapshots/{id}.tar.gz`; the legacy
+`tarball_path` schema field is empty.
 
-| Control | Endpoint | Verified real | Notes |
+## Backup
+
+| Control | Endpoint/effect | Status | Notes |
 |---|---|---|---|
-| **List rules** | `GET /api/v1/rules` | 🟢 | `rules.go:41` — reads the active rule_version YAML from DB, parses via `rules.ParseYAML`. Real. |
-| **+ Add rule / Delete / Move up-down / Toggle enabled / Edit fields** | (local state only) | 🟢 | Client-side draft mutations. No network call until Dry-run/Apply. Copy makes the two-stage flow explicit (dry-run then apply). Not a "success" claim, so honest. |
-| **Reset** button | (client-side) | 🟢 | Reloads from GET /api/v1/rules. Real. |
-| **Dry-run** button | `POST /api/v1/rules/dry-run` | 🟢 | `rules.go:59` — parses draft YAML, runs `rules.DryRun` against fixtures. Static analysis (matches rules against fixture domains); UI already labels dry-run limits ("static check only"). Real for what it advertises. |
-| **Apply** button | `POST /api/v1/rules/apply` | 🟢 | `rules.go:85` — insert snapshot + rule_version, then `s.Applier.ApplyRules` (Assemble → Orchestrator.Apply → health observe → auto-rollback). Response reports `health` state (confirmed/observing/rolled_back). Real end-to-end. |
-| **Rule kind/action/pattern selectors** | (local state) | 🟢 | Persisted only through Apply. |
+| Export | `GET /api/v1/backup/export` | Verified disclosure | The handler exports a **plaintext** archive containing active rules, snapshot manifest, full SQLite hot-copy, and README. The panel warns before download that `db/5gpn.db` may contain secrets. |
+| Import confirmation | client-side dialog | Verified disclosure | It previews file size and an approximate active-rule count, and states before confirmation that database/manifest members will be ignored. |
+| Import | `POST /api/v1/backup/import` | Verified | The handler validates the complete bounded archive, rejects unknown/duplicate/non-regular members, and applies `rules/active.yaml` through Applier. It does not restore the SQLite copy or manifest, and the panel states that scope. |
 
-## 7. Snapshots.tsx
+The response explicitly reports ignored entries and says panel import is
+rules-only. That post-action note does not replace a pre-action plaintext and
+scope warning in the UI.
 
-| Control | Endpoint | Verified real | Notes |
+## Logs
+
+| Control | Endpoint/effect | Status | Notes |
 |---|---|---|---|
-| **List snapshots** | `GET /api/v1/snapshots` | 🟢 | `snapshots.go:28` — reads `snapshots` table. Real. |
-| **Roll back** button | `POST /api/v1/snapshots/{id}/rollback` | 🔴 | **`snapshots.go:50` `handleRollbackSnapshot` only flips `SetActiveRuleVersion` in the DB and appends an audit entry — it never calls `s.Applier` or `Orchestrator.Apply`. Same bug family as pre-S3 backup import (Critic F3): the DB says "rolled back", but mihomo/dnsdist keep running with the pre-rollback config until the next unrelated Apply.** Deferred; not fixed in S3. See Follow-ups §F1. |
+| Live tail | `GET /api/v1/events/logs?unit=...` | Conditional | Linux uses `journalctl` for an allowlisted unit and surfaces stderr. Non-Linux uses frames explicitly labelled as stub output. The stream periodically rechecks session validity. |
+| Filter/clear/reconnect | client-side/fetch SSE | Verified | Filter and Clear affect the local buffer. Reconnect creates a new authenticated fetch stream. |
 
-## 8. Backup.tsx
+## Settings
 
-| Control | Endpoint | Verified real | Notes |
+| Control | Endpoint/effect | Status | Notes |
 |---|---|---|---|
-| **Download tar.gz** (Export) | `GET /api/v1/backup/export` | 🟢 | `snapshots.go:106` `handleExportBackup` — streams a real tar.gz with active rules YAML + snapshot manifest + WAL-safe SQLite hot-copy (VACUUM INTO) + README. Real. |
-| **Import (upload)** button + Dialog (S3-T1b) | `POST /api/v1/backup/import` | 🟢 *(pending worker-backend S3-T1)* | Prior to S3, `handleImportBackup` inserted snapshot + rule_version(active=true) without calling Applier — a 🔴 half-real. S3-T1 wires it through `s.Applier.ImportRules` with auto-rollback on failure. S3-T1b adds a confirmation Dialog and surfaces the `apply_result` field (health, rolled_back). Once T1 lands, this row is 🟢. Until then, mark as **conditionally honest — verified against handoff spec, awaiting backend commit**. |
-| **File picker** (`<input type=file>`) | (client-side gate) | 🟢 | Just staging; upload only fires on Dialog confirm (post-T1b). |
+| Release check | `GET /api/v1/update/check` | Verified | Displays current/latest release metadata. |
+| Upgrade apply | no active UI action; backend `POST /api/v1/update/apply` | Disabled | The panel now says an external installer or privileged supervisor is required. The backend returns `updater_requires_supervisor`; it never reports an in-process upgrade success. |
+| Telegram bot | `/api/v1/settings/tgbot` | Verified | Runtime update failures are surfaced. Secrets are masked on reads. |
+| iOS profile/preflight | profile and `/settings/ios/...` endpoints | Disclosed limitation | The profile is unsigned XML. Its primary payload uses public DoH, but preflight proves only that the separate `127.0.0.1:853` DoT listener answers, with certificate verification disabled. Panel copy states that it does not establish public DoH/device reachability. |
+| MTProxy | `/api/v1/settings/mtproxy...` | Conditional, blocked in canonical install | The controller really writes the external `mtg.service` unit and invokes `systemctl`; it is not an in-process proxy. The installed unprivileged service lacks permission for those operations. |
+| Internal-only access | `/api/v1/settings/frontdoor/internal-only` | Partial | CIDRs are validated, persisted, and atomically published to the panel plus in-process SNI/QUIC gate. External `mtg.service` is not covered and needs a separate host policy. |
+| Path B destination-forward settings | `/api/v1/settings/frontdoor/proxy` | Partial / experimental | Validation and live DNS-spoof policy are real. SNI/QUIC forwarders currently dial public targets directly and do not traverse the active mihomo exit; host policy routing is not provisioned. |
+| Change password | `POST /api/v1/password` | Verified | Updates the bcrypt hash and revokes the user's other sessions while preserving the current JWT server-side. After success, the current frontend deliberately clears its local token and routes to Login. |
+| Restart daemon | `POST /api/v1/system/restart` | Conditional, blocked in canonical install | Returns `202` only if `systemctl` accepted the job; permission and non-systemd errors are returned. No privileged helper currently makes it work under the installed service. |
 
-## 9. Logs.tsx
+## Required follow-ups
 
-| Control | Endpoint | Verified real | Notes |
-|---|---|---|---|
-| **Unit select / filter input** | (client-side) | 🟢 | Filters what's rendered from the SSE stream in browser. No claim of server-side filtering. |
-| **Live tail** | `GET /api/v1/events/logs?unit=…` (SSE) | 🟡 | `internal/api/logs.go:22` — on Linux, pipes real `journalctl -u <unit> -f -o json` and forwards `{ts,level,msg,unit,seq}` frames. **On non-Linux hosts (macOS/dev), falls back to `stubStream` which emits `"msg":"stub log line — journalctl unavailable on this host"` every second (`logs.go:127`).** The stub is intentional so the panel renders during dev on macOS. The stub message names itself as a stub, so the user is not misled. **Documented stub, not deceptive.** |
-| **Clear** button | (client-side) | 🟢 | Local buffer clear. |
-| **Reconnect** button | (SSE reconnect) | 🟢 | Re-establishes EventSource. Real. |
+1. Implement and integration-test the narrow privilege boundary before calling
+   Rules Apply, exit switch, rollback, restart, or MTG controls production-ready.
+2. Align iOS preflight with the profile's actual primary DoH path before
+   claiming device readiness; decide whether the profile must be signed.
+3. Decide whether `localStorage` bearer tokens fit the threat model or migrate
+   to an HttpOnly cookie design with CSRF controls.
 
----
+## Verdict
 
-## Follow-ups (out of S3 scope — deferred to S4 or later)
-
-- **F1 · Snapshot rollback is a DB-only flip.** `internal/api/snapshots.go:50-99` `handleRollbackSnapshot` calls `SetActiveRuleVersion` and returns 200 OK without invoking `Applier`. Symptom: UI toast "Rolled back to snapshot #N", but the data plane keeps the pre-rollback config until an unrelated Apply. Same shape as Critic F3 (backup import) that S3-T1 fixes for imports.
-  - Fix outline: route through a new `Applier.RollbackToSnapshot(ctx, snapshotID)` that mirrors `ApplyRules`: transactional DB pointer flip + Assemble + Orchestrator.Apply + health observe + auto-rollback on failure. Reuse the `apply_status` state machine so the panel can surface `health` on the response.
-  - Priority: **HIGH** — this is the exact class of bug S3 exists to prevent, and it's the one control we did not fix in this batch. Backup import is fixed, snapshot rollback still lies.
-
-- **F2 · `handleImportBackup` accepts unknown tar entries silently.** `snapshots.go:213-219` drains unknown members without warning. Not a lie per se (nothing claims they were applied), but a stricter import would surface unrecognized entries so operators know what was ignored.
-  - Priority: LOW.
-
-- **F3 · Rate limits.** Only `/api/v1/login` has one (`panel.go:78`). `/api/v1/rules/apply` and `/api/v1/exits/switch` are protected by `Applier`'s single-flight mutex + `apply_in_flight` 409, which is effectively a rate limit of concurrency=1, but no per-user throttle exists. Not deceptive because success responses accurately reflect state; noted for later hardening.
-  - Priority: LOW.
-
-- **F4 · CORS is permissive.** `server.go:130` allows `https://*` + `http://localhost:5173`. Fine for dev; production hardening deferred.
-  - Priority: LOW.
-
----
-
-## Summary counts
-
-| Category | Count | Screens |
-|---|---:|---|
-| 🟢 Honest | 21 controls | Login, Bootstrap, AppShell, Dashboard, Exits (4), Rules (7), Snapshots (list), Backup (export + import-post-T1), Logs (select/filter/clear/reconnect) |
-| 🟡 Documented stub | 1 control | Logs live tail on non-Linux |
-| 🔴 Deceptive | 1 control | Snapshots rollback (F1) |
-
-**Verdict:** After S3-T1 lands (backup import → Applier), the only remaining 🔴
-control in the panel is snapshot rollback (F1). Everything else that returns a
-"success" signal has been verified to persist AND affect the data plane, OR
-labels itself as a stub. The panel meets AC10's honesty bar for S3, and F1 is
-the single scheduled follow-up.
+The former snapshot-rollback and backup-import DB-only success bugs are fixed:
+both now use Applier and expose the durable
+`submitted`/`confirmed`/`rolled_back`/`failed` lifecycle. Update apply is also
+honestly disabled. The panel is not yet production-operational because the
+privileged execution boundary is absent, and the iOS preflight still probes a
+different transport from the profile's primary payload. No blanket "all controls are honest" or
+"production ready" conclusion is made.

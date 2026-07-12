@@ -37,15 +37,15 @@ const applyPreviewSampleCap = 5
 // falling through to the proxy default is the shape of regression an
 // operator most needs to catch before confirming a real apply.
 type applyPreviewResponse struct {
-	Hash          string                           `json:"hash"`
-	AddedBlock    int                              `json:"added_block"`
-	AddedDirect   int                              `json:"added_direct"`
-	AddedProxy    int                              `json:"added_proxy"`
-	RemovedBlock  int                              `json:"removed_block"`
-	RemovedDirect int                              `json:"removed_direct"`
-	RemovedProxy  int                              `json:"removed_proxy"`
-	ChangedProxy  int                              `json:"changed_proxy"`
-	Total         int                              `json:"total"`
+	Hash          string                          `json:"hash"`
+	AddedBlock    int                             `json:"added_block"`
+	AddedDirect   int                             `json:"added_direct"`
+	AddedProxy    int                             `json:"added_proxy"`
+	RemovedBlock  int                             `json:"removed_block"`
+	RemovedDirect int                             `json:"removed_direct"`
+	RemovedProxy  int                             `json:"removed_proxy"`
+	ChangedProxy  int                             `json:"changed_proxy"`
+	Total         int                             `json:"total"`
 	Sample        map[string][]applyPreviewSample `json:"sample,omitempty"`
 }
 
@@ -62,11 +62,11 @@ func (s *Server) handleApplyPreview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	req.Rules = stripRulesetExpansions(req.Rules)
-	if s.Rulesets != nil {
-		if extra, err := s.Rulesets.Expand(r.Context()); err == nil && len(extra) > 0 {
-			req.Rules = append(req.Rules, extra...)
-		}
+	var err error
+	req.Rules, err = s.expandRulesets(r.Context(), req.Rules)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "ruleset_expand_failed", err.Error())
+		return
 	}
 	set := &rules.RuleSet{Rules: req.Rules}
 	if err := set.Validate(); err != nil {

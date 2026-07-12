@@ -65,6 +65,8 @@ func (d *dispatcher) Dispatch(ctx context.Context, cmd string, args []string, ms
 		return s, nil, err
 	case "/menu":
 		return d.h.Menu(ctx, chatID)
+	case "/help":
+		return "available commands:\n" + strings.Join(DispatchCommands(), " "), nil, nil
 	case "/status":
 		s, err := d.h.Status(ctx)
 		return s, nil, err
@@ -148,12 +150,12 @@ func mustDo(s string, err error) string {
 // Useful for /menu keyboards and for the M2 tgbot-legacy-commands doc.
 func DispatchCommands() []string {
 	return []string{
-		"/start", "/menu", "/status", "/exits", "/rules",
+		"/start", "/menu", "/help", "/status", "/exits", "/rules",
 		"/a", "/cancel", "/dev", "/id", "/ip",
 		"/json", "/loadavg", "/meminfo", "/nf_conntrack_count",
 		"/route", "/stat", "/tcp", "/uptime", "/wireguard", "/www",
 	}
 }
 
-// NotImplemented is a convenience for stub handler methods.
-var NotImplemented = errors.New("tgbot: not implemented")
+// ErrNotImplemented is a convenience for stub handler methods.
+var ErrNotImplemented = errors.New("tgbot: not implemented")

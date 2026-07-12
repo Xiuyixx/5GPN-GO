@@ -27,7 +27,7 @@ type dotConn struct {
 
 	mu       sync.Mutex // guards the fields below
 	conn     net.Conn
-	pending  map[uint16]chan *dns.Msg
+	pending  map[uint16]pendingQuery
 	nextID   uint16
 	closed   bool
 	readerCh chan struct{} // closed when the current reader exits
@@ -35,12 +35,28 @@ type dotConn struct {
 	writeMu sync.Mutex // serializes framed writes on the wire
 }
 
+// pendingQuery binds a DNS ID to the connection generation on which it was
+// written. IDs can be reused after reconnect, so an old reader must never
+// consume or fail a newer connection's waiter merely because the numeric ID
+// matches.
+type pendingQuery struct {
+	conn net.Conn
+	ch   chan *dns.Msg
+}
+
+// ErrDoTQueryCapacity means every DNS message ID on one multiplexed DoT
+// connection is already assigned to an in-flight query.
+var ErrDoTQueryCapacity = errors.New("resolver: DoT query capacity exhausted")
+
 func newDotConn(addr string, dial func(context.Context, string) (net.Conn, error), logger *slog.Logger) *dotConn {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &dotConn{
 		addr:    addr,
 		dial:    dial,
 		logger:  logger,
-		pending: make(map[uint16]chan *dns.Msg),
+		pending: make(map[uint16]pendingQuery),
 	}
 }
 
@@ -48,6 +64,9 @@ func newDotConn(addr string, dial func(context.Context, string) (net.Conn, error
 // reply. On any I/O error the connection is dropped so the next call
 // redials; the caller races another upstream, so we don't retry inline.
 func (c *dotConn) query(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	conn, id, ch, err := c.register(ctx)
 	if err != nil {
 		return nil, err
@@ -58,7 +77,7 @@ func (c *dotConn) query(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
 	werr := writeFramed(conn, msg)
 	c.writeMu.Unlock()
 	if werr != nil {
-		c.dropOnError(conn, id)
+		c.dropOnError(conn)
 		return nil, fmt.Errorf("resolver: write %s: %w", c.addr, werr)
 	}
 
@@ -69,7 +88,13 @@ func (c *dotConn) query(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
 		}
 		return resp, nil
 	case <-ctx.Done():
-		c.forget(id)
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			// A connection that accepted a query but stayed silent until the
+			// deadline is a black hole. Retire it so the next query redials.
+			c.retire(conn)
+		} else {
+			c.forget(conn, id)
+		}
 		return nil, ctx.Err()
 	}
 }
@@ -78,60 +103,63 @@ func (c *dotConn) query(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
 // for this in-flight query, and returns the response channel. Serialized
 // through c.mu so ID assignment and pending-map mutation are atomic.
 func (c *dotConn) register(ctx context.Context) (net.Conn, uint16, chan *dns.Msg, error) {
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return nil, 0, nil, errors.New("resolver: upstream conn closed")
-	}
-	if c.conn == nil {
+	for {
+		c.mu.Lock()
+		if err := ctx.Err(); err != nil {
+			c.mu.Unlock()
+			return nil, 0, nil, err
+		}
+		if c.closed {
+			c.mu.Unlock()
+			return nil, 0, nil, errors.New("resolver: upstream conn closed")
+		}
+		if c.conn != nil {
+			// Assign an unused ID. In practice the map has O(concurrent
+			// queries) entries, well under 65k, so a bounded linear probe is
+			// fine; wrap-around is handled by nextID overflow.
+			id, err := c.pickID()
+			if err != nil {
+				c.mu.Unlock()
+				return nil, 0, nil, err
+			}
+			ch := make(chan *dns.Msg, 1)
+			conn := c.conn
+			c.pending[id] = pendingQuery{conn: conn, ch: ch}
+			c.mu.Unlock()
+			return conn, id, ch, nil
+		}
 		c.mu.Unlock()
 		if err := c.reconnect(ctx); err != nil {
 			return nil, 0, nil, err
 		}
-		c.mu.Lock()
+		// The connection can die between reconnect returning and this
+		// goroutine reacquiring c.mu. Loop until a live generation is pinned.
 	}
-	// Assign an unused ID. In practice the map has O(concurrent
-	// queries) entries, well under 65k, so a bounded linear probe is
-	// fine; wrap-around is handled by nextID overflow.
-	id := c.pickID()
-	ch := make(chan *dns.Msg, 1)
-	c.pending[id] = ch
-	conn := c.conn
-	c.mu.Unlock()
-	return conn, id, ch, nil
 }
 
-func (c *dotConn) pickID() uint16 {
+func (c *dotConn) pickID() (uint16, error) {
 	for i := 0; i < 0x10000; i++ {
 		c.nextID++
 		id := c.nextID
 		if _, exists := c.pending[id]; !exists {
-			return id
+			return id, nil
 		}
 	}
-	// Pending map is completely full — vanishingly unlikely but return
-	// something rather than looping forever. Collision means the older
-	// query will get this reply; caller sees a mismatched ID and errors.
-	c.nextID++
-	return c.nextID
+	return 0, ErrDoTQueryCapacity
 }
 
-func (c *dotConn) forget(id uint16) {
+func (c *dotConn) forget(conn net.Conn, id uint16) {
 	c.mu.Lock()
-	delete(c.pending, id)
+	if pending, ok := c.pending[id]; ok && pending.conn == conn {
+		delete(c.pending, id)
+	}
 	c.mu.Unlock()
 }
 
 // dropOnError tears down conn if it is still the active one, so
 // subsequent queries redial rather than piping into a broken pipe.
-func (c *dotConn) dropOnError(conn net.Conn, id uint16) {
-	c.mu.Lock()
-	if c.conn == conn {
-		c.conn = nil
-	}
-	delete(c.pending, id)
-	c.mu.Unlock()
-	_ = conn.Close()
+func (c *dotConn) dropOnError(conn net.Conn) {
+	c.retire(conn)
 }
 
 // reconnect dials a fresh TLS session and spawns a reader goroutine.
@@ -154,6 +182,10 @@ func (c *dotConn) reconnect(ctx context.Context) error {
 	newConn, err := c.dial(dialCtx, c.addr)
 	if err != nil {
 		return fmt.Errorf("resolver: dial %s: %w", c.addr, err)
+	}
+	if err := ctx.Err(); err != nil {
+		_ = newConn.Close()
+		return err
 	}
 
 	c.mu.Lock()
@@ -190,9 +222,11 @@ func (c *dotConn) reader(conn net.Conn, done chan struct{}) {
 			return
 		}
 		c.mu.Lock()
-		ch, ok := c.pending[msg.Id]
-		if ok {
+		pending, ok := c.pending[msg.Id]
+		if ok && pending.conn == conn {
 			delete(c.pending, msg.Id)
+		} else {
+			ok = false
 		}
 		c.mu.Unlock()
 		if !ok {
@@ -200,30 +234,42 @@ func (c *dotConn) reader(conn net.Conn, done chan struct{}) {
 			continue
 		}
 		select {
-		case ch <- msg:
+		case pending.ch <- msg:
 		default:
 		}
 	}
 }
 
-// terminate marks conn dead, drains the pending map, and unblocks all
-// waiters with nil. Called from the reader goroutine when it hits EOF
-// or a network error.
+// terminate retires conn and unblocks only its own waiters with nil. Called
+// from the reader goroutine when it hits EOF or a network error.
 func (c *dotConn) terminate(conn net.Conn, err error) {
-	c.mu.Lock()
-	if c.conn == conn {
-		c.conn = nil
-	}
-	pending := c.pending
-	c.pending = make(map[uint16]chan *dns.Msg)
-	c.mu.Unlock()
-	_ = conn.Close()
+	c.retire(conn)
 	// Non-EOF errors during shutdown are logged at debug so scanners
 	// don't spam operators.
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
 		c.logger.Debug("dot conn reader exit", "addr", c.addr, "err", err)
 	}
-	for _, ch := range pending {
+}
+
+// retire closes one connection generation and fails only the queries that
+// were registered on that generation. A stale reader may call this after a
+// replacement connection is already active; the replacement and its pending
+// queries are left untouched.
+func (c *dotConn) retire(conn net.Conn) {
+	c.mu.Lock()
+	if c.conn == conn {
+		c.conn = nil
+	}
+	failed := make([]chan *dns.Msg, 0)
+	for id, pending := range c.pending {
+		if pending.conn == conn {
+			delete(c.pending, id)
+			failed = append(failed, pending.ch)
+		}
+	}
+	c.mu.Unlock()
+	_ = conn.Close()
+	for _, ch := range failed {
 		select {
 		case ch <- nil:
 		default:
@@ -243,16 +289,16 @@ func (c *dotConn) close() {
 	conn := c.conn
 	c.conn = nil
 	pending := c.pending
-	c.pending = make(map[uint16]chan *dns.Msg)
+	c.pending = make(map[uint16]pendingQuery)
 	readerDone := c.readerCh
 	c.mu.Unlock()
 
 	if conn != nil {
 		_ = conn.Close()
 	}
-	for _, ch := range pending {
+	for _, pending := range pending {
 		select {
-		case ch <- nil:
+		case pending.ch <- nil:
 		default:
 		}
 	}

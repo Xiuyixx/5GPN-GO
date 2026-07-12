@@ -20,7 +20,7 @@ func openTestDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { store.Close() })
+	t.Cleanup(func() { _ = store.Close() })
 	if _, err := store.Exec(`CREATE TABLE rule_sources (
 		id          INTEGER PRIMARY KEY AUTOINCREMENT,
 		url         TEXT NOT NULL UNIQUE,
@@ -38,14 +38,14 @@ func TestSyncDownloadsFile(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("ETag", `"abc123"`)
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(content))
+		_, _ = w.Write([]byte(content))
 	}))
 	defer srv.Close()
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "chinalist.txt")
 
-	if err := Sync(context.Background(), nil, srv.URL, path); err != nil {
+	if err := syncWithClient(context.Background(), nil, srv.URL, path, srv.Client()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -68,7 +68,7 @@ func TestSyncETagNotModified(t *testing.T) {
 		}
 		w.Header().Set("ETag", `"etag-v1"`)
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("example.com\n"))
+		_, _ = w.Write([]byte("example.com\n"))
 	}))
 	defer srv.Close()
 
@@ -77,7 +77,7 @@ func TestSyncETagNotModified(t *testing.T) {
 	path := filepath.Join(dir, "chinalist.txt")
 
 	// First call: downloads and stores ETag.
-	if err := Sync(context.Background(), store, srv.URL, path); err != nil {
+	if err := syncWithClient(context.Background(), store, srv.URL, path, srv.Client()); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 1 {
@@ -95,7 +95,7 @@ func TestSyncETagNotModified(t *testing.T) {
 
 	// Second call: server returns 304, file unchanged, no write.
 	stat1, _ := os.Stat(path)
-	if err := Sync(context.Background(), store, srv.URL, path); err != nil {
+	if err := syncWithClient(context.Background(), store, srv.URL, path, srv.Client()); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 2 {
@@ -112,14 +112,14 @@ func TestSyncAtomicWrite(t *testing.T) {
 	const content = "baidu.com\nweibo.com\n"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(content))
+		_, _ = w.Write([]byte(content))
 	}))
 	defer srv.Close()
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sub", "chinalist.txt")
 
-	if err := Sync(context.Background(), nil, srv.URL, path); err != nil {
+	if err := syncWithClient(context.Background(), nil, srv.URL, path, srv.Client()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -146,8 +146,15 @@ func TestSyncBadStatus(t *testing.T) {
 	defer srv.Close()
 
 	dir := t.TempDir()
-	err := Sync(context.Background(), nil, srv.URL, filepath.Join(dir, "chinalist.txt"))
+	err := syncWithClient(context.Background(), nil, srv.URL, filepath.Join(dir, "chinalist.txt"), srv.Client())
 	if err == nil {
 		t.Error("expected error on 500 response")
+	}
+}
+
+func TestSyncDefaultClientRejectsPrivateDestination(t *testing.T) {
+	err := Sync(context.Background(), nil, "http://169.254.169.254/latest/meta-data", filepath.Join(t.TempDir(), "list"))
+	if err == nil {
+		t.Fatal("metadata endpoint accepted")
 	}
 }

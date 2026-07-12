@@ -23,8 +23,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -113,10 +115,18 @@ func (c *Controller) Status(ctx context.Context) (string, error) {
 	if err := c.checkInstalled(); err != nil {
 		return "not-installed", err
 	}
-	out, _ := c.run(ctx, "systemctl", "is-active", c.UnitName)
+	out, runErr := c.run(ctx, "systemctl", "is-active", c.UnitName)
 	trimmed := strings.TrimSpace(out)
+	if runErr != nil {
+		switch trimmed {
+		case "inactive", "failed", "activating", "deactivating", "unknown":
+			return trimmed, nil
+		default:
+			return "", fmt.Errorf("mtgctl: systemctl is-active %s: %w: %s", c.UnitName, runErr, trimmed)
+		}
+	}
 	if trimmed == "" {
-		return "inactive", nil
+		return "", errors.New("mtgctl: systemctl is-active returned an empty status")
 	}
 	return trimmed, nil
 }
@@ -194,11 +204,75 @@ func (c *Controller) WriteUnit(ctx context.Context, listen, secret string) error
 	if secret == "" {
 		return errors.New("mtgctl: WriteUnit: secret required")
 	}
+	if strings.ContainsAny(secret, " \t\r\n") {
+		return errors.New("mtgctl: WriteUnit: secret must be one argument")
+	}
+	if _, _, err := net.SplitHostPort(listen); err != nil {
+		return fmt.Errorf("mtgctl: WriteUnit: invalid listen address: %w", err)
+	}
 	unit := renderUnit(c.BinaryPath, listen, secret)
-	if err := os.WriteFile(c.UnitFile, []byte(unit), 0o644); err != nil {
+	old, readErr := os.ReadFile(c.UnitFile)
+	existed := readErr == nil
+	if readErr != nil && !os.IsNotExist(readErr) {
+		return fmt.Errorf("mtgctl: read existing %s: %w", c.UnitFile, readErr)
+	}
+	mode := os.FileMode(0o644)
+	if info, err := os.Stat(c.UnitFile); err == nil {
+		mode = info.Mode().Perm()
+	}
+	if err := writeAtomic(c.UnitFile, []byte(unit), mode); err != nil {
 		return fmt.Errorf("mtgctl: write %s: %w", c.UnitFile, err)
 	}
-	return c.DaemonReload(ctx)
+	if err := c.DaemonReload(ctx); err != nil {
+		var restoreErr error
+		if existed {
+			restoreErr = writeAtomic(c.UnitFile, old, mode)
+		} else {
+			restoreErr = os.Remove(c.UnitFile)
+			if os.IsNotExist(restoreErr) {
+				restoreErr = nil
+			}
+		}
+		if restoreErr == nil {
+			restoreErr = c.DaemonReload(ctx)
+		}
+		if restoreErr != nil {
+			return fmt.Errorf("mtgctl: daemon-reload: %v; restore: %w", err, restoreErr)
+		}
+		return fmt.Errorf("mtgctl: daemon-reload: %w", err)
+	}
+	return nil
+}
+
+func writeAtomic(path string, body []byte, mode os.FileMode) (retErr error) {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".mtg-unit-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		if retErr != nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if err := tmp.Chmod(mode); err != nil {
+		return err
+	}
+	if _, err := tmp.Write(body); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	return nil
 }
 
 // ReadUnit parses the current ExecStart line from the unit file and

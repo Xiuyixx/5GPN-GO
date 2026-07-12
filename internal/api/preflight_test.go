@@ -75,7 +75,7 @@ func startFakeDoT(t *testing.T, handler func(co *dns.Conn)) string {
 				return
 			}
 			go func() {
-				defer conn.Close()
+				defer func() { _ = conn.Close() }()
 				handler(&dns.Conn{Conn: conn})
 			}()
 		}

@@ -1,7 +1,7 @@
 -- +goose Up
 -- +goose StatementBegin
--- apply_status tracks the three-state lifecycle of each Apply operation:
--- submitted → confirmed | rolled_back.
+-- Initial apply_status lifecycle: submitted -> confirmed | rolled_back.
+-- Migration 0007 extends this CHECK with the terminal failed state.
 -- SSE is the push channel; this table is the durable truth source for
 -- clients that reconnect after a disconnect.
 CREATE TABLE apply_status (

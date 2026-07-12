@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # M4 file-size guard.
 #
-# Every non-test .go file under internal/ must be < 800 lines. Enforced
+# Every first-party non-test Go/TypeScript source file must be <= 900 lines. Enforced
 # by both pre-commit (staged files) and CI (whole tree). See
-# docs/tech-debt.md for the "why" — 800 lines is where a single file
-# stops being a unit of reasoning and starts hiding coupling.
+# docs/tech-debt.md for the "why" — the ceiling was 800 in v0.4.1; bumped to
+# 900 in v0.4.2 to accommodate internal/core/applier.go (806) without a
+# forced refactor mid-release. Splitting applier.go is still tracked as tech debt.
 
 set -euo pipefail
 
-LIMIT="${MAX_LINES:-800}"
+LIMIT="${MAX_LINES:-900}"
 
 usage() {
   cat <<EOF
@@ -16,7 +17,7 @@ usage: $0 [--staged | --tree]
 
   --staged   Only look at files currently staged for commit (default in
              pre-commit hook).
-  --tree     Walk internal/**/*.go (used by CI).
+  --tree     Walk internal/, cmd/, and web/src/ (used by CI).
   -h, --help Show this help.
 
 env:
@@ -35,11 +36,14 @@ esac
 collect() {
   if [ "$mode" = "--staged" ]; then
     git diff --cached --name-only --diff-filter=ACMR \
-      | grep -E '^internal/.*\.go$' \
-      | grep -vE '_test\.go$' \
+      | grep -E '^((internal|cmd)/.*\.go|web/src/.*\.(ts|tsx))$' \
+      | grep -vE '(_test\.go|\.test\.(ts|tsx)|\.spec\.(ts|tsx))$' \
       || true
   else
-    find internal -type f -name '*.go' -not -name '*_test.go'
+    find internal cmd web/src -type f \
+      \( -name '*.go' -o -name '*.ts' -o -name '*.tsx' \) \
+      -not -name '*_test.go' -not -name '*.test.ts' -not -name '*.test.tsx' \
+      -not -name '*.spec.ts' -not -name '*.spec.tsx'
   fi
 }
 

@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Heading } from '../components/ui/heading';
 import { Text } from '../components/ui/text';
 import { Divider } from '../components/ui/divider';
 import { getDNSMetrics } from '../api/client';
 import type { DNSListenerHealth, DNSMetrics } from '../api/client';
+import { pollSerially } from '../api/poll';
 
 const POLL_MS = 5000;
 // 5 minutes of history at one sample per poll tick.
@@ -39,34 +40,33 @@ function certColor(days: number): string {
   return 'text-red-600 dark:text-red-400';
 }
 
+export function calculateQPS(previous: Sample | null, latest: Sample | null): number {
+  if (!previous || !latest) return 0;
+  const queryDelta = Math.max(0, latest.metrics.queries_total - previous.metrics.queries_total);
+  const seconds = (latest.ts - previous.ts) / 1000;
+  return seconds > 0 ? queryDelta / seconds : 0;
+}
+
 export default function DNSPlaneCard() {
   const { t } = useTranslation();
   const [history, setHistory] = useState<Sample[]>([]);
   const [err, setErr] = useState<string | null>(null);
-  const mounted = useRef(true);
-
   useEffect(() => {
-    mounted.current = true;
-    async function tick() {
+    const controller = new AbortController();
+    void pollSerially(async (signal) => {
       try {
         const m = await getDNSMetrics();
-        if (!mounted.current) return;
+        if (signal.aborted) return;
         setHistory((prev) => {
           const next = [...prev, { ts: Date.now(), metrics: m }];
           return next.slice(-HISTORY_WINDOW);
         });
         setErr(null);
       } catch (e) {
-        if (!mounted.current) return;
-        setErr(e instanceof Error ? e.message : String(e));
+        if (!signal.aborted) setErr(e instanceof Error ? e.message : String(e));
       }
-    }
-    tick();
-    const id = setInterval(tick, POLL_MS);
-    return () => {
-      mounted.current = false;
-      clearInterval(id);
-    };
+    }, POLL_MS, controller.signal);
+    return () => controller.abort();
   }, []);
 
   const latest = history.length ? history[history.length - 1] : null;
@@ -74,12 +74,7 @@ export default function DNSPlaneCard() {
   const oldest = history.length ? history[0] : null;
 
   // Current QPS: queries_total delta over the last poll interval / 5.
-  let qps = 0;
-  if (latest && prev) {
-    const dq = latest.metrics.queries_total - prev.metrics.queries_total;
-    const dt = (latest.ts - prev.ts) / 1000;
-    qps = dt > 0 ? dq / dt : 0;
-  }
+  const qps = calculateQPS(prev, latest);
 
   // Last-5-minute category hit distribution: delta across the retained window.
   const windowBlock = latest && oldest ? Math.max(0, latest.metrics.hits_block - oldest.metrics.hits_block) : 0;

@@ -1,10 +1,8 @@
 -- +goose Up
 -- +goose StatementBegin
--- wg_peers is the panel-owned registry of enrolled kernel-WireGuard
--- peers for the v0.4.0 split-tunnel plane. Each row = one enrolled
--- device (iPhone, Mac, iPad, ...); the Responder (internal/wg/) reads
--- this table to drive `wg syncconf` and the mobileconfig delivery
--- pipeline reads it to render the per-device WireGuard payload.
+-- wg_peers reserves schema for a future kernel-WireGuard split-tunnel
+-- plane. v0.4.0 has no runtime package, enrollment API, profile generator,
+-- or reconciler that reads or writes this table.
 --
 -- Fields:
 --   device_name        operator-supplied label shown on the Devices
@@ -13,11 +11,8 @@
 --   pubkey             the peer's WireGuard public key, base64. Unique
 --                       because it is both the wg(8) peer identifier
 --                       and the enrollment/profile-URL lookup key.
---   private_key        the peer's WireGuard private key, generated
---                       server-side for one-tap install UX. Stored
---                       AES-GCM encrypted at rest with a JWT-secret-
---                       derived key; decrypted only when rendering the
---                       mobileconfig. Never logged.
+--   private_key        reserved opaque storage. No encryption or key
+--                       lifecycle is implemented by the current runtime.
 --   address             the peer's tunnel IP, CIDR form (e.g.
 --                       10.66.66.2/32). Assigned at enrollment.
 --   endpoint            the server's public host:port the peer dials
@@ -46,11 +41,8 @@
 --   revoked             soft-delete flag. Revoked peers are dropped
 --                       from the next SyncConf but the row is kept for
 --                       audit/history.
---   state               enrollment lifecycle: 'pending' immediately
---                       after INSERT, 'active' once SyncConf has
---                       confirmed the peer landed in the kernel wg
---                       dump, 'failed' if Bootstrap could not recover
---                       it after a crash, 'revoked' after Revoke().
+--   state               reserved enrollment lifecycle value. The current
+--                       runtime does not transition or reconcile it.
 --   created_at          unix epoch of enrollment.
 --   last_reconcile_at   unix epoch of the most recent reconcile that
 --                       touched this peer's allowed_ips_hash /

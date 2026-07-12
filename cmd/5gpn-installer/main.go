@@ -15,7 +15,7 @@ import (
 	"github.com/Xiuyixx/5GPN-Go/internal/installer"
 )
 
-var version = "0.0.0-m3"
+var version = "0.4.0"
 
 func usage() {
 	fmt.Fprint(os.Stderr, `5gpn-installer <subcommand> [flags]
@@ -31,7 +31,7 @@ subcommands:
 
 common flags:
   --dry-run   Print planned operations without executing them.
-  --root DIR  Re-root every path under DIR (test / container use).
+  --root DIR  Re-root paths for controlled dry-runs/tests; not a rootless install.
 `)
 }
 
@@ -78,7 +78,7 @@ type commonFlags struct {
 
 func (c *commonFlags) bind(fs *flag.FlagSet) {
 	fs.BoolVar(&c.dryRun, "dry-run", false, "print actions without executing")
-	fs.StringVar(&c.root, "root", "", "re-root every path under DIR (test / container use)")
+	fs.StringVar(&c.root, "root", "", "re-root paths under DIR (controlled dry-runs/tests; not rootless)")
 	fs.StringVar(&c.osFixture, "os-fixture", "",
 		"path to an os-release fixture file (bypass live detection; used in CI + preview)")
 }
@@ -211,6 +211,8 @@ func runMigrate(ctx context.Context, args []string) int {
 	legacyRoot := fs.String("legacy-root", "",
 		"re-root legacy paths (/opt/proxy-gateway, /etc/proxy-gateway, /etc/dnsdist) under DIR")
 	force := fs.Bool("force", false, "overwrite existing config.yaml")
+	allowPartial := fs.Bool("allow-partial", false,
+		"migrate only config-backed fields even when legacy rules/exits would be omitted")
 	_ = fs.Parse(args)
 
 	layout := installer.LegacyDefaults()
@@ -230,6 +232,8 @@ func runMigrate(ctx context.Context, args []string) int {
 	fmt.Printf("  local dns:       %s\n", or(plan.Extract.LocalDNS, "(none)"))
 	fmt.Printf("  current exit:    %s\n", or(plan.Extract.CurrentExit, "(none)"))
 	fmt.Printf("  exits:           %d\n", len(plan.Extract.Exits))
+	fmt.Printf("  rules:           %s\n", present(plan.Extract.Rules))
+	fmt.Printf("  policy map:      %s\n", present(plan.Extract.PolicyMap))
 	fmt.Printf("  tg token:        %s\n", redact(plan.Extract.TGToken))
 	fmt.Printf("  tg admin ids:    %s\n", or(plan.Extract.TGAdminIDs, "(none)"))
 	fmt.Printf("  ios profile uuid:%s\n", or(plan.Extract.IOSProfileUUID, "(none)"))
@@ -250,7 +254,8 @@ func runMigrate(ctx context.Context, args []string) int {
 	}
 
 	if err := installer.Migrate(ctx, cf.env(), cf.executor(), plan, installer.MigrateOptions{
-		Force: *force,
+		Force:        *force,
+		AllowPartial: *allowPartial,
 	}); err != nil {
 		fmt.Fprintln(os.Stderr, "migrate:", err)
 		return 1
@@ -274,6 +279,13 @@ func redact(s string) string {
 		return "***"
 	}
 	return s[:3] + "…" + s[len(s)-3:]
+}
+
+func present(s string) string {
+	if s == "" {
+		return "(none)"
+	}
+	return "present"
 }
 
 func runDoctor(ctx context.Context, args []string) int {

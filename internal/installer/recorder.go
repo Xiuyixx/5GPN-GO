@@ -14,7 +14,7 @@ import (
 // The recorder backs both `--dry-run` (log then return nil) and the unit
 // tests (assert against Ops).
 type Op struct {
-	Kind string // run | write | mkdir | remove | chown
+	Kind string // run | write | mkdir | remove | chown | chmod
 	Path string
 	Cmd  string
 	Args []string
@@ -25,15 +25,16 @@ type Op struct {
 // RecordingExecutor collects operations without touching the host.
 // When Apply is false it behaves as a pure dry-run.
 type RecordingExecutor struct {
-	mu        sync.Mutex
-	Ops       []Op
-	Files     map[string][]byte
-	Dirs      map[string]bool
-	Owners    map[string]string
-	Existing  map[string]bool
-	Apply     bool // if true, mirror writes into an in-memory FS (still no host mutation)
-	Failures  map[string]error
-	Out       io.Writer
+	mu       sync.Mutex
+	Ops      []Op
+	Files    map[string][]byte
+	Dirs     map[string]bool
+	Owners   map[string]string
+	Modes    map[string]os.FileMode
+	Existing map[string]bool
+	Apply    bool // if true, mirror writes into an in-memory FS (still no host mutation)
+	Failures map[string]error
+	Out      io.Writer
 }
 
 // NewRecorder returns a fresh recording executor.
@@ -42,6 +43,7 @@ func NewRecorder() *RecordingExecutor {
 		Files:    map[string][]byte{},
 		Dirs:     map[string]bool{},
 		Owners:   map[string]string{},
+		Modes:    map[string]os.FileMode{},
 		Existing: map[string]bool{},
 		Failures: map[string]error{},
 	}
@@ -54,15 +56,17 @@ func (r *RecordingExecutor) record(op Op) {
 	if r.Out != nil {
 		switch op.Kind {
 		case "run":
-			fmt.Fprintf(r.Out, "  → run: %s %s\n", op.Cmd, strings.Join(op.Args, " "))
+			_, _ = fmt.Fprintf(r.Out, "  → run: %s %s\n", op.Cmd, strings.Join(op.Args, " "))
 		case "write":
-			fmt.Fprintf(r.Out, "  → write: %s (%d bytes, mode %o)\n", op.Path, op.Size, op.Mode)
+			_, _ = fmt.Fprintf(r.Out, "  → write: %s (%d bytes, mode %o)\n", op.Path, op.Size, op.Mode)
 		case "mkdir":
-			fmt.Fprintf(r.Out, "  → mkdir: %s (mode %o)\n", op.Path, op.Mode)
+			_, _ = fmt.Fprintf(r.Out, "  → mkdir: %s (mode %o)\n", op.Path, op.Mode)
 		case "remove":
-			fmt.Fprintf(r.Out, "  → remove: %s\n", op.Path)
+			_, _ = fmt.Fprintf(r.Out, "  → remove: %s\n", op.Path)
 		case "chown":
-			fmt.Fprintf(r.Out, "  → chown: %s → %s\n", op.Path, op.Cmd)
+			_, _ = fmt.Fprintf(r.Out, "  → chown: %s → %s\n", op.Path, op.Cmd)
+		case "chmod":
+			_, _ = fmt.Fprintf(r.Out, "  → chmod: %s → %o\n", op.Path, op.Mode)
 		}
 	}
 }
@@ -113,6 +117,14 @@ func (r *RecordingExecutor) Chown(path, user, group string) error {
 		r.Owners[path] = user + ":" + group
 	}
 	return r.fail("chown:" + path)
+}
+
+func (r *RecordingExecutor) Chmod(path string, mode os.FileMode) error {
+	r.record(Op{Kind: "chmod", Path: path, Mode: mode})
+	if r.Apply {
+		r.Modes[path] = mode
+	}
+	return r.fail("chmod:" + path)
 }
 
 func (r *RecordingExecutor) Exists(path string) bool {

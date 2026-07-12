@@ -178,6 +178,101 @@ func TestFrontdoor_DegradedMode_ShortCircuitsToServfail(t *testing.T) {
 	}
 }
 
+func TestFrontdoor_StartAfterGiveUpResetsSupervisorAndDegraded(t *testing.T) {
+	up := newFakeUpstream(t, func(q *dns.Msg) *dns.Msg {
+		m := new(dns.Msg)
+		m.SetReply(q)
+		m.Answer = []dns.RR{makeA(q.Question[0].Name, "203.0.113.21")}
+		return m
+	})
+	fd := startTestFrontdoor(t, newLiveResolver(t, up), true, false)
+	c := &dns.Client{Net: "udp", Timeout: 3 * time.Second}
+	q := makeQuery("restarted.example.com", dns.TypeA)
+	if _, _, err := c.Exchange(q, fd.testUDPAddr(t)); err != nil {
+		t.Fatalf("exchange before give-up: %v", err)
+	}
+
+	fd.mu.Lock()
+	oldSupervisor := fd.supervisor
+	fd.mu.Unlock()
+	if oldSupervisor == nil {
+		t.Fatal("first Start did not install a supervisor")
+	}
+
+	// Model the persistent give-up fields that matter to a later Start. The
+	// supervisor's own give-up/run termination is covered by
+	// TestSupervisor_GivesUpAfterFiveRestartsWithin60s; this regression pins
+	// Frontdoor's lifecycle boundary without waiting through all backoffs.
+	oldSupervisor.mu.Lock()
+	oldSupervisor.givenUp = true
+	oldSupervisor.restarts = make([]time.Time, MaxRestartsPerWindow+1)
+	for i := range oldSupervisor.restarts {
+		oldSupervisor.restarts[i] = time.Now()
+	}
+	oldSupervisor.mu.Unlock()
+	fd.enterDegraded()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := fd.Shutdown(ctx); err != nil {
+		cancel()
+		t.Fatalf("Shutdown after give-up: %v", err)
+	}
+	cancel()
+
+	if err := fd.Start(context.Background()); err != nil {
+		t.Fatalf("second Start: %v", err)
+	}
+
+	fd.mu.Lock()
+	newSupervisor := fd.supervisor
+	fd.mu.Unlock()
+	if newSupervisor == nil || newSupervisor == oldSupervisor {
+		t.Fatal("second Start reused the exhausted supervisor")
+	}
+	if newSupervisor.GivenUp() {
+		t.Fatal("new supervisor inherited given-up state")
+	}
+	newSupervisor.mu.Lock()
+	restarts := len(newSupervisor.restarts)
+	newSupervisor.mu.Unlock()
+	if restarts != 0 {
+		t.Fatalf("new supervisor inherited %d restart timestamps", restarts)
+	}
+	if fd.Status().Degraded {
+		t.Fatal("second Start retained degraded state")
+	}
+
+	resp, _, err := c.Exchange(q, fd.testUDPAddr(t))
+	if err != nil {
+		t.Fatalf("exchange after second Start: %v", err)
+	}
+	if resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 1 {
+		t.Fatalf("unexpected response after second Start: %+v", resp)
+	}
+}
+
+func TestServeAll_PlainCrashKeepsEncryptedListeners(t *testing.T) {
+	fd := New(Config{}, nil, testLogger())
+	// A udpServer without listen() deterministically makes serve() fail. The
+	// encrypted placeholders need no live sockets: this test pins ownership,
+	// namely that a plain listener crash must not shut them down or clear them.
+	fd.udp = []*udpServer{{fd: fd, addr: "broken"}}
+	dot := &DoT{}
+	doq := &DoQ{}
+	doh3 := &DoH3{}
+	fd.dot, fd.doq, fd.doh3 = dot, doq, doh3
+
+	if err := fd.serveAll(context.Background()); err == nil {
+		t.Fatal("serveAll returned nil for an uninitialised UDP server")
+	}
+	if fd.dot != dot || fd.doq != doq || fd.doh3 != doh3 {
+		t.Fatal("plain listener crash tore down an encrypted DNS listener")
+	}
+	if len(fd.udp) != 0 || len(fd.tcp) != 0 {
+		t.Fatal("plain listeners were not cleared after their supervised task crashed")
+	}
+}
+
 func TestSupervisor_GivesUpAfterFiveRestartsWithin60s(t *testing.T) {
 	sv := NewSupervisor(testLogger())
 

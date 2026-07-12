@@ -28,7 +28,7 @@ func run(req request) (int, error) {
 	if err != nil {
 		return 1, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	if err := conn.SetDeadline(time.Now().Add(rwTimeout)); err != nil {
 		return 1, err

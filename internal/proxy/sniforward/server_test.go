@@ -187,6 +187,23 @@ func TestSelectUpstream_CaseInsensitive(t *testing.T) {
 	}
 }
 
+func TestDialUpstream_ResolvedPrivateRejected(t *testing.T) {
+	s := New(Config{}, nil)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	conn, err := s.dialUpstream(ctx, "localhost:443", false)
+	if conn != nil {
+		_ = conn.Close()
+		t.Fatal("localhost received an external forwarding connection")
+	}
+	if err == nil {
+		t.Fatal("localhost was not rejected")
+	}
+	if !strings.Contains(err.Error(), "non-public") {
+		t.Fatalf("error = %q, want non-public destination rejection", err)
+	}
+}
+
 // -----------------------------------------------------------------------
 // End-to-end: real TLS client → sniforward → real TLS backend
 // -----------------------------------------------------------------------
@@ -196,10 +213,10 @@ func TestSelectUpstream_CaseInsensitive(t *testing.T) {
 // of it, then dials sniforward with a real TLS client. Success =
 // TLS handshake finishes end-to-end and the backend's banner reaches
 // the client, proving:
-//   1. SNI peek picked the right upstream.
-//   2. The peeked record was replayed byte-identical (otherwise the
-//      TLS record MAC would fail).
-//   3. The two-way pipe pumps bytes both directions.
+//  1. SNI peek picked the right upstream.
+//  2. The peeked record was replayed byte-identical (otherwise the
+//     TLS record MAC would fail).
+//  3. The two-way pipe pumps bytes both directions.
 func TestForward_EndToEnd_PanelDomain(t *testing.T) {
 	panelDomain := "panel.local.test"
 	certPEM, keyPEM := selfSignedCert(t, panelDomain)
@@ -213,7 +230,7 @@ func TestForward_EndToEnd_PanelDomain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("backend listen: %v", err)
 	}
-	defer backendLn.Close()
+	defer func() { _ = backendLn.Close() }()
 	go func() {
 		for {
 			c, err := backendLn.Accept()
@@ -221,7 +238,7 @@ func TestForward_EndToEnd_PanelDomain(t *testing.T) {
 				return
 			}
 			go func(c net.Conn) {
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				_, _ = c.Write([]byte("PANEL_OK"))
 			}(c)
 		}
@@ -235,7 +252,7 @@ func TestForward_EndToEnd_PanelDomain(t *testing.T) {
 	if err := srv.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer srv.Shutdown(context.Background())
+	defer func() { _ = srv.Shutdown(context.Background()) }()
 
 	tlsClient, err := tls.Dial("tcp", srv.Addr(), &tls.Config{
 		ServerName:         panelDomain,
@@ -245,7 +262,7 @@ func TestForward_EndToEnd_PanelDomain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("client dial: %v", err)
 	}
-	defer tlsClient.Close()
+	defer func() { _ = tlsClient.Close() }()
 
 	got := tlsClient.ConnectionState().PeerCertificates[0].Subject.CommonName
 	if got != panelDomain {

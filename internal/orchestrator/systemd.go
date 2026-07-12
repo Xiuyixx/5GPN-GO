@@ -27,9 +27,9 @@ var ErrApplyInFlight = errors.New("orchestrator: apply in flight")
 // their units, run a health probe, roll back on failure.
 type Systemd struct {
 	Logger        *slog.Logger
-	DnsdistPath   string        // default /etc/dnsdist/dnsdist.conf
-	MihomoPath    string        // default /etc/mihomo/config.yaml
-	SniproxyPath  string        // default /etc/sniproxy.conf
+	DnsdistPath   string // default /etc/dnsdist/dnsdist.conf
+	MihomoPath    string // default /etc/mihomo/config.yaml
+	SniproxyPath  string // default /etc/sniproxy.conf
 	HealthCheck   func(ctx context.Context) error
 	HealthDelay   time.Duration // wait before probe, default 3s
 	HealthTimeout time.Duration // probe budget, default 5s
@@ -49,8 +49,10 @@ type Systemd struct {
 	// Apply attempt uses TryLock and returns ErrApplyInFlight.
 	applyMu sync.Mutex
 
-	// reloadOverride is used only by tests to skip real systemctl calls.
-	reloadOverride func(context.Context) error
+	// Overrides are test seams for deterministic filesystem/systemctl failures.
+	renderFileOverride func(string, Renderer, *config.Config) error
+	restoreOverride    func(snapshotBundle) error
+	reloadOverride     func(context.Context) error
 }
 
 // DefaultSystemd builds a Systemd with sane paths + a permissive
@@ -107,18 +109,31 @@ func (s *Systemd) Apply(ctx context.Context, req ApplyRequest) (ApplyResult, err
 	}
 
 	if err := s.render(req.Config); err != nil {
+		restoreErr := s.restore(prev)
+		if restoreErr != nil {
+			restoreErr = fmt.Errorf("restore after render failure: %w", restoreErr)
+		}
+		result, finalErr := failedApplyResult(err, restoreErr)
 		s.applyMu.Unlock()
-		return ApplyResult{Reason: err.Error()}, err
+		return result, finalErr
 	}
 
 	if err := s.reloadUnits(ctx); err != nil {
 		s.log().Warn("apply: reload failed — restoring previous configs", "err", err)
-		_ = s.restore(prev)
+		rollbackErr := s.restoreAndReload(ctx, prev)
+		if rollbackErr != nil {
+			s.log().Error("apply: rollback failed after reload error", "err", rollbackErr)
+		}
+		result, finalErr := failedApplyResult(err, rollbackErr)
 		s.applyMu.Unlock()
-		return ApplyResult{RolledBack: true, Health: "failed", Reason: err.Error()}, err
+		return result, finalErr
 	}
 
 	if s.HealthCheck == nil {
+		if rolledBack, err := s.commitOrRestore(ctx, req, prev); err != nil {
+			s.applyMu.Unlock()
+			return ApplyResult{RolledBack: rolledBack, Health: "failed", Reason: err.Error()}, err
+		}
 		s.setConfig(req.Config)
 		s.applyMu.Unlock()
 		return ApplyResult{Health: "ok"}, nil
@@ -155,15 +170,13 @@ func (s *Systemd) observeHealth(req ApplyRequest, prev snapshotBundle) {
 	res := ApplyResult{}
 	if err != nil {
 		s.log().Warn("apply: post-reload health probe failed", "err", err)
-		if rerr := s.restore(prev); rerr != nil {
-			s.log().Error("apply: restore failed during rollback", "err", rerr)
+		rollbackErr := s.restoreAndReload(ctx, prev)
+		if rollbackErr != nil {
+			s.log().Error("apply: rollback failed after health error", "err", rollbackErr)
 		}
-		if rerr := s.reloadUnits(ctx); rerr != nil {
-			s.log().Error("apply: reload failed during rollback", "err", rerr)
-		}
-		res.RolledBack = true
-		res.Health = "failed"
-		res.Reason = err.Error()
+		res, _ = failedApplyResult(err, rollbackErr)
+	} else if rolledBack, err := s.commitOrRestore(ctx, req, prev); err != nil {
+		res = ApplyResult{RolledBack: rolledBack, Health: "failed", Reason: err.Error()}
 	} else {
 		s.setConfig(req.Config)
 		res.Health = "ok"
@@ -174,11 +187,44 @@ func (s *Systemd) observeHealth(req ApplyRequest, prev snapshotBundle) {
 	}
 }
 
-// Rollback restores the last-known-good on-disk config from the
-// tarball attached to the given snapshot id — M2 S4 keeps this as a
-// convenience wrapper around the same render machinery so the panel
-// UI's "roll back to snapshot #N" and health-check failure paths share
-// the same code.
+func (s *Systemd) commitOrRestore(ctx context.Context, req ApplyRequest, prev snapshotBundle) (bool, error) {
+	if req.Commit == nil {
+		return false, nil
+	}
+	if err := req.Commit(ctx); err != nil {
+		s.log().Error("apply: control-plane commit failed — restoring previous configs", "err", err)
+		commitErr := fmt.Errorf("control-plane commit: %w", err)
+		if rollbackErr := s.restoreAndReload(ctx, prev); rollbackErr != nil {
+			return false, errors.Join(commitErr, rollbackErr)
+		}
+		return true, commitErr
+	}
+	return false, nil
+}
+
+func failedApplyResult(primary, rollbackErr error) (ApplyResult, error) {
+	if rollbackErr == nil {
+		return ApplyResult{RolledBack: true, Health: "failed", Reason: primary.Error()}, primary
+	}
+	combined := errors.Join(primary, rollbackErr)
+	return ApplyResult{Health: "failed", Reason: combined.Error()}, combined
+}
+
+func (s *Systemd) restoreAndReload(ctx context.Context, prev snapshotBundle) error {
+	var restoreErr, reloadErr error
+	if err := s.restore(prev); err != nil {
+		restoreErr = fmt.Errorf("restore previous configs: %w", err)
+	}
+	if err := s.reloadUnits(ctx); err != nil {
+		reloadErr = fmt.Errorf("reload previous configs: %w", err)
+	}
+	return errors.Join(restoreErr, reloadErr)
+}
+
+// Rollback re-renders and reloads the in-memory last-known-good Config.
+// snapshotID is logged for correlation; this implementation does not load a
+// snapshot archive by id. The core layer selects the snapshot's rule version
+// and publishes the resulting Config before calling this method.
 func (s *Systemd) Rollback(ctx context.Context, snapshotID int64) error {
 	if !s.applyMu.TryLock() {
 		return ErrApplyInFlight
@@ -191,10 +237,24 @@ func (s *Systemd) Rollback(ctx context.Context, snapshotID int64) error {
 	if cfg == nil {
 		return errors.New("systemd: no base config to rollback to")
 	}
-	if err := s.render(cfg); err != nil {
-		return err
+	prev, err := s.snapshotCurrent()
+	if err != nil {
+		return fmt.Errorf("snapshot current configs before rollback: %w", err)
 	}
-	return s.reloadUnits(ctx)
+	if err := s.render(cfg); err != nil {
+		return s.compensateRollbackFailure(ctx, prev, fmt.Errorf("render rollback configs: %w", err))
+	}
+	if err := s.reloadUnits(ctx); err != nil {
+		return s.compensateRollbackFailure(ctx, prev, fmt.Errorf("reload rollback configs: %w", err))
+	}
+	return nil
+}
+
+func (s *Systemd) compensateRollbackFailure(ctx context.Context, prev snapshotBundle, primary error) error {
+	if compensationErr := s.restoreAndReload(ctx, prev); compensationErr != nil {
+		return errors.Join(primary, fmt.Errorf("compensate rollback failure: %w", compensationErr))
+	}
+	return primary
 }
 
 func (s *Systemd) setConfig(cfg *config.Config) {
@@ -209,16 +269,23 @@ type Renderer interface {
 }
 
 func (s *Systemd) render(cfg *config.Config) error {
-	if err := writeRendered(s.DnsdistPath, render.DnsdistRenderer{}, cfg); err != nil {
+	if err := s.renderFile(s.DnsdistPath, render.DnsdistRenderer{}, cfg); err != nil {
 		return fmt.Errorf("render dnsdist: %w", err)
 	}
-	if err := writeRendered(s.MihomoPath, render.MihomoRenderer{}, cfg); err != nil {
+	if err := s.renderFile(s.MihomoPath, render.MihomoRenderer{}, cfg); err != nil {
 		return fmt.Errorf("render mihomo: %w", err)
 	}
-	if err := writeRendered(s.SniproxyPath, render.SniproxyRenderer{}, cfg); err != nil {
+	if err := s.renderFile(s.SniproxyPath, render.SniproxyRenderer{}, cfg); err != nil {
 		return fmt.Errorf("render sniproxy: %w", err)
 	}
 	return nil
+}
+
+func (s *Systemd) renderFile(path string, r Renderer, cfg *config.Config) error {
+	if s.renderFileOverride != nil {
+		return s.renderFileOverride(path, r, cfg)
+	}
+	return writeRendered(path, r, cfg)
 }
 
 // writeRendered renders into a buffer first so a template error never
@@ -228,51 +295,107 @@ func writeRendered(path string, r Renderer, cfg *config.Config) error {
 	if err := r.Render(cfg, buf); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	tmp := path + ".new"
-	if err := os.WriteFile(tmp, buf.Bytes(), 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return writeBytesAtomic(path, buf.Bytes(), 0o644)
+}
+
+type snapshotFile struct {
+	body   []byte
+	exists bool
+	mode   os.FileMode
 }
 
 type snapshotBundle struct {
-	dnsdist, mihomo, sniproxy []byte
+	dnsdist, mihomo, sniproxy snapshotFile
 }
 
 func (s *Systemd) snapshotCurrent() (snapshotBundle, error) {
-	var b snapshotBundle
-	if body, err := os.ReadFile(s.DnsdistPath); err == nil {
-		b.dnsdist = body
+	dnsdist, err := snapshotPath(s.DnsdistPath)
+	if err != nil {
+		return snapshotBundle{}, err
 	}
-	if body, err := os.ReadFile(s.MihomoPath); err == nil {
-		b.mihomo = body
+	mihomo, err := snapshotPath(s.MihomoPath)
+	if err != nil {
+		return snapshotBundle{}, err
 	}
-	if body, err := os.ReadFile(s.SniproxyPath); err == nil {
-		b.sniproxy = body
+	sniproxy, err := snapshotPath(s.SniproxyPath)
+	if err != nil {
+		return snapshotBundle{}, err
 	}
-	return b, nil
+	return snapshotBundle{dnsdist: dnsdist, mihomo: mihomo, sniproxy: sniproxy}, nil
+}
+
+func snapshotPath(path string) (snapshotFile, error) {
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return snapshotFile{}, nil
+	}
+	if err != nil {
+		return snapshotFile{}, fmt.Errorf("snapshot %s: %w", path, err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return snapshotFile{}, fmt.Errorf("snapshot %s: %w", path, err)
+	}
+	return snapshotFile{body: body, exists: true, mode: info.Mode().Perm()}, nil
 }
 
 func (s *Systemd) restore(prev snapshotBundle) error {
+	if s.restoreOverride != nil {
+		return s.restoreOverride(prev)
+	}
+	var restoreErrs []error
 	for _, item := range []struct {
 		path string
-		body []byte
+		file snapshotFile
 	}{
 		{s.DnsdistPath, prev.dnsdist},
 		{s.MihomoPath, prev.mihomo},
 		{s.SniproxyPath, prev.sniproxy},
 	} {
-		if item.body == nil {
+		if !item.file.exists {
+			if err := os.Remove(item.path); err != nil && !os.IsNotExist(err) {
+				restoreErrs = append(restoreErrs, fmt.Errorf("remove newly rendered %s: %w", item.path, err))
+			}
 			continue
 		}
-		if err := os.WriteFile(item.path, item.body, 0o644); err != nil {
-			return err
+		mode := item.file.mode
+		if mode == 0 {
+			mode = 0o644
+		}
+		if err := writeBytesAtomic(item.path, item.file.body, mode); err != nil {
+			restoreErrs = append(restoreErrs, fmt.Errorf("restore %s: %w", item.path, err))
 		}
 	}
-	return nil
+	return errors.Join(restoreErrs...)
+}
+
+func writeBytesAtomic(path string, body []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".5gpn-render-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer func() { _ = os.Remove(name) }()
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(body); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, path)
 }
 
 func (s *Systemd) reloadUnits(ctx context.Context) error {

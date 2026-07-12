@@ -8,8 +8,16 @@ import { Field, FieldGroup, Fieldset, Label, Legend } from '../components/ui/fie
 import { Select } from '../components/ui/select';
 import { Input } from '../components/ui/input';
 import { useAuthStore } from '../stores/auth';
+import { delay } from '../api/poll';
+import { streamSSE } from '../api/sse';
 
-const UNITS = ['5gpn', 'dnsdist', 'mihomo', 'sniproxy'];
+export const LOG_UNITS = ['5gpn', 'dnsdist', 'mihomo', 'sniproxy', 'mtg'];
+
+export function formatLogTimestamp(value: string): string {
+  const millis = /^-?\d{15,}$/.test(value) ? Number(value) / 1000 : Number.NaN;
+  const date = Number.isFinite(millis) ? new Date(millis) : new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString();
+}
 
 // PRESETS maps a preset key to the regex-alternation the operator wants
 // the log stream narrowed to. Each value is a case-insensitive regex
@@ -47,45 +55,59 @@ export default function Logs() {
   const [lines, setLines] = useState<Line[]>([]);
   const [connected, setConnected] = useState(false);
   const [errDetail, setErrDetail] = useState<string | null>(null);
-  const esRef = useRef<EventSource | null>(null);
+  const [reconnectKey, setReconnectKey] = useState(0);
+  const streamRef = useRef<AbortController | null>(null);
   const token = useAuthStore((s) => s.token);
 
-  function connect(u: string) {
-    esRef.current?.close();
+  function reconnect() {
+    streamRef.current?.abort();
+    setLines([]);
+    setConnected(false);
+    setErrDetail(null);
+    setReconnectKey((key) => key + 1);
+  }
+
+  useEffect(() => {
+    const controller = new AbortController();
+    streamRef.current = controller;
     setLines([]);
     setConnected(false);
     setErrDetail(null);
     if (!token) {
       setErrDetail(t('logs.errorNotSignedIn'));
-      return;
+      return () => controller.abort();
     }
-    // EventSource cannot set Authorization headers; the backend accepts
-    // ?access_token=<jwt> as a fallback for /api/v1/events/*.
-    const url = `/api/v1/events/logs?unit=${encodeURIComponent(u)}&access_token=${encodeURIComponent(token)}`;
-    const es = new EventSource(url);
-    es.onopen = () => { setConnected(true); setErrDetail(null); };
-    es.onerror = () => {
-      setConnected(false);
-      // EventSource auto-reconnects; the error event fires on every drop.
-      // Only surface a message if we never opened at all.
-      if (es.readyState === EventSource.CLOSED) {
-        setErrDetail(t('logs.errorConnectionClosed'));
+
+    const run = async () => {
+      while (!controller.signal.aborted) {
+        try {
+          await streamSSE(
+            `/api/v1/events/logs?unit=${encodeURIComponent(unit)}`,
+            token,
+            controller.signal,
+            () => { setConnected(true); setErrDetail(null); },
+            (data) => {
+              try {
+                const line: Line = JSON.parse(data);
+                setLines((prev) => [...prev.slice(-499), line]);
+              } catch { /* ignore malformed frames */ }
+            },
+          );
+        } catch (error) {
+          if (controller.signal.aborted) return;
+          setErrDetail(error instanceof Error ? error.message : t('logs.errorConnectionClosed'));
+        }
+        setConnected(false);
+        try {
+          await delay(1000, controller.signal);
+        } catch {
+          return;
+        }
       }
     };
-    es.onmessage = (ev) => {
-      try {
-        const line: Line = JSON.parse(ev.data);
-        setLines((prev) => [...prev.slice(-499), line]);
-      } catch { /* ignore malformed */ }
-    };
-    esRef.current = es;
-  }
-
-  useEffect(() => {
-    connect(unit);
-    return () => { esRef.current?.close(); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [unit]);
+    void run();
+    return () => controller.abort();
+  }, [reconnectKey, t, token, unit]);
 
   // Compile the current filter as a case-insensitive regex. If the
   // user typed something that isn't valid regex syntax (a stray "["
@@ -138,7 +160,7 @@ export default function Logs() {
             <Field>
               <Label>{t('logs.unitLabel')}</Label>
               <Select value={unit} onChange={(e) => setUnit(e.target.value)}>
-                {UNITS.map((u) => <option key={u} value={u}>{u}</option>)}
+                {LOG_UNITS.map((u) => <option key={u} value={u}>{u}</option>)}
               </Select>
             </Field>
             <Field>
@@ -165,7 +187,7 @@ export default function Logs() {
         </Fieldset>
         <div className="mt-4 flex gap-2">
           <Button plain onClick={() => setLines([])}>{t('logs.clearButton')}</Button>
-          <Button plain onClick={() => connect(unit)}>{t('logs.reconnectButton')}</Button>
+          <Button plain onClick={reconnect}>{t('logs.reconnectButton')}</Button>
         </div>
       </form>
 
@@ -175,7 +197,7 @@ export default function Logs() {
             ? <span className="text-zinc-500">{t('logs.waitingForStream')}</span>
             : filtered.map((l) => (
                 <div key={l.seq} className="whitespace-pre-wrap">
-                  <span className="text-zinc-500">{new Date(l.ts).toLocaleTimeString()}</span>
+                  <span className="text-zinc-500">{formatLogTimestamp(l.ts)}</span>
                   {' '}
                   <span className="text-cyan-300">[{l.unit}]</span>
                   {' '}

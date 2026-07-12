@@ -53,7 +53,7 @@ func startDaemon(t *testing.T) *daemon {
 		bin = filepath.Join("..", "..", "dist", "5gpn")
 	}
 	if _, err := os.Stat(bin); err != nil {
-		t.Fatalf("daemon binary missing at %s (set E2E_BINARY or run `make build` first): %v", bin, err)
+		t.Fatalf("daemon binary missing at %s (set E2E_BINARY or run `make web-build build-embed` first): %v", bin, err)
 	}
 
 	stateDir := t.TempDir()

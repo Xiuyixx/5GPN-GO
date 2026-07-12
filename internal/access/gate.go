@@ -1,21 +1,22 @@
-// Package access implements the "internal-only" IP allowlist gate used
-// by the panel HTTP surface and by the three transparent proxies
-// (mtproxy, sniforward, quicforward).
+// Package access implements the "internal-only" IP allowlist gate used by
+// the panel HTTP surface and the in-process sniforward/quicforward listeners.
+// The external mtg.service does not call this gate and requires a separate
+// host firewall or systemd access policy.
 //
 // The business rule this encodes:
 //
-//   5GPN-Go's paying customers all reach the box via the 联通 5G APN
-//   slice, which assigns a private (RFC1918) source address such as
-//   172.22.0.0/16. When the operator flips
-//   frontdoor.internal_only_enabled to true, every accept-time call
-//   site asks the gate whether the peer's IP falls inside a configured
-//   list of CIDRs (default: private/RFC1918 + loopback). If not, the
-//   connection is silently dropped before any handshake budget is
-//   spent, so unauthenticated internet scanners never see the panel
-//   login, mtproxy handshake, or QUIC/TLS peek path at all. Loopback
-//   is always allowed regardless of the CIDR list so local health
-//   probes and cross-process localhost dials never lock themselves out
-//   (e.g. sniforward → 127.0.0.1:8444 panel backend).
+//	5GPN-Go's paying customers all reach the box via the 联通 5G APN
+//	slice, which assigns a private (RFC1918) source address such as
+//	172.22.0.0/16. When the operator flips
+//	frontdoor.internal_only_enabled to true, every accept-time call
+//	site asks the gate whether the peer's IP falls inside a configured
+//	list of CIDRs (default: private/RFC1918 + loopback). If not, the
+//	connection is silently dropped before any handshake budget is
+//	spent, so unauthenticated internet scanners never see the panel
+//	login or the in-process QUIC/TLS peek path. Loopback
+//	is always allowed regardless of the CIDR list so local health
+//	probes and cross-process localhost dials never lock themselves out
+//	(e.g. sniforward → 127.0.0.1:8444 panel backend).
 //
 // The gate is deliberately dead simple: two settings (enabled + CIDR
 // list) parsed into an atomic.Pointer[state] snapshot, plus an Allow()
@@ -97,6 +98,23 @@ func (g *Gate) Refresh(ctx context.Context) error {
 		next.cidrs = parseCIDRs(raw)
 	}
 	g.snapshot.Store(next)
+	return nil
+}
+
+// Configure validates and atomically publishes an explicit policy without a
+// second database read. Settings handlers use this immediately after their
+// transactional write, so the persisted and live policies change together.
+func (g *Gate) Configure(enabled bool, raw string) error {
+	if g == nil {
+		return nil
+	}
+	if strings.TrimSpace(raw) == "" {
+		raw = DefaultInternalCIDRs
+	}
+	if err := ValidateCIDRs(raw); err != nil {
+		return err
+	}
+	g.snapshot.Store(&state{enabled: enabled, cidrs: parseCIDRs(raw)})
 	return nil
 }
 

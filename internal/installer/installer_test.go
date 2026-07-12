@@ -3,6 +3,7 @@ package installer
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -142,10 +143,7 @@ func TestInstall_WritesSourceBinary(t *testing.T) {
 	}
 }
 
-// TestInstall_ChownsConfigDir asserts the daemon-user chown happens for
-// ConfigDir. Without this the config.yaml written by installer (as root)
-// stays root-owned and the User=5gpn daemon boots with EACCES on read.
-func TestInstall_ChownsConfigDir(t *testing.T) {
+func TestInstall_SecuresConfigAndStateTrees(t *testing.T) {
 	ctx := context.Background()
 	env := Defaults().WithRoot(t.TempDir())
 	rec := NewRecorder()
@@ -154,13 +152,39 @@ func TestInstall_ChownsConfigDir(t *testing.T) {
 	if err := Install(ctx, env, rec, InstallOptions{}); err != nil {
 		t.Fatalf("install: %v", err)
 	}
-	// RecordingExecutor records chown as Op{Kind:"chown", Path:path,
-	// Cmd:"user:group"} (see recorder.go) — mirrored into Owners when
-	// Apply is true, which the test sets.
-	want := env.User + ":" + env.Group
-	if got := rec.Owners[env.ConfigDir]; got != want {
+	if got, want := rec.Owners[env.ConfigDir], "root:"+env.Group; got != want {
 		t.Errorf("expected chown %s → %s, got %q (owners=%v)",
 			env.ConfigDir, want, got, rec.Owners)
+	}
+	if got, want := rec.Owners[env.DataDir], env.User+":"+env.Group; got != want {
+		t.Errorf("expected chown %s → %s, got %q", env.DataDir, want, got)
+	}
+	for path, want := range map[string]os.FileMode{
+		env.ConfigDir:    0o750,
+		env.ConfigPath(): 0o640,
+		env.DataDir:      0o700,
+	} {
+		if got := rec.Modes[path]; got != want {
+			t.Errorf("mode %s=%o want=%o", path, got, want)
+		}
+	}
+}
+
+func TestInstall_TightensExistingSQLiteFiles(t *testing.T) {
+	env := Defaults().WithRoot(t.TempDir())
+	rec := NewRecorder()
+	rec.Apply = true
+	for _, name := range []string{"5gpn.db", "5gpn.db-wal", "5gpn.db-shm", "jwt.key"} {
+		rec.Existing[filepath.Join(env.DataDir, name)] = true
+	}
+	if err := Install(context.Background(), env, rec, InstallOptions{SkipUnit: true, SkipEnable: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"5gpn.db", "5gpn.db-wal", "5gpn.db-shm", "jwt.key"} {
+		path := filepath.Join(env.DataDir, name)
+		if got := rec.Modes[path]; got != 0o600 {
+			t.Errorf("mode %s=%o want=600", path, got)
+		}
 	}
 }
 
@@ -182,8 +206,10 @@ func TestUnitRender_HasHardening(t *testing.T) {
 	for _, want := range []string{
 		"NoNewPrivileges=yes",
 		"ProtectSystem=strict",
+		"UMask=0077",
 		"CAP_NET_BIND_SERVICE",
 		"ExecStart=/usr/local/bin/5gpn",
+		"ReadWritePaths=/var/lib/5gpn",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("unit missing %q\n%s", want, got)

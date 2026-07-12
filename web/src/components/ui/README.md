@@ -1,5 +1,6 @@
 # Panel UI Components
 
-All files here are copied verbatim from `catalyst-ui-kit/typescript/` (Tailwind Plus Catalyst UI Kit). The original headers with the Tailwind Plus license notice are preserved.
+The components originate from `catalyst-ui-kit/typescript/` (Tailwind Plus Catalyst UI Kit).
+`link.tsx` is the intentional project adapter that connects Catalyst navigation to React Router.
 
-Do not hand-edit these files — if a component needs a project-specific tweak, wrap it in `../<name>.tsx` at this directory's parent level and re-export.
+Keep other project-specific behavior in wrappers at this directory's parent level.

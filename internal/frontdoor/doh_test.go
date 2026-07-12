@@ -30,7 +30,7 @@ func newFakeUpstream(t *testing.T, reply func(*dns.Msg) *dns.Msg) *resolver.Upst
 	up.TLSDial = func(ctx context.Context, addr string) (net.Conn, error) {
 		client, server := net.Pipe()
 		go func() {
-			defer server.Close()
+			defer func() { _ = server.Close() }()
 			var hdr [2]byte
 			if _, err := io.ReadFull(server, hdr[:]); err != nil {
 				return

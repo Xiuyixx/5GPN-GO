@@ -1,13 +1,13 @@
-// Package rules implements the M1 rule engine: parse, validate, statically
-// dry-run, snapshot, apply, and auto-rollback. The engine never spins a
-// second mihomo TUN instance — that would violate the low-memory VPS budget.
-// Instead dry-run compiles the candidate rules and simulates matches against
-// SQLite-backed fixture domains.
+// Package rules implements parsing, validation, static dry-run matching, and
+// serialization for the rules applied by the control plane.
 package rules
 
 import (
 	"fmt"
+	"net"
 	"strings"
+
+	"github.com/miekg/dns"
 )
 
 // Kind is the classifier a rule matches on.
@@ -32,11 +32,9 @@ var allKinds = map[Kind]struct{}{
 
 // Rule is one entry in a rules list. Priority is 0-based; lower wins on ties.
 //
-// GroupID is optional UI-only metadata: rules that share a GroupID were
-// added as one batch (usually an import). The panel collapses them into
-// a single card. Manually-created rules leave GroupID empty and continue
-// to render one-card-per-rule. GroupID has no effect on dry-run, apply,
-// or the mihomo emission — it is a rendering hint only.
+// GroupID identifies materialized managed-ruleset entries. Historical
+// one-shot imports may also carry a non-empty value; callers must compare it
+// against the current ruleset registry before treating the rule as managed.
 type Rule struct {
 	ID       string `yaml:"id"       json:"id"`
 	Kind     Kind   `yaml:"kind"     json:"kind"`
@@ -81,6 +79,26 @@ func (r Rule) Validate() error {
 	if strings.TrimSpace(r.Action) == "" {
 		return fmt.Errorf("rule %s: action required", r.ID)
 	}
+	if strings.ContainsAny(r.Action, ",\r\n") {
+		return fmt.Errorf("rule %s: action contains a CSV delimiter or newline", r.ID)
+	}
+	if strings.ContainsAny(r.Pattern, ",\r\n") {
+		return fmt.Errorf("rule %s: pattern contains a CSV delimiter or newline", r.ID)
+	}
+	switch r.Kind {
+	case KindDomain, KindDomainSuffix:
+		if _, ok := dns.IsDomainName(strings.TrimSpace(r.Pattern)); !ok {
+			return fmt.Errorf("rule %s: invalid domain pattern %q", r.ID, r.Pattern)
+		}
+	case KindIPCIDR:
+		if _, _, err := net.ParseCIDR(strings.TrimSpace(r.Pattern)); err != nil {
+			return fmt.Errorf("rule %s: invalid CIDR pattern %q", r.ID, r.Pattern)
+		}
+	case KindMatch:
+		if strings.TrimSpace(r.Pattern) != "" {
+			return fmt.Errorf("rule %s: MATCH rule must not have a pattern", r.ID)
+		}
+	}
 	return nil
 }
 
@@ -95,7 +113,8 @@ type RuleSet struct {
 func (s RuleSet) Validate() error {
 	seen := map[string]bool{}
 	matchCount := 0
-	for _, r := range s.Rules {
+	matchIndex := -1
+	for i, r := range s.Rules {
 		if err := r.Validate(); err != nil {
 			return err
 		}
@@ -105,10 +124,22 @@ func (s RuleSet) Validate() error {
 		seen[r.ID] = true
 		if r.Kind == KindMatch {
 			matchCount++
+			matchIndex = i
 		}
 	}
 	if matchCount > 1 {
 		return fmt.Errorf("ruleset: at most one MATCH rule allowed")
+	}
+	if matchIndex >= 0 {
+		match := s.Rules[matchIndex]
+		for i, r := range s.Rules {
+			if i == matchIndex {
+				continue
+			}
+			if r.Priority > match.Priority || (r.Priority == match.Priority && i > matchIndex) {
+				return fmt.Errorf("ruleset: MATCH rule must be last after sorting by priority")
+			}
+		}
 	}
 	return nil
 }

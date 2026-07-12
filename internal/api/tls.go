@@ -135,6 +135,8 @@ func (s *Server) runDual(ctx context.Context, lc listenerConfig) error {
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 	if lc.tlsConfig != nil {
 		primary.TLSConfig = lc.tlsConfig.Clone()
@@ -148,6 +150,8 @@ func (s *Server) runDual(ctx context.Context, lc listenerConfig) error {
 			ReadHeaderTimeout: 10 * time.Second,
 			ReadTimeout:       30 * time.Second,
 			WriteTimeout:      60 * time.Second,
+			IdleTimeout:       120 * time.Second,
+			MaxHeaderBytes:    1 << 20,
 			TLSConfig:         lc.tlsConfig.Clone(),
 		}
 	}

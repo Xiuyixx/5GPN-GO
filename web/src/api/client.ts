@@ -1,4 +1,5 @@
 import { useAuthStore } from '../stores/auth';
+import { useMeStore } from '../stores/me';
 
 export class APIError extends Error {
   code: string;
@@ -8,6 +9,11 @@ export class APIError extends Error {
     this.code = code;
     this.status = status;
   }
+}
+
+export function clearSession() {
+  useAuthStore.getState().clear();
+  useMeStore.getState().clear();
 }
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -22,7 +28,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   });
 
   if (res.status === 401) {
-    useAuthStore.getState().clear();
+    clearSession();
   }
 
   if (res.status === 204) return undefined as T;
@@ -95,10 +101,9 @@ export interface Rule {
   priority: number;
   enabled: boolean;
   notes?: string;
-  // group_id: shared by every rule that came in through the same import
-  // batch. Undefined for manually-added rules. The panel collapses same-
-  // group rules into one card; group_id has no effect on dry-run or
-  // apply — it's UI-only metadata.
+  // group_id identifies materialized ruleset entries. Historical one-shot
+  // imports may also carry it, so only values matching a registered ruleset
+  // are managed expansion metadata.
   group_id?: string;
 }
 
@@ -145,6 +150,14 @@ export interface ApplyResponse {
   reason?: string;
 }
 
+export interface PendingApplyResponse {
+  apply_id: string;
+  hash: string;
+  status: 'pending';
+  snapshot_id?: number;
+  rule_version_id?: number;
+}
+
 export interface ExitSummary {
   id: string;
   protocol: string;
@@ -169,9 +182,15 @@ export interface Snapshot {
   created_at: string;
   config_hash: string;
   note?: string;
+  active?: boolean;
+  rollbackable: boolean;
 }
 export interface SnapshotsResponse { snapshots: Snapshot[] }
-export interface RollbackResponse { snapshot_id: number; rule_version_id: number }
+export interface RollbackResponse {
+  snapshot_id: number;
+  rule_version_id: number;
+  health?: string;
+}
 
 export interface ApplyResult {
   health: string;
@@ -243,6 +262,10 @@ export interface BackupImportResult {
   entries: number;
   total_bytes: number;
   applied: boolean;
+  pending?: boolean;
+  apply_id?: string;
+  status?: 'pending' | 'succeeded' | 'failed';
+  ignored_entries?: string[];
   note?: string;
   applied_snapshot_id?: number;
   apply_result?: ApplyResult;

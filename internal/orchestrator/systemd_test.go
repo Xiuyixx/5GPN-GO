@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Xiuyixx/5GPN-Go/internal/config"
+	"github.com/Xiuyixx/5GPN-Go/internal/rules"
 )
 
 func testConfig() *config.Config {
@@ -27,6 +29,15 @@ func testConfig() *config.Config {
 		},
 		Exits: []config.ExitConfig{{ID: "direct", Protocol: "direct"}},
 	}
+}
+
+func invalidRenderConfig() *config.Config {
+	cfg := testConfig()
+	cfg.EffectiveRules = []rules.Rule{{
+		ID: "invalid-action", Kind: rules.KindDomain, Pattern: "example.com",
+		Action: "missing-exit", Enabled: true,
+	}}
+	return cfg
 }
 
 func TestSystemdRenderWritesFilesAtomically(t *testing.T) {
@@ -212,6 +223,339 @@ func TestSystemdApplyRejectsNilConfig(t *testing.T) {
 	_, err := s.Apply(context.Background(), ApplyRequest{SnapshotID: 1, Config: nil})
 	if err == nil {
 		t.Fatal("expected error for nil config")
+	}
+}
+
+func TestSystemdApplyRestoresFilesAfterPartialRenderFailure(t *testing.T) {
+	dir := t.TempDir()
+	paths := []string{
+		filepath.Join(dir, "dnsdist.conf"),
+		filepath.Join(dir, "mihomo.yaml"),
+		filepath.Join(dir, "sniproxy.conf"),
+	}
+	for i, path := range paths {
+		if err := os.WriteFile(path, []byte(fmt.Sprintf("baseline-%d", i)), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reloads := 0
+	s := &Systemd{DnsdistPath: paths[0], MihomoPath: paths[1], SniproxyPath: paths[2]}
+	s.reloadOverride = func(context.Context) error {
+		reloads++
+		return nil
+	}
+
+	res, err := s.Apply(context.Background(), ApplyRequest{SnapshotID: 1, Config: invalidRenderConfig()})
+	if err == nil || !strings.Contains(err.Error(), `action "missing-exit"`) {
+		t.Fatalf("apply error = %v, want invalid-action render error", err)
+	}
+	if !res.RolledBack || res.Health != "failed" {
+		t.Fatalf("result = %+v, want successful rollback", res)
+	}
+	if reloads != 0 {
+		t.Fatalf("reloads = %d, want 0 after render failure", reloads)
+	}
+	for i, path := range paths {
+		body, readErr := os.ReadFile(path)
+		if readErr != nil || string(body) != fmt.Sprintf("baseline-%d", i) {
+			t.Fatalf("%s not restored: body=%q err=%v", path, body, readErr)
+		}
+	}
+}
+
+func TestSystemdApplyRenderRestoreFailureIsCombinedAndNotRolledBack(t *testing.T) {
+	dir := t.TempDir()
+	s := &Systemd{
+		DnsdistPath:  filepath.Join(dir, "dnsdist.conf"),
+		MihomoPath:   filepath.Join(dir, "mihomo.yaml"),
+		SniproxyPath: filepath.Join(dir, "sniproxy.conf"),
+	}
+	restoreErr := errors.New("restore failed")
+	s.restoreOverride = func(snapshotBundle) error { return restoreErr }
+
+	res, err := s.Apply(context.Background(), ApplyRequest{SnapshotID: 1, Config: invalidRenderConfig()})
+	if err == nil || !strings.Contains(err.Error(), `action "missing-exit"`) || !errors.Is(err, restoreErr) {
+		t.Fatalf("combined error = %v, want render and restore causes", err)
+	}
+	if res.RolledBack || res.Health != "failed" {
+		t.Fatalf("result = %+v, rollback failure must not report RolledBack", res)
+	}
+}
+
+func TestSystemdApplyRollbackReloadFailureIsCombinedAndNotRolledBack(t *testing.T) {
+	dir := t.TempDir()
+	s := &Systemd{
+		DnsdistPath:  filepath.Join(dir, "dnsdist.conf"),
+		MihomoPath:   filepath.Join(dir, "mihomo.yaml"),
+		SniproxyPath: filepath.Join(dir, "sniproxy.conf"),
+	}
+	applyReloadErr := errors.New("apply reload failed")
+	rollbackReloadErr := errors.New("rollback reload failed")
+	reloads := 0
+	s.reloadOverride = func(context.Context) error {
+		reloads++
+		if reloads == 1 {
+			return applyReloadErr
+		}
+		return rollbackReloadErr
+	}
+
+	res, err := s.Apply(context.Background(), ApplyRequest{SnapshotID: 1, Config: testConfig()})
+	if !errors.Is(err, applyReloadErr) || !errors.Is(err, rollbackReloadErr) {
+		t.Fatalf("combined error = %v, want apply and rollback reload causes", err)
+	}
+	if res.RolledBack || res.Health != "failed" {
+		t.Fatalf("result = %+v, rollback reload failure must not report RolledBack", res)
+	}
+	if reloads != 2 {
+		t.Fatalf("reloads = %d, want apply + rollback attempts", reloads)
+	}
+}
+
+func TestSystemdHealthRollbackFailureReportsNotRolledBack(t *testing.T) {
+	dir := t.TempDir()
+	healthErr := errors.New("health failed")
+	rollbackReloadErr := errors.New("rollback reload failed")
+	observed := make(chan ApplyResult, 1)
+	reloads := 0
+	s := &Systemd{
+		DnsdistPath:   filepath.Join(dir, "dnsdist.conf"),
+		MihomoPath:    filepath.Join(dir, "mihomo.yaml"),
+		SniproxyPath:  filepath.Join(dir, "sniproxy.conf"),
+		HealthTimeout: time.Second,
+		HealthCheck:   func(context.Context) error { return healthErr },
+		HealthObserver: func(_ context.Context, _ ApplyRequest, res ApplyResult) {
+			observed <- res
+		},
+	}
+	s.reloadOverride = func(context.Context) error {
+		reloads++
+		if reloads == 1 {
+			return nil
+		}
+		return rollbackReloadErr
+	}
+
+	res, err := s.Apply(context.Background(), ApplyRequest{SnapshotID: 1, Config: testConfig()})
+	if err != nil || res.Health != "observing" {
+		t.Fatalf("initial result = %+v err=%v", res, err)
+	}
+	select {
+	case final := <-observed:
+		if final.RolledBack || final.Health != "failed" {
+			t.Fatalf("final result = %+v, want failed without rollback claim", final)
+		}
+		if !strings.Contains(final.Reason, healthErr.Error()) || !strings.Contains(final.Reason, rollbackReloadErr.Error()) {
+			t.Fatalf("final reason = %q, want both failures", final.Reason)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("health observer did not report rollback failure")
+	}
+}
+
+func TestSystemdCommitFailureRestoresAndReloadsPreviousFiles(t *testing.T) {
+	dir := t.TempDir()
+	dnsPath := filepath.Join(dir, "dnsdist.conf")
+	mihoPath := filepath.Join(dir, "mihomo.yaml")
+	sniPath := filepath.Join(dir, "sniproxy.conf")
+	baselines := map[string]string{
+		dnsPath:  "-- old dnsdist",
+		mihoPath: "old: mihomo",
+		sniPath:  "# old sniproxy",
+	}
+	for path, body := range baselines {
+		if err := os.WriteFile(path, []byte(body), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reloads := 0
+	oldConfig := testConfig()
+	s := &Systemd{
+		DnsdistPath: dnsPath, MihomoPath: mihoPath, SniproxyPath: sniPath,
+		Config: oldConfig,
+	}
+	s.reloadOverride = func(context.Context) error { reloads++; return nil }
+	res, err := s.Apply(context.Background(), ApplyRequest{
+		SnapshotID: 2,
+		Config:     testConfig(),
+		Commit:     func(context.Context) error { return errors.New("database unavailable") },
+	})
+	if err == nil || !res.RolledBack {
+		t.Fatalf("commit failure result=%+v err=%v", res, err)
+	}
+	if reloads != 2 {
+		t.Fatalf("reload calls=%d, want new + restored", reloads)
+	}
+	for path, want := range baselines {
+		body, readErr := os.ReadFile(path)
+		if readErr != nil || string(body) != want {
+			t.Fatalf("%s not restored: body=%q err=%v", path, body, readErr)
+		}
+		info, _ := os.Stat(path)
+		if info.Mode().Perm() != 0o640 {
+			t.Fatalf("%s mode=%04o, want 0640", path, info.Mode().Perm())
+		}
+	}
+	if s.Config != oldConfig {
+		t.Fatal("failed commit replaced last-known-good Config")
+	}
+}
+
+func TestSystemdCommitFailureRemovesFilesThatDidNotExistBefore(t *testing.T) {
+	dir := t.TempDir()
+	paths := []string{
+		filepath.Join(dir, "dnsdist.conf"),
+		filepath.Join(dir, "mihomo.yaml"),
+		filepath.Join(dir, "sniproxy.conf"),
+	}
+	s := &Systemd{DnsdistPath: paths[0], MihomoPath: paths[1], SniproxyPath: paths[2]}
+	s.reloadOverride = func(context.Context) error { return nil }
+	_, err := s.Apply(context.Background(), ApplyRequest{
+		SnapshotID: 1,
+		Config:     testConfig(),
+		Commit:     func(context.Context) error { return errors.New("commit failed") },
+	})
+	if err == nil {
+		t.Fatal("expected commit error")
+	}
+	for _, path := range paths {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("new file survived rollback: %s err=%v", path, statErr)
+		}
+	}
+}
+
+func TestSystemdRollbackRestoresAllFilesAfterPartialRenderFailure(t *testing.T) {
+	for _, failAt := range []int{2, 3} {
+		t.Run(fmt.Sprintf("file-%d", failAt), func(t *testing.T) {
+			dir := t.TempDir()
+			paths := []string{
+				filepath.Join(dir, "dnsdist.conf"),
+				filepath.Join(dir, "mihomo.yaml"),
+				filepath.Join(dir, "sniproxy.conf"),
+			}
+			baselines := []string{"old dnsdist", "old mihomo", "old sniproxy"}
+			for i, path := range paths {
+				if err := os.WriteFile(path, []byte(baselines[i]), 0o640); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			renderErr := errors.New("injected per-file render failure")
+			renderCalls := 0
+			reloadCalls := 0
+			s := &Systemd{
+				DnsdistPath: paths[0], MihomoPath: paths[1], SniproxyPath: paths[2],
+				Config: testConfig(),
+			}
+			s.renderFileOverride = func(path string, r Renderer, cfg *config.Config) error {
+				renderCalls++
+				if renderCalls == failAt {
+					return renderErr
+				}
+				return writeRendered(path, r, cfg)
+			}
+			s.reloadOverride = func(context.Context) error {
+				reloadCalls++
+				return nil
+			}
+
+			err := s.Rollback(context.Background(), 42)
+			if !errors.Is(err, renderErr) {
+				t.Fatalf("Rollback error = %v, want injected render failure", err)
+			}
+			if renderCalls != failAt {
+				t.Fatalf("render calls = %d, want %d", renderCalls, failAt)
+			}
+			if reloadCalls != 1 {
+				t.Fatalf("reload calls = %d, want one compensating reload", reloadCalls)
+			}
+			for i, path := range paths {
+				body, readErr := os.ReadFile(path)
+				if readErr != nil || string(body) != baselines[i] {
+					t.Fatalf("%s not restored: body=%q err=%v", path, body, readErr)
+				}
+				info, statErr := os.Stat(path)
+				if statErr != nil || info.Mode().Perm() != 0o640 {
+					t.Fatalf("%s mode not restored: mode=%v err=%v", path, info.Mode().Perm(), statErr)
+				}
+			}
+		})
+	}
+}
+
+func TestSystemdRollbackReloadFailureRestoresAndReloadsPreviousFiles(t *testing.T) {
+	dir := t.TempDir()
+	paths := []string{
+		filepath.Join(dir, "dnsdist.conf"),
+		filepath.Join(dir, "mihomo.yaml"),
+		filepath.Join(dir, "sniproxy.conf"),
+	}
+	baselines := []string{"old dnsdist", "old mihomo", "old sniproxy"}
+	for i, path := range paths {
+		if err := os.WriteFile(path, []byte(baselines[i]), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	initialReloadErr := errors.New("initial rollback reload failed")
+	reloadCalls := 0
+	s := &Systemd{
+		DnsdistPath: paths[0], MihomoPath: paths[1], SniproxyPath: paths[2],
+		Config: testConfig(),
+	}
+	s.reloadOverride = func(context.Context) error {
+		reloadCalls++
+		if reloadCalls == 1 {
+			return initialReloadErr
+		}
+		return nil
+	}
+
+	err := s.Rollback(context.Background(), 42)
+	if !errors.Is(err, initialReloadErr) {
+		t.Fatalf("Rollback error = %v, want initial reload failure", err)
+	}
+	if reloadCalls != 2 {
+		t.Fatalf("reload calls = %d, want initial and compensating reloads", reloadCalls)
+	}
+	for i, path := range paths {
+		body, readErr := os.ReadFile(path)
+		if readErr != nil || string(body) != baselines[i] {
+			t.Fatalf("%s not restored: body=%q err=%v", path, body, readErr)
+		}
+	}
+}
+
+func TestSystemdRollbackCompensationJoinsAllFailures(t *testing.T) {
+	dir := t.TempDir()
+	initialReloadErr := errors.New("initial rollback reload failed")
+	restoreErr := errors.New("restore failed")
+	compensationReloadErr := errors.New("compensating reload failed")
+	reloadCalls := 0
+	s := &Systemd{
+		DnsdistPath:  filepath.Join(dir, "dnsdist.conf"),
+		MihomoPath:   filepath.Join(dir, "mihomo.yaml"),
+		SniproxyPath: filepath.Join(dir, "sniproxy.conf"),
+		Config:       testConfig(),
+	}
+	s.restoreOverride = func(snapshotBundle) error { return restoreErr }
+	s.reloadOverride = func(context.Context) error {
+		reloadCalls++
+		if reloadCalls == 1 {
+			return initialReloadErr
+		}
+		return compensationReloadErr
+	}
+
+	err := s.Rollback(context.Background(), 42)
+	for _, want := range []error{initialReloadErr, restoreErr, compensationReloadErr} {
+		if !errors.Is(err, want) {
+			t.Fatalf("Rollback error = %v, want cause %v", err, want)
+		}
+	}
+	if reloadCalls != 2 {
+		t.Fatalf("reload calls = %d, compensation reload must run after restore failure", reloadCalls)
 	}
 }
 

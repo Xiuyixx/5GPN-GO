@@ -80,7 +80,7 @@ func (s *SQLStore) List(ctx context.Context) ([]Exit, error) {
 	if err != nil {
 		return nil, fmt.Errorf("exit: list: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []Exit
 	for rows.Next() {
@@ -178,7 +178,7 @@ func (s *SQLStore) Switch(ctx context.Context, exitID string) error {
 	if err != nil {
 		return fmt.Errorf("exit: switch begin: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	var exists int
 	err = tx.QueryRowContext(ctx,

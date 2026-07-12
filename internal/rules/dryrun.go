@@ -28,8 +28,7 @@ type DryRunResult struct {
 // DryRun applies the candidate ruleset against a list of fixtures using a
 // static matcher — no external processes, no TUN interfaces. GEOSITE/GEOIP
 // rules are treated as matching only if the fixture explicitly names them
-// in Notes (M1 keeps the fixture surface deliberately small; M2 loads real
-// geosite dat files).
+// in Notes. This static dry-run does not load geosite data files.
 //
 // fallthroughTarget is the exit name applied to fixtures that match no rule
 // (equivalent to the renderer's synthetic MATCH fallback). Pass the result of
@@ -104,7 +103,7 @@ func ruleMatchesFixture(r Rule, f TestFixture) bool {
 		ip := net.ParseIP(f.IP)
 		return ip != nil && cidr.Contains(ip)
 	case KindGeoSite, KindGeoIP, KindRuleSet:
-		// M1 stub: fixture must opt in explicitly via Notes token "hint:<pattern>".
+		// Fixture must opt in explicitly via Notes token "hint:<pattern>".
 		token := "hint:" + r.Pattern
 		return strings.Contains(f.Notes, token)
 	case KindMatch:
@@ -113,7 +112,9 @@ func ruleMatchesFixture(r Rule, f TestFixture) bool {
 	return false
 }
 
-func equalFold(a, b string) bool { return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b)) }
+func equalFold(a, b string) bool {
+	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
+}
 
 func domainHasSuffix(domain, suffix string) bool {
 	d := strings.ToLower(strings.TrimSpace(domain))
@@ -123,4 +124,3 @@ func domainHasSuffix(domain, suffix string) bool {
 	}
 	return strings.HasSuffix(d, "."+s)
 }
-

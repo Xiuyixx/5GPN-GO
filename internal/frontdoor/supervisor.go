@@ -83,7 +83,7 @@ func (sv *Supervisor) Run(ctx context.Context, task func(ctx context.Context) er
 			sv.givenUp = true
 			sv.mu.Unlock()
 			if !already {
-				sv.logger.Error("frontdoor: supervisor exhausted restart budget — degrading to SERVFAIL",
+				sv.logger.Error("frontdoor: supervisor exhausted restart budget; plain listeners unavailable",
 					"event", "5gpn.frontdoor.supervisor.giveup",
 					"max_restarts", MaxRestartsPerWindow,
 					"window", RestartWindow.String(),

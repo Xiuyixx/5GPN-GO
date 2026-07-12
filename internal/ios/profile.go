@@ -1,5 +1,6 @@
-// Package ios generates the DoT mobileconfig profile and serves it plus a
-// short landing HTML over the systemd-socket-activated port 8111 handler.
+// Package ios generates an encrypted-DNS mobileconfig profile and serves it
+// plus a short landing page. The primary payload uses DoH; an optional second
+// payload provides a DoT fallback.
 //
 // The Python legacy (5GPN-X/ios-http.py) was inetd-style: one child per
 // TCP connect. The Go port keeps the exact same behavior — a single
@@ -9,8 +10,10 @@ package ios
 
 import (
 	"bytes"
+	"encoding/xml"
 	"errors"
 	"fmt"
+	"html"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,8 +22,8 @@ import (
 
 // ProfileParams parameterizes the mobileconfig template.
 type ProfileParams struct {
-	Domain      string // required — the DoT server hostname
-	DisplayName string // shown in Settings; defaults to "5GPN DoT"
+	Domain      string // required — the primary DoH server hostname
+	DisplayName string // shown in Settings; defaults to "5GPN Encrypted DNS"
 	Identifier  string // reverse-DNS style unique id, defaults to "com.5gpn.dot"
 	UUID        string // required (RFC 4122) — persistent per install
 	PayloadUUID string // required — nested payload UUID (distinct from UUID)
@@ -32,9 +35,9 @@ type ProfileParams struct {
 	OnDemand bool
 
 	// FallbackDoT, when non-empty, adds a SECOND DNSSettings payload
-	// pointing at this DoT server (hostname, or an IP whose cert carries a
+	// pointing at this fallback DoT server (hostname, or an IP whose cert carries a
 	// matching IP SAN, e.g. Cloudflare's "1.1.1.1") so the device still has
-	// a working encrypted resolver if the primary VPS-hosted DoT server
+	// a working encrypted resolver if the primary VPS-hosted DoH server
 	// goes down. Apple's device-management docs explicitly allow more than
 	// one DNSSettings payload per profile for exactly this redundancy case.
 	// This is the fix for the v0.2.9 iPhone-blackout regression.
@@ -65,7 +68,13 @@ const onDemandRulesBlock = `                <key>OnDemandRules</key>
                 </array>
 `
 
-var mobileConfigTemplate = template.Must(template.New("mobileconfig").Parse(`<?xml version="1.0" encoding="UTF-8"?>
+var mobileConfigTemplate = template.Must(template.New("mobileconfig").Funcs(template.FuncMap{
+	"xml": func(v string) string {
+		var out bytes.Buffer
+		_ = xml.EscapeText(&out, []byte(v))
+		return out.String()
+	},
+}).Parse(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -77,22 +86,22 @@ var mobileConfigTemplate = template.Must(template.New("mobileconfig").Parse(`<?x
                 <key>DNSProtocol</key>
                 <string>HTTPS</string>
                 <key>ServerName</key>
-                <string>{{ .Domain }}</string>
+                <string>{{ xml .Domain }}</string>
                 <key>ServerURL</key>
-                <string>https://{{ .Domain }}/dns-query</string>
+                <string>https://{{ xml .Domain }}/dns-query</string>
 {{- if .OnDemand }}
 ` + onDemandRulesBlock + `{{- end }}
             </dict>
             <key>PayloadDescription</key>
             <string>5GPN gateway encrypted DNS profile</string>
             <key>PayloadDisplayName</key>
-            <string>{{ .DisplayName }}</string>
+            <string>{{ xml .DisplayName }}</string>
             <key>PayloadIdentifier</key>
-            <string>{{ .Identifier }}.payload</string>
+            <string>{{ xml .Identifier }}.payload</string>
             <key>PayloadType</key>
             <string>com.apple.dnsSettings.managed</string>
             <key>PayloadUUID</key>
-            <string>{{ .PayloadUUID }}</string>
+            <string>{{ xml .PayloadUUID }}</string>
             <key>PayloadVersion</key>
             <integer>1</integer>
         </dict>
@@ -103,33 +112,33 @@ var mobileConfigTemplate = template.Must(template.New("mobileconfig").Parse(`<?x
                 <key>DNSProtocol</key>
                 <string>TLS</string>
                 <key>ServerName</key>
-                <string>{{ .FallbackDoT }}</string>
+                <string>{{ xml .FallbackDoT }}</string>
             </dict>
             <key>PayloadDescription</key>
             <string>5GPN gateway fallback encrypted DNS profile</string>
             <key>PayloadDisplayName</key>
-            <string>{{ .DisplayName }} Fallback</string>
+            <string>{{ xml .DisplayName }} Fallback</string>
             <key>PayloadIdentifier</key>
-            <string>{{ .Identifier }}.fallback-payload</string>
+            <string>{{ xml .Identifier }}.fallback-payload</string>
             <key>PayloadType</key>
             <string>com.apple.dnsSettings.managed</string>
             <key>PayloadUUID</key>
-            <string>{{ .FallbackPayloadUUID }}</string>
+            <string>{{ xml .FallbackPayloadUUID }}</string>
             <key>PayloadVersion</key>
             <integer>1</integer>
         </dict>
 {{- end }}
     </array>
     <key>PayloadDisplayName</key>
-    <string>{{ .DisplayName }}</string>
+    <string>{{ xml .DisplayName }}</string>
     <key>PayloadIdentifier</key>
-    <string>{{ .Identifier }}</string>
+    <string>{{ xml .Identifier }}</string>
     <key>PayloadRemovalDisallowed</key>
     <false/>
     <key>PayloadType</key>
     <string>Configuration</string>
     <key>PayloadUUID</key>
-    <string>{{ .UUID }}</string>
+    <string>{{ xml .UUID }}</string>
     <key>PayloadVersion</key>
     <integer>1</integer>
 </dict>
@@ -148,7 +157,7 @@ func Render(p ProfileParams) ([]byte, error) {
 		return nil, errors.New("ios profile: FallbackPayloadUUID required when FallbackDoT is set")
 	}
 	if p.DisplayName == "" {
-		p.DisplayName = "5GPN DoT"
+		p.DisplayName = "5GPN Encrypted DNS"
 	}
 	if p.Identifier == "" {
 		p.Identifier = "com.5gpn.dot"
@@ -164,7 +173,7 @@ func Render(p ProfileParams) ([]byte, error) {
 // /ios-dot.mobileconfig. Matches the shape of the legacy www dir.
 func LandingHTML(displayName, downloadPath string) []byte {
 	if displayName == "" {
-		displayName = "5GPN DoT"
+		displayName = "5GPN Encrypted DNS"
 	}
 	if downloadPath == "" {
 		downloadPath = "/ios-dot.mobileconfig"
@@ -176,9 +185,9 @@ func LandingHTML(displayName, downloadPath string) []byte {
 <body style="font-family:-apple-system,BlinkMacSystemFont,sans-serif;padding:2rem;max-width:32rem;margin:auto;">
 <h1>%s</h1>
 <p>Tap the button below on your iPhone or iPad, then approve the profile in Settings.</p>
-<p><a style="display:inline-block;padding:0.75rem 1.25rem;background:#0a84ff;color:#fff;border-radius:0.5rem;text-decoration:none" href="%s">Install DoT profile</a></p>
+<p><a style="display:inline-block;padding:0.75rem 1.25rem;background:#0a84ff;color:#fff;border-radius:0.5rem;text-decoration:none" href="%s">Install encrypted DNS profile</a></p>
 </body></html>
-`, displayName, displayName, downloadPath))
+`, html.EscapeString(displayName), html.EscapeString(displayName), html.EscapeString(downloadPath)))
 }
 
 // WriteAsset is a small helper for materializing the mobileconfig into a

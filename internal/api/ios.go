@@ -37,18 +37,18 @@ func (s *Server) handleIOSProfileURL(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleIOSMobileconfig renders and serves the DoT profile on demand.
+// handleIOSMobileconfig renders and serves the encrypted-DNS profile on demand.
 // Public + unauthenticated: Apple's OTA install flow hits this URL
-// without any bearer token, and everything it discloses (the DoT server
+// without any bearer token, and everything it discloses (the DNS server
 // hostname) is already public via DNS.
 //
 // Gated behind settings.KeyFrontdoorIOSProfileEnabled (plan §4 Phase 8):
 // v0.2.9 let a device install this profile before the panel's own :853 DoT
 // listener was actually answering queries, which sent the phone's entire
 // DNS resolution into a black hole. The flag can only be set to true after
-// a passing preflight (see preflight.go's handleIOSProfileToggle), so a
-// 503 here means "the operator hasn't proven DoT works yet" rather than a
-// transient failure.
+// a passing local DoT preflight (see preflight.go's
+// handleIOSProfileToggle). That probe does not validate the primary DoH
+// URL from an Apple device, so it is only a narrow readiness gate.
 func (s *Server) handleIOSMobileconfig(w http.ResponseWriter, r *http.Request) {
 	if s.BaseConfig == nil {
 		writeError(w, http.StatusInternalServerError, "no_config", "server has no base config")
@@ -71,13 +71,18 @@ func (s *Server) handleIOSMobileconfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if !enabled {
 		writeError(w, http.StatusServiceUnavailable, "ios_profile_disabled",
-			"the iOS profile is disabled until a DoT preflight passes; enable via POST /api/v1/settings/ios/profile-enabled after running POST /api/v1/settings/ios/preflight")
+			"the iOS profile is disabled until the local DoT preflight passes; this gate does not validate the primary DoH device path")
 		return
 	}
 
 	fallbackDoT := defaultIOSFallbackDoT
 	if s.Settings != nil {
-		if v, err := s.Settings.GetString(r.Context(), settings.KeyFrontdoorFallbackDoT); err == nil && v != "" {
+		v, err := s.Settings.GetString(r.Context(), settings.KeyFrontdoorFallbackDoT)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "settings_error", err.Error())
+			return
+		}
+		if v != "" {
 			fallbackDoT = v
 		}
 	}

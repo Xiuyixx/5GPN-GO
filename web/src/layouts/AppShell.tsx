@@ -1,5 +1,5 @@
 import { useEffect, type ReactNode } from 'react';
-import { Link, useLocation, useNavigate } from 'react-router';
+import { useLocation, useNavigate } from 'react-router';
 import { useTranslation } from 'react-i18next';
 import {
   Sidebar,
@@ -140,5 +140,3 @@ export default function AppShell({ children }: Props) {
     </>
   );
 }
-
-export { Link };

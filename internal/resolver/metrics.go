@@ -2,9 +2,8 @@ package resolver
 
 import "sync/atomic"
 
-// Metrics holds lock-free counters for the resolver hot path. Exposed via
-// Snapshot() as a plain struct — no prometheus dependency yet, the panel's
-// /api/v1/metrics/dns endpoint (a later phase) will read from this.
+// Metrics holds lock-free counters for the resolver hot path. Snapshot is
+// consumed by the panel's /api/v1/metrics/dns endpoint.
 type Metrics struct {
 	queriesTotal     atomic.Int64
 	hitsBlock        atomic.Int64

@@ -1,11 +1,6 @@
-// Package updater checks GitHub Releases for a newer 5gpn binary,
-// downloads it with sha256 verification, and swaps it in blue-green
-// (write ".new", os.Rename over the running binary, systemctl restart).
-//
-// Runtime safety: Linux allows deleting an open executable; the running
-// daemon keeps the old file mapped until systemd restarts it. If the
-// new binary fails its 3-second health check the previous file is
-// restored from the ".prev" backup.
+// Package updater provides release checks plus download/swap primitives for
+// an external privileged updater. The panel API exposes release checks only;
+// it deliberately refuses daemon-side binary replacement.
 package updater
 
 import (
@@ -80,7 +75,7 @@ func (c *Client) Latest(ctx context.Context) (*Release, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("updater: latest release: %s: %s", resp.Status, string(body))
@@ -133,7 +128,7 @@ func (c *Client) Download(ctx context.Context, asset *Asset, dest, wantHex strin
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return 0, fmt.Errorf("updater: download %s: %s", asset.Name, resp.Status)
 	}
@@ -166,11 +161,8 @@ func (c *Client) Download(ctx context.Context, asset *Asset, dest, wantHex strin
 // Swap performs a blue-green replacement: back up current, install new,
 // restart systemd unit, health-check, roll back on failure.
 //
-// Callers that need to write an HTTP response BEFORE the daemon dies
-// (e.g. the panel's one-click upgrade) should pass Unit="" here so the
-// file swap runs synchronously without the blocking systemctl call, and
-// then invoke RestartService in a goroutine after the response has been
-// flushed to the client.
+// A privileged external caller may pass Unit="" to separate file replacement
+// from service restart. The panel does not invoke this primitive.
 type SwapOptions struct {
 	CurrentPath   string // path to the running binary
 	NewPath       string // path to the freshly downloaded binary
@@ -184,10 +176,12 @@ type SwapOptions struct {
 // --no-block so systemctl exits immediately after queuing the restart
 // with systemd, instead of blocking until the service has fully stopped
 // and started — which would deadlock when the caller IS the service.
-// On non-Linux hosts or an empty unit, this is a no-op.
 func RestartService(ctx context.Context, unit string) error {
-	if unit == "" || runtime.GOOS != "linux" {
-		return nil
+	if unit == "" {
+		return fmt.Errorf("updater: systemd unit required")
+	}
+	if runtime.GOOS != "linux" {
+		return fmt.Errorf("updater: systemd restart is unsupported on %s", runtime.GOOS)
 	}
 	return exec.CommandContext(ctx, "systemctl", "restart", "--no-block", unit).Run()
 }
@@ -239,7 +233,7 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
 	if err != nil {
 		return err

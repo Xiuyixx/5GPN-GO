@@ -27,14 +27,14 @@ ExecStart={{.BinaryPath}} --config {{.ConfigPath}} --data {{.DataDir}}
 Restart=on-failure
 RestartSec=3s
 TimeoutStopSec=15s
+UMask=0077
 
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
-# BinaryDir is included so panel-driven upgrades can rewrite the binary
-# in place (blue-green swap in internal/updater). Without it, ProtectSystem
-# would make /usr/local/bin read-only and one-click upgrade fails EROFS.
-ReadWritePaths={{.DataDir}} {{.ConfigDir}} {{.BinaryDir}}
+# Runtime state is the only installer-owned tree the daemon may mutate.
+# Config and binary updates require the privileged installer path.
+ReadWritePaths={{.DataDir}}
 PrivateTmp=yes
 # CAP_NET_ADMIN is needed by the DNS front-door's upstream socket to set
 # SO_MARK=0 so its DoT egress bypasses the pgw_exit nftables rules that
@@ -71,12 +71,12 @@ const DefaultConfigTemplate = `# 5GPN panel config — written by 5gpn-installer
 # validates and boots on first run. Change these before exposing the
 # panel to the internet:
 #   - server.domain: hostname the panel serves under (TLS SAN, iOS profile)
-#   - server.panel_bind: 0.0.0.0 accepts external, 127.0.0.1 tunnel-only
-#   - proxy.wa_shim.*: WA-shim listener; leave localhost-only unless used
+#   - server.panel_bind: keep 127.0.0.1 until TLS/ACME is configured
+#   - proxy.wa_shim.*: compatibility fields; v0.4.0 does not start WA-shim
 
 server:
   domain: "panel.local"
-  panel_bind: "0.0.0.0"
+  panel_bind: "127.0.0.1"
   panel_port: 8443
   tls:
     cert: ""
@@ -89,10 +89,8 @@ panel:
     lockout_minutes: 15
 
 proxy:
-  # WAShim mirrors 5GPN-X/wa-shim.py. Its fields carry required tags in
-  # the config schema, so we ship working localhost-only defaults; if
-  # you aren't routing WA traffic this listener is harmless (bound to
-  # 127.0.0.1 with a 127.0.0.1/32 allow-list).
+  # Compatibility fields required by the current schema. The v0.4.0 daemon
+  # does not start WA-shim; these values do not create a listener.
   wa_shim:
     listen: "127.0.0.1"
     port: 8447
@@ -107,7 +105,9 @@ tgbot:
   admin_chat_ids: []
 
 ios:
-  http_port: 8111
+  # Profiles are served by the panel HTTPS endpoint at
+  # /ios-dot.mobileconfig. The legacy plaintext listener is disabled.
+  http_port: 0
 `
 
 // Render fills UnitTemplate against the target Env.

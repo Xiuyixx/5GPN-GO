@@ -134,7 +134,7 @@ func TestDoTServesQueryOverTLS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tls.Dial: %v", err)
 	}
-	defer tlsConn.Close()
+	defer func() { _ = tlsConn.Close() }()
 
 	if got := tlsConn.ConnectionState().NegotiatedProtocol; got != "dot" {
 		t.Fatalf("ALPN negotiated protocol = %q, want %q", got, "dot")

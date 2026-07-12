@@ -22,6 +22,7 @@ import LanguageSwitcher from '../components/LanguageSwitcher';
 import ThemeSwitcher from '../components/ThemeSwitcher';
 import { api } from '../api/client';
 import type { PanelSettings, PanelSettingsUpdate } from '../api/client';
+import { isTGBotStepValid, parseAdminIds } from './wizard/validation';
 
 type Step = 'server' | 'tgbot' | 'review';
 
@@ -56,15 +57,6 @@ const DEFAULT_SERVER: DraftServer = {
 const TLS_STANDARD_PORTS = new Set<number>([80, 443]);
 
 const DEFAULT_TGBOT: DraftTGBot = { token: '', adminIdsText: '' };
-
-function parseAdminIds(raw: string): number[] {
-  return raw
-    .split(/[,\s]+/)
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .map((s) => Number(s))
-    .filter((n) => Number.isFinite(n) && n !== 0);
-}
 
 interface WizardProps {
   onDone?: () => Promise<void> | void;
@@ -139,8 +131,7 @@ export default function Wizard({ onDone }: WizardProps) {
 
   const tgbotStepValid = useMemo(() => {
     // Empty token is OK (skip). If a token is present, at least one admin id.
-    if (!tgbot.token.trim()) return true;
-    return parseAdminIds(tgbot.adminIdsText).length > 0;
+    return isTGBotStepValid(tgbot.token, tgbot.adminIdsText);
   }, [tgbot]);
 
   async function finish() {
@@ -263,7 +254,9 @@ export default function Wizard({ onDone }: WizardProps) {
             </div>
             <div className="flex items-center gap-2">
               {step === 'tgbot' && (
-                <Button plain onClick={() => setStep('review')}>{t('wizard.skip')}</Button>
+                <Button plain disabled={!tgbotStepValid} onClick={() => setStep('review')}>
+                  {t('wizard.skip')}
+                </Button>
               )}
               {step !== 'review' && (
                 <Button

@@ -2,26 +2,17 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/Xiuyixx/5GPN-Go/internal/orchestrator"
 	"github.com/Xiuyixx/5GPN-Go/internal/resolver"
 	"github.com/Xiuyixx/5GPN-Go/internal/rules"
 )
-
-// decodeBody is a goroutine-safe (no *testing.T) JSON decode helper for use
-// inside worker goroutines that can't call t.Fatal.
-func decodeBody(rr *httptest.ResponseRecorder) map[string]any {
-	var m map[string]any
-	_ = json.Unmarshal(rr.Body.Bytes(), &m)
-	return m
-}
 
 // waitTerminal blocks (bounded by a deadline) until applyStore entry id is
 // no longer "pending". rebuildAndPublish can return to its caller (via the
@@ -53,6 +44,34 @@ func applyBody(idSuffix, pattern string) map[string]any {
 	}
 }
 
+type observingOrch struct {
+	mu      sync.Mutex
+	req     orchestrator.ApplyRequest
+	applied chan struct{}
+	once    sync.Once
+}
+
+func newObservingOrch() *observingOrch {
+	return &observingOrch{applied: make(chan struct{})}
+}
+
+func (o *observingOrch) Apply(_ context.Context, req orchestrator.ApplyRequest) (orchestrator.ApplyResult, error) {
+	o.mu.Lock()
+	o.req = req
+	o.mu.Unlock()
+	o.once.Do(func() { close(o.applied) })
+	return orchestrator.ApplyResult{Health: "observing"}, nil
+}
+
+func (o *observingOrch) Rollback(context.Context, int64) error { return nil }
+
+func (o *observingOrch) confirm(srv *Server) {
+	o.mu.Lock()
+	req := o.req
+	o.mu.Unlock()
+	srv.Applier.OnHealth(context.Background(), req, orchestrator.ApplyResult{Health: "ok"})
+}
+
 // ------------------------------------------------------------------
 // 1. Fast path: build completes within the 100ms sync window -> 200.
 // ------------------------------------------------------------------
@@ -75,14 +94,8 @@ func TestApply_FastPathReturns200(t *testing.T) {
 // ------------------------------------------------------------------
 
 func TestApply_SlowPathReturns202AndPolls(t *testing.T) {
-	srv, token := bootstrapAndLogin(t, Config{Resolver: &resolver.Store{}})
-
-	orig := buildTableFn
-	buildTableFn = func(rs []rules.Rule) (*resolver.RuleTable, error) {
-		time.Sleep(200 * time.Millisecond)
-		return resolver.BuildTable(rs)
-	}
-	defer func() { buildTableFn = orig }()
+	orch := newObservingOrch()
+	srv, token := bootstrapAndLogin(t, Config{Resolver: &resolver.Store{}, Orchestrator: orch})
 
 	rr := authPost(t, srv, "/api/v1/rules/apply", token, applyBody("slow", "slow.example.com"))
 	if rr.Code != http.StatusAccepted {
@@ -103,6 +116,7 @@ func TestApply_SlowPathReturns202AndPolls(t *testing.T) {
 	if wantLoc := "/api/v1/applies/" + applyID; loc != wantLoc {
 		t.Fatalf("Location=%q want %q", loc, wantLoc)
 	}
+	orch.confirm(srv)
 
 	deadline := time.Now().Add(2 * time.Second)
 	var final map[string]any
@@ -187,85 +201,36 @@ func TestApply_SameHashCollapsesToOneBuild(t *testing.T) {
 }
 
 // ------------------------------------------------------------------
-// 4. Different-hash concurrent applies are serialized (not collapsed):
-//    both complete, 2 new applyStore entries, resolver generation +2.
+// 4. The health-observation period is a single-writer transaction. A
+//    second variation is rejected until the first one reaches terminal
+//    health, so DB and resolver state cannot be committed out of order.
 // ------------------------------------------------------------------
 
-func TestApply_DifferentHashSerialization(t *testing.T) {
-	srv, token := bootstrapAndLogin(t, Config{Resolver: &resolver.Store{}})
+func TestApply_RejectsSecondVariationWhileObserving(t *testing.T) {
+	orch := newObservingOrch()
+	srv, token := bootstrapAndLogin(t, Config{Resolver: &resolver.Store{}, Orchestrator: orch})
 
-	var calls int32
-	orig := buildTableFn
-	buildTableFn = func(rs []rules.Rule) (*resolver.RuleTable, error) {
-		atomic.AddInt32(&calls, 1)
-		time.Sleep(150 * time.Millisecond)
-		return resolver.BuildTable(rs)
+	first := authPost(t, srv, "/api/v1/rules/apply", token, applyBody("diffA", "diff-a.example.com"))
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first apply: want 202, got %d: %s", first.Code, first.Body.String())
 	}
 
-	var baseGen int64
-	if tbl := srv.Resolver.Load(); tbl != nil {
-		baseGen = tbl.Generation
-	}
-	baseEntries := len(srv.applyStore.List())
-
-	req1 := jsonReq(t, "POST", "/api/v1/rules/apply", applyBody("diffA", "diff-a.example.com"))
-	req1.Header.Set("Authorization", "Bearer "+token)
-	req2 := jsonReq(t, "POST", "/api/v1/rules/apply", applyBody("diffB", "diff-b.example.com"))
-	req2.Header.Set("Authorization", "Bearer "+token)
-
-	statuses := make([]int, 2)
-	bodies := make([]map[string]any, 2)
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		rr := httptest.NewRecorder()
-		srv.Router().ServeHTTP(rr, req1)
-		statuses[0] = rr.Code
-		bodies[0] = decodeBody(rr)
-	}()
-	go func() {
-		defer wg.Done()
-		rr := httptest.NewRecorder()
-		srv.Router().ServeHTTP(rr, req2)
-		statuses[1] = rr.Code
-		bodies[1] = decodeBody(rr)
-	}()
-	wg.Wait()
-
-	for i, code := range statuses {
-		if code != http.StatusOK && code != http.StatusAccepted {
-			t.Fatalf("request %d: unexpected status %d", i, code)
-		}
+	second := authPost(t, srv, "/api/v1/rules/apply", token, applyBody("diffB", "diff-b.example.com"))
+	if second.Code != http.StatusConflict {
+		t.Fatalf("second apply: want 409, got %d: %s", second.Code, second.Body.String())
 	}
 
-	// Fast-path (200) responses only return once their background
-	// goroutine has already fully finished (its "done" channel closed
-	// after buildTableFn returned), so no wait is needed for those. Slow
-	// (202) responses may still have a background goroutine reading
-	// buildTableFn — wait for those to go terminal before restoring it.
-	for i, code := range statuses {
-		if code == http.StatusAccepted {
-			if id, _ := bodies[i]["apply_id"].(string); id != "" {
-				waitTerminal(srv, id)
-			}
-		}
-	}
-	buildTableFn = orig
-
-	if got := atomic.LoadInt32(&calls); got != 2 {
-		t.Fatalf("want exactly 2 buildTableFn calls for different-hash concurrent applies, got %d", got)
-	}
-	if got := len(srv.applyStore.List()); got < baseEntries+2 {
-		t.Fatalf("want at least %d applyStore entries, got %d", baseEntries+2, got)
-	}
+	orch.confirm(srv)
 	tbl := srv.Resolver.Load()
-	if tbl == nil || tbl.Generation != baseGen+2 {
-		gotGen := int64(-1)
-		if tbl != nil {
-			gotGen = tbl.Generation
-		}
-		t.Fatalf("want resolver generation %d, got %d", baseGen+2, gotGen)
+	if tbl == nil {
+		t.Fatal("resolver table not published after confirmation")
+	}
+	entries := tbl.Entries()
+	if _, ok := entries["suffix:diff-a.example.com"]; !ok {
+		t.Fatalf("confirmed first variation is absent from resolver: %v", entries)
+	}
+	if _, ok := entries["suffix:diff-b.example.com"]; ok {
+		t.Fatalf("rejected second variation leaked into resolver: %v", entries)
 	}
 }
 
@@ -357,5 +322,49 @@ func TestRollback_RepublishesAndAppearsInApplies(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("expected a rollback-kind entry in applyStore after rollback")
+	}
+}
+
+func TestExitSwitchObservingReturnsCorrelatedApplyID(t *testing.T) {
+	orch := newObservingOrch()
+	srv, token := bootstrapAndLogin(t, Config{Orchestrator: orch})
+	rr := authPost(t, srv, "/api/v1/exits/add", token, map[string]any{
+		"id": "wg1", "uri": "trojan://pw@example.com:443?sni=fake.example.com",
+	})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("add exit: %d %s", rr.Code, rr.Body.String())
+	}
+	rr = authPost(t, srv, "/api/v1/exits/switch", token, map[string]any{"id": "wg1"})
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("observing switch: got %d %s, want 202", rr.Code, rr.Body.String())
+	}
+	response := decode[map[string]any](t, rr)
+	applyID, _ := response["apply_id"].(string)
+	if applyID == "" || response["status"] != "pending" {
+		t.Fatalf("switch response lacks correlated apply id: %v", response)
+	}
+	var auditResult string
+	if err := srv.DB.QueryRow(`SELECT result FROM audit_log WHERE action = 'exits.switch' ORDER BY id DESC LIMIT 1`).Scan(&auditResult); err != nil {
+		t.Fatalf("read switch audit: %v", err)
+	}
+	if auditResult != "observing" {
+		t.Fatalf("initial switch audit result = %q, want observing", auditResult)
+	}
+	rr = authPost(t, srv, "/api/v1/exits/delete", token, map[string]any{"id": "direct"})
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("delete rollback target while observing: got %d %s, want 409", rr.Code, rr.Body.String())
+	}
+	orch.confirm(srv)
+	entry, ok := srv.applyStore.Get(applyID)
+	if !ok {
+		t.Fatalf("apply %q not tracked", applyID)
+	}
+	entry = srv.refreshApplyEntry(entry)
+	if entry.Status != "succeeded" || entry.Kind != "exit_switch" {
+		t.Fatalf("terminal exit switch entry: %+v", entry)
+	}
+	rr = authPost(t, srv, "/api/v1/exits/delete", token, map[string]any{"id": "direct"})
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("delete prior exit after terminal state: got %d %s, want 204", rr.Code, rr.Body.String())
 	}
 }

@@ -30,19 +30,19 @@ type Sample struct {
 
 // Config controls the collector.
 type Config struct {
-	DB         *sql.DB
-	Interval   time.Duration // default 10s
-	Retention  time.Duration // default 24h
-	Logger     *slog.Logger
-	Iface      string        // network interface for tx/rx counters; auto-detect if empty
+	DB        *sql.DB
+	Interval  time.Duration // default 10s
+	Retention time.Duration // default 24h
+	Logger    *slog.Logger
+	Iface     string // network interface for tx/rx counters; auto-detect if empty
 }
 
 // Collector owns the sample loop and the SQLite ring.
 type Collector struct {
-	cfg      Config
-	log      *slog.Logger
-	prevCPU  cpuSnapshot
-	prevNet  netSnapshot
+	cfg     Config
+	log     *slog.Logger
+	prevCPU cpuSnapshot
+	prevNet netSnapshot
 }
 
 // New builds a Collector.
@@ -139,7 +139,7 @@ func ListRecent(db *sql.DB, limit int) ([]Sample, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	out := make([]Sample, 0, limit)
 	for rows.Next() {

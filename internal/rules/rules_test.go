@@ -1,6 +1,9 @@
 package rules
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func mustParse(t *testing.T, body string) *RuleSet {
 	t.Helper()
@@ -67,6 +70,52 @@ func TestParseYAMLRejectsDuplicateID(t *testing.T) {
     enabled: true`
 	if _, err := ParseYAML([]byte(body)); err == nil {
 		t.Fatal("expected duplicate-id error")
+	}
+}
+
+func TestRuleValidateRejectsUnsafeOrInvalidPatterns(t *testing.T) {
+	tests := []struct {
+		name string
+		rule Rule
+		want string
+	}{
+		{"invalid domain", Rule{ID: "r", Kind: KindDomain, Pattern: "bad..domain", Action: "direct"}, "invalid domain"},
+		{"comma injection", Rule{ID: "r", Kind: KindDomainSuffix, Pattern: "example.com,MATCH", Action: "direct"}, "delimiter"},
+		{"invalid cidr", Rule{ID: "r", Kind: KindIPCIDR, Pattern: "10.0.0.1", Action: "direct"}, "invalid CIDR"},
+		{"match pattern", Rule{ID: "r", Kind: KindMatch, Pattern: "ignored.example", Action: "direct"}, "must not have"},
+		{"action newline", Rule{ID: "r", Kind: KindDomainKeyword, Pattern: "tracker", Action: "direct\nMATCH,proxy"}, "action contains"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.rule.Validate()
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Validate error = %v, want substring %q", err, tt.want)
+			}
+		})
+	}
+
+	// Action is intentionally not restricted to a closed enum: exit IDs are
+	// valid mihomo policy targets as long as they cannot break the CSV line.
+	if err := (Rule{ID: "custom", Kind: KindDomain, Pattern: "example.com", Action: "my-exit"}).Validate(); err != nil {
+		t.Fatalf("custom exit action rejected: %v", err)
+	}
+}
+
+func TestRuleSetValidateRequiresMatchLastByPriority(t *testing.T) {
+	invalid := RuleSet{Rules: []Rule{
+		{ID: "match", Kind: KindMatch, Action: "proxy", Priority: 10},
+		{ID: "domain", Kind: KindDomain, Pattern: "example.com", Action: "direct", Priority: 20},
+	}}
+	if err := invalid.Validate(); err == nil || !strings.Contains(err.Error(), "MATCH rule must be last") {
+		t.Fatalf("Validate error = %v, want MATCH-last error", err)
+	}
+
+	valid := RuleSet{Rules: []Rule{
+		{ID: "domain", Kind: KindDomain, Pattern: "example.com", Action: "direct", Priority: 10},
+		{ID: "match", Kind: KindMatch, Action: "proxy", Priority: 10},
+	}}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("stable priority order with MATCH last rejected: %v", err)
 	}
 }
 
@@ -239,4 +288,3 @@ func TestToMihomoLine(t *testing.T) {
 		}
 	}
 }
-

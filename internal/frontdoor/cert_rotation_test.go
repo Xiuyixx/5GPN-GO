@@ -65,7 +65,7 @@ func TestCertRotationKeepsExistingDoTConnectionAlive(t *testing.T) {
 
 	// 1. Open a long-lived connection BEFORE rotation and confirm it works.
 	longLived := dial(t)
-	defer longLived.Close()
+	defer func() { _ = longLived.Close() }()
 	longLivedCo := &dns.Conn{Conn: longLived}
 	assertBlocked(t, longLivedCo)
 	preRotationFingerprint := fingerprint(longLived.ConnectionState())
@@ -87,7 +87,7 @@ func TestCertRotationKeepsExistingDoTConnectionAlive(t *testing.T) {
 
 	// 4. A NEW connection dialed after rotation must see the fresh cert.
 	fresh := dial(t)
-	defer fresh.Close()
+	defer func() { _ = fresh.Close() }()
 	freshCo := &dns.Conn{Conn: fresh}
 	assertBlocked(t, freshCo)
 

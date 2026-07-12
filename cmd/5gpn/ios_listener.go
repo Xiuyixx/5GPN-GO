@@ -67,7 +67,7 @@ func runIOSListener(ctx context.Context, port int, wwwDir string, logger *slog.L
 				wg.Add(1)
 				go func(c net.Conn) {
 					defer wg.Done()
-					defer c.Close()
+					defer func() { _ = c.Close() }()
 					if err := ios.ServeConn(c, wwwDir, routes, 10*time.Second); err != nil {
 						logger.Debug("ios: serve", "err", err)
 					}

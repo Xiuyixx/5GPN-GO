@@ -83,7 +83,7 @@ func runIOSPreflight(ctx context.Context, dotAddr string) preflightResult {
 		res.Error = fmt.Sprintf("dot handshake: %v", err)
 		return res
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	res.DotHandshake = true
 
 	if dl, ok := ctx.Deadline(); ok {
@@ -117,12 +117,14 @@ func runIOSPreflight(ctx context.Context, dotAddr string) preflightResult {
 // is only advanced on success, so it always reflects the last PASS, not
 // the last attempt. The error string is always written (cleared to "" on
 // success) so a later successful retry visibly clears a prior failure.
-func (s *Server) persistPreflightResult(ctx context.Context, res preflightResult) {
-	const actor = "system"
-	if res.OK {
-		_ = s.Settings.SetJSON(ctx, settings.KeyFrontdoorPreflightLastAt, res.CheckedAt.Unix(), actor)
+func (s *Server) persistPreflightResult(ctx context.Context, res preflightResult, actor string) error {
+	values := map[string]any{
+		settings.KeyFrontdoorPreflightLastError: res.Error,
 	}
-	_ = s.Settings.SetString(ctx, settings.KeyFrontdoorPreflightLastError, res.Error, actor)
+	if res.OK {
+		values[settings.KeyFrontdoorPreflightLastAt] = res.CheckedAt.Unix()
+	}
+	return s.Settings.SetMany(ctx, values, actor)
 }
 
 // handleIOSPreflight runs the DoT preflight check on demand (e.g. a "Run
@@ -135,7 +137,10 @@ func (s *Server) handleIOSPreflight(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res := runIOSPreflight(r.Context(), defaultIOSPreflightDoTAddr)
-	s.persistPreflightResult(r.Context(), res)
+	if err := s.persistPreflightResult(r.Context(), res, actorFromCtx(r)); err != nil {
+		writeError(w, http.StatusInternalServerError, "write_error", err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, res)
 }
 
@@ -159,6 +164,8 @@ func (s *Server) handleIOSProfileToggle(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
+	s.settingsMu.Lock()
+	defer s.settingsMu.Unlock()
 	actor := actorFromCtx(r)
 	ctx := r.Context()
 
@@ -172,8 +179,11 @@ func (s *Server) handleIOSProfileToggle(w http.ResponseWriter, r *http.Request) 
 	}
 
 	res := runIOSPreflight(ctx, defaultIOSPreflightDoTAddr)
-	s.persistPreflightResult(ctx, res)
 	if !res.OK {
+		if err := s.persistPreflightResult(ctx, res, actor); err != nil {
+			writeError(w, http.StatusInternalServerError, "write_error", err.Error())
+			return
+		}
 		reason := res.Error
 		if reason == "" {
 			reason = "preflight failed"
@@ -181,7 +191,11 @@ func (s *Server) handleIOSProfileToggle(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "preflight_failed", reason)
 		return
 	}
-	if err := s.Settings.SetBool(ctx, settings.KeyFrontdoorIOSProfileEnabled, true, actor); err != nil {
+	if err := s.Settings.SetMany(ctx, map[string]any{
+		settings.KeyFrontdoorPreflightLastAt:    res.CheckedAt.Unix(),
+		settings.KeyFrontdoorPreflightLastError: res.Error,
+		settings.KeyFrontdoorIOSProfileEnabled:  true,
+	}, actor); err != nil {
 		writeError(w, http.StatusInternalServerError, "write_error", err.Error())
 		return
 	}

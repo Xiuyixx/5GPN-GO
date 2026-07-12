@@ -186,3 +186,22 @@ func TestValidateCIDRs(t *testing.T) {
 		t.Fatalf("empty list should be a no-op, got %v", err)
 	}
 }
+
+func TestConfigurePublishesOneValidatedSnapshot(t *testing.T) {
+	g, err := NewGate(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Configure(true, "172.22.0.0/16"); err != nil {
+		t.Fatal(err)
+	}
+	if !g.Enabled() || !g.Allow(tcp("172.22.1.1")) || g.Allow(tcp("10.0.0.1")) {
+		t.Fatal("configured policy was not published atomically")
+	}
+	if err := g.Configure(true, "bad-cidr"); err == nil {
+		t.Fatal("invalid Configure accepted")
+	}
+	if !g.Allow(tcp("172.22.1.1")) || g.Allow(tcp("10.0.0.1")) {
+		t.Fatal("invalid Configure changed the prior snapshot")
+	}
+}

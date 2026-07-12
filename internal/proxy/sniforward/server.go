@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Xiuyixx/5GPN-Go/internal/access"
+	"github.com/Xiuyixx/5GPN-Go/internal/netguard"
 )
 
 // Config controls a Server instance. Zero values are usable for the
@@ -235,13 +236,12 @@ func (s *Server) handleConn(clientConn net.Conn) {
 	dialCtx, cancel := context.WithTimeout(context.Background(), s.cfg.DialTimeout)
 	defer cancel()
 
-	var d net.Dialer
-	upstreamConn, err := d.DialContext(dialCtx, "tcp", upstream)
+	upstreamConn, err := s.dialUpstream(dialCtx, upstream, isLocal)
 	if err != nil {
 		s.logger.Warn("sniforward: dial upstream", "upstream", upstream, "sni", sni, "error", err)
 		return
 	}
-	defer upstreamConn.Close()
+	defer func() { _ = upstreamConn.Close() }()
 
 	// Replay the peeked record to the upstream. This must happen
 	// before the client's post-handshake data is copied, or the TLS
@@ -257,6 +257,14 @@ func (s *Server) handleConn(clientConn net.Conn) {
 	// Copy in both directions; close both sides when either half
 	// finishes so half-open TIME_WAIT accumulation is bounded.
 	pipe(clientConn, upstreamConn)
+}
+
+func (s *Server) dialUpstream(ctx context.Context, upstream string, isLocal bool) (net.Conn, error) {
+	dialer := &net.Dialer{}
+	if isLocal {
+		return dialer.DialContext(ctx, "tcp", upstream)
+	}
+	return netguard.DialPublicContext(ctx, nil, dialer, "tcp", upstream)
 }
 
 // selectUpstream picks the dial target from an SNI. Panel-matching
